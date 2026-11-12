@@ -31,12 +31,12 @@ Live CPU, memory, per-core load and the busiest workspaces for this computer and
 </p>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="media/readme/hero-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="media/readme/hero-light.png">
-  <img src="media/readme/hero-dark.png" width="830" alt="The Fleet Monitor overview with five sample machines and their health, CPU and memory, beside one machine's detail: CPU and memory charts, per-core load, the busiest workspaces and system facts.">
+  <source media="(prefers-color-scheme: dark)" srcset="media/readme/hero-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="media/readme/hero-light.svg">
+  <img src="media/readme/hero-dark.png" width="830" alt="The Fleet Monitor panel, animated: the overview with five sample machines and their health, CPU and memory, beside one machine's detail with CPU and memory charts, per-core load, the busiest workspaces and system facts. The charts advance, a reading arrives every two seconds, and one machine goes from strained to OK to busy and back.">
 </picture>
 
-<p><sub>The overview, and one machine's detail. Every image on this page is the real panel showing invented sample data.</sub></p>
+<p><sub>The overview, and one machine's detail, redrawn from the real panel and animated. Every image on this page shows invented sample data.</sub></p>
 
 </div>
 
