@@ -1,0 +1,117 @@
+/* Placeholder styles. Colours come only from Orca's frame variables (--orca-*). */
+:root {
+  color-scheme: light dark;
+}
+body {
+  margin: 0;
+  padding: 10px;
+  font: 12px/1.4 system-ui, sans-serif;
+  color: var(--orca-foreground);
+  background: var(--orca-background);
+}
+.muted {
+  color: var(--orca-muted-foreground);
+}
+.error {
+  color: var(--orca-destructive);
+}
+.machine {
+  border: 1px solid var(--orca-border);
+  border-radius: var(--orca-radius, 6px);
+  background: var(--orca-card);
+  color: var(--orca-card-foreground);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.machine.is-offline {
+  opacity: 0.6;
+}
+.machine.level-strained,
+.machine.level-critical {
+  border-color: var(--orca-destructive);
+}
+header {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.name {
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badge {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--orca-secondary);
+  color: var(--orca-secondary-foreground);
+}
+.level-busy .health {
+  background: var(--orca-primary);
+  color: var(--orca-primary-foreground);
+}
+.level-strained .health,
+.level-critical .health {
+  background: var(--orca-destructive);
+  color: var(--orca-destructive-foreground);
+}
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 6px 0;
+}
+dt {
+  color: var(--orca-muted-foreground);
+}
+dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cores {
+  display: flex;
+  gap: 2px;
+  height: 18px;
+  align-items: flex-end;
+  margin: 4px 0;
+}
+.core {
+  flex: 1;
+  height: calc(var(--v) * 1%);
+  min-height: 1px;
+  background: var(--orca-primary);
+}
+.sparks {
+  display: grid;
+  gap: 2px;
+}
+.spark {
+  width: 100%;
+  height: 28px;
+  background: var(--orca-muted);
+}
+.spark polyline {
+  fill: none;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.spark-cpu polyline {
+  stroke: var(--orca-primary);
+}
+.spark-mem polyline {
+  stroke: var(--orca-accent-foreground);
+}
+.ws ol {
+  margin: 2px 0 4px;
+  padding-left: 18px;
+}
+.label {
+  color: var(--orca-muted-foreground);
+  margin-top: 4px;
+}
+footer {
+  margin-top: 4px;
+}

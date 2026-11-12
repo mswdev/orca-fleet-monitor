@@ -1,0 +1,64 @@
+{
+  "id": "req-0001",
+  "ok": true,
+  "result": {
+    "app": {
+      "main": { "cpu": 1.5, "memory": 210000000 },
+      "renderer": { "cpu": 3.25, "memory": 480000000 },
+      "other": { "cpu": 0.25, "memory": 90000000 },
+      "cpu": 5,
+      "memory": 780000000,
+      "history": [770000000, 775000000, 780000000]
+    },
+    "worktrees": [
+      {
+        "worktreeId": "wt-alpha",
+        "worktreeName": "feature-alpha",
+        "repoId": "repo-1",
+        "repoName": "demo-app",
+        "cpu": 140,
+        "memory": 900000000,
+        "sessions": [
+          { "sessionId": "s-1", "paneKey": "tab-1:pane-1", "pid": 4101, "cpu": 120, "memory": 700000000 },
+          { "sessionId": "s-2", "paneKey": "tab-1:pane-2", "pid": 4102, "cpu": 20, "memory": 200000000 }
+        ],
+        "history": [880000000, 890000000, 900000000]
+      },
+      {
+        "worktreeId": "wt-beta",
+        "worktreeName": "bugfix-beta",
+        "repoId": "repo-1",
+        "repoName": "demo-app",
+        "cpu": 12,
+        "memory": 2400000000,
+        "sessions": [{ "sessionId": "s-3", "paneKey": null, "pid": 4103, "cpu": 12, "memory": 2400000000 }],
+        "history": []
+      },
+      {
+        "worktreeId": "wt-gamma",
+        "worktreeName": "docs-gamma",
+        "repoId": "repo-2",
+        "repoName": "sample-docs",
+        "cpu": 0,
+        "memory": 0,
+        "sessions": [],
+        "history": []
+      }
+    ],
+    "host": {
+      "totalMemory": 34359738368,
+      "freeMemory": 1073741824,
+      "availableMemory": 17179869184,
+      "availableMemorySource": "memory-pressure",
+      "usedMemory": 17179869184,
+      "memoryUsagePercent": 50,
+      "cpuCoreCount": 8,
+      "loadAverage1m": 6
+    },
+    "processMemoryMetric": "footprint",
+    "totalCpu": 157,
+    "totalMemory": 4080000000,
+    "collectedAt": 1800000000000
+  },
+  "_meta": { "runtimeId": "rt-remote-0001" }
+}

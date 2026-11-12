@@ -1,0 +1,40 @@
+{
+  "id": "local",
+  "ok": true,
+  "result": {
+    "environments": [
+      {
+        "id": "env-0001",
+        "name": "Build Box",
+        "createdAt": 1700000000000,
+        "updatedAt": 1700000000000,
+        "pairingRevision": 1,
+        "pairedDeviceId": "dev-0001",
+        "lastUsedAt": 1700000000000,
+        "runtimeId": "rt-remote-0001",
+        "endpoints": [{ "id": "ep-1", "kind": "websocket", "label": "LAN", "endpoint": "ws://example.invalid:6768" }],
+        "preferredEndpointId": "ep-1"
+      },
+      {
+        "id": "env-0002",
+        "name": "Render Node",
+        "runtimeId": "rt-remote-0002",
+        "endpoints": []
+      },
+      {
+        "id": "env-0003",
+        "name": "Build Box (paired twice)",
+        "runtimeId": "rt-remote-0001",
+        "endpoints": []
+      },
+      {
+        "id": "env-0004",
+        "name": "This desktop, paired to itself",
+        "runtimeId": "rt-local-0000",
+        "endpoints": []
+      },
+      { "name": "no id" }
+    ]
+  },
+  "_meta": { "runtimeId": "local" }
+}

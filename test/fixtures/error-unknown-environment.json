@@ -1,0 +1,10 @@
+{
+  "id": "local",
+  "ok": false,
+  "error": {
+    "code": "invalid_argument",
+    "message": "Unknown Orca server in --environment env-9999: no paired Orca server is named or has id env-9999.",
+    "data": { "knownEnvironments": [{ "id": "env-0001", "name": "Build Box" }] }
+  },
+  "_meta": { "runtimeId": null }
+}

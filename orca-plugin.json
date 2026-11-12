@@ -1,0 +1,119 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "id": "fleet-monitor",
+  "name": "Fleet Monitor",
+  "version": "0.1.0",
+  "description": "Live CPU, memory, load and the busiest workspaces for this computer and every paired Orca server, in one sidebar panel.",
+  "author": { "name": "mswdev" },
+  "repository": "https://github.com/mswdev/orca-fleet-monitor",
+  "license": "MIT",
+  "engines": { "orca": ">=1.4.248" },
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "fleet",
+        "title": "Fleet Monitor",
+        "icon": "gauge",
+        "entry": "panel/index.html",
+        "ui": "html"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "fleet",
+        "text": "Fleet",
+        "icon": "gauge",
+        "tooltip": "Fleet Monitor"
+      }
+    ],
+    "settings": [
+      {
+        "key": "fastIntervalSeconds",
+        "title": "Fast interval (seconds)",
+        "description": "How often machines are read while a Fleet Monitor panel is open.",
+        "type": "integer",
+        "default": 5,
+        "minimum": 2,
+        "maximum": 60
+      },
+      {
+        "key": "slowIntervalSeconds",
+        "title": "Slow interval (seconds)",
+        "description": "How often machines are read for the status bar while no panel is open.",
+        "type": "integer",
+        "default": 60,
+        "minimum": 15,
+        "maximum": 3600
+      },
+      {
+        "key": "cpuBusyPercent",
+        "title": "CPU busy at (%)",
+        "type": "integer",
+        "default": 70,
+        "minimum": 1,
+        "maximum": 100
+      },
+      {
+        "key": "cpuStrainedPercent",
+        "title": "CPU strained at (%)",
+        "type": "integer",
+        "default": 85,
+        "minimum": 1,
+        "maximum": 100
+      },
+      {
+        "key": "cpuCriticalPercent",
+        "title": "CPU critical at (%)",
+        "type": "integer",
+        "default": 95,
+        "minimum": 1,
+        "maximum": 100
+      },
+      {
+        "key": "memoryBusyPercent",
+        "title": "Memory busy at (%)",
+        "type": "integer",
+        "default": 75,
+        "minimum": 1,
+        "maximum": 100
+      },
+      {
+        "key": "memoryStrainedPercent",
+        "title": "Memory strained at (%)",
+        "type": "integer",
+        "default": 88,
+        "minimum": 1,
+        "maximum": 100
+      },
+      {
+        "key": "memoryCriticalPercent",
+        "title": "Memory critical at (%)",
+        "type": "integer",
+        "default": 95,
+        "minimum": 1,
+        "maximum": 100
+      },
+      {
+        "key": "cliPath",
+        "title": "Orca CLI path",
+        "description": "Leave empty to find the CLI that ships with this Orca.",
+        "type": "string",
+        "default": "",
+        "maxLength": 1024,
+        "placeholder": "Auto-detect"
+      },
+      {
+        "key": "beacon",
+        "title": "Publish this machine's readings",
+        "description": "Write a short reading to this plugin's log every 5 seconds, so a paired desktop can show per-core CPU for this machine.",
+        "type": "boolean",
+        "default": true
+      }
+    ]
+  },
+  "capabilities": [{ "kind": "settings:own" }]
+}

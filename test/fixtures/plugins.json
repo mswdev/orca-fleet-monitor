@@ -1,0 +1,39 @@
+{
+  "ok": true,
+  "result": {
+    "plugins": [
+      {
+        "pluginKey": "examplevendor.some-theme",
+        "name": "Some Theme",
+        "publisher": "examplevendor",
+        "status": "idle",
+        "isDev": false,
+        "hasWorker": false
+      },
+      {
+        "pluginKey": "example-owner.fleet-monitor",
+        "name": "Fleet Monitor",
+        "publisher": "example-owner",
+        "status": "idle",
+        "isDev": false,
+        "hasWorker": true
+      },
+      {
+        "pluginKey": "local.fleet-monitor",
+        "name": "Fleet Monitor",
+        "publisher": "local",
+        "status": "running",
+        "isDev": true,
+        "hasWorker": true
+      },
+      {
+        "pluginKey": "someone.fleet-monitor-extra",
+        "name": "Not this one",
+        "publisher": "someone",
+        "status": "running",
+        "isDev": false,
+        "hasWorker": true
+      }
+    ]
+  }
+}
