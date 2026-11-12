@@ -55,4 +55,49 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run validate
-      - run: npm test
+      # `orca plugin test .` under c8 (config in package.json): src/ and panel/, without the
+      # type-only src/model.ts and src/protocol.ts and the panel entry point panel/main.mjs.
+      - run: npm run test:coverage
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-summary
+          path: coverage/coverage-summary.json
+
+  # Publishes main's coverage totals to the `badges` branch, where the README badge reads
+  # `total.lines.pct` through a shields.io dynamic JSON badge. The first run creates the branch.
+  coverage-badge:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push to the badges branch
+    concurrency:
+      group: coverage-badge
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-summary
+          path: ${{ runner.temp }}/coverage
+      - name: Commit the totals if they changed
+        run: |
+          if git ls-remote --exit-code --heads origin badges >/dev/null; then
+            git fetch --depth=1 origin badges
+            git checkout -B badges FETCH_HEAD
+          else
+            status=$?
+            [ "$status" -eq 2 ] || exit "$status" # 2: no such branch yet
+            git checkout --orphan badges
+            git rm -rf --quiet .
+          fi
+          # Keep only the totals so per-file churn doesn't create badge commits.
+          jq '{total: .total}' "$RUNNER_TEMP/coverage/coverage-summary.json" > coverage-summary.json
+          git add coverage-summary.json
+          if git rev-parse -q --verify HEAD >/dev/null && git diff --cached --quiet; then
+            echo "Coverage unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Coverage for ${GITHUB_SHA::7}"
+          git push origin HEAD:badges

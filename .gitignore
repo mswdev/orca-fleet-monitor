@@ -1,3 +1,4 @@
 node_modules/
 .orca/
 package-lock.json
+coverage/

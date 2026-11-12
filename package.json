@@ -1,17 +1,25 @@
 {
   "name": "orca-fleet-monitor",
   "private": true,
-  "description": "Development tooling only (type-checking). Orca runs the plugin straight from its source and installs nothing from here.",
+  "description": "Development tooling only (type-checking, test coverage). Orca runs the plugin straight from its source and installs nothing from here.",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "typecheck": "orca plugin types . && node node_modules/typescript/bin/tsc --noEmit -p .",
     "test": "orca plugin test .",
+    "test:coverage": "node node_modules/c8/bin/c8.js orca plugin test .",
     "validate": "orca plugin validate .",
     "preview": "node tools/preview-server.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "c8": "12.0.0",
     "typescript": "6.0.3"
+  },
+  "c8": {
+    "all": true,
+    "include": ["src/**", "panel/**"],
+    "exclude": ["**/*.d.mts", "src/model.ts", "src/protocol.ts", "panel/main.mjs"],
+    "reporter": ["text", "json-summary"]
   }
 }
