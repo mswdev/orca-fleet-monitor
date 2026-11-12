@@ -127,11 +127,11 @@ If a machine stays at basic after you install Fleet Monitor on it, its detail sc
 
 What a machine reports about memory depends on its level.
 
-A Mac running Fleet Monitor reports real RAM usage. The figure is computed the way Activity Monitor computes Memory Used, and on a 64 GB Mac the two agreed to within 0.02 GB. With it come app memory, wired memory, compressed memory, cached files, swap used, and the kernel's memory pressure level, which is normal, warning or critical.
+A Mac running Fleet Monitor reports real RAM usage. The figure is computed the way Activity Monitor computes Memory Used. In a five-minute side-by-side check on a 64 GB Mac, the two differed by 0.1 GB on average, and swap used matched exactly. With it come app memory, wired memory, compressed memory, cached files, swap used, and the kernel's memory pressure level, which is normal, warning or critical.
 
 A machine without Fleet Monitor reports only Orca's memory-pressure percentage. The panel labels that figure "memory pressure", because it does not measure memory used.
 
-The memory level is there to warn you before a machine locks up. Kernel pressure at warning makes a machine Strained, and at critical makes it Critical. RAM used above a threshold you can change, 90% by default, makes it Busy. Swap activity counts as well.
+The memory level is there to warn you before a machine locks up. Kernel pressure at warning makes a machine Strained, and at critical makes it Critical. RAM used above a threshold you can change, 90% by default, makes it Busy. Memory pressure has its own thresholds (75, 88 and 95% by default), and sustained swapping counts as well.
 
 When a machine's memory reaches Strained or Critical, Fleet Monitor sends a desktop notification. A setting turns the notifications off.
 
@@ -174,8 +174,9 @@ On a Linux desktop, type `orca-ide` where these commands say `orca`.
 | Fast interval | 5 s | How often machines are read while a Fleet Monitor panel is open. 2 to 60 seconds. |
 | Slow interval | 60 s | How often they are read for the status bar while no panel is open. 15 seconds to 1 hour. |
 | CPU busy, strained, critical at | 70,&nbsp;85,&nbsp;95&nbsp;% | The thresholds for the CPU level. |
-| RAM used, busy at | 90&nbsp;% | A machine whose RAM used passes this counts as Busy. [Memory](#memory) has the other memory rules. |
-| Memory notifications | On | Sends a desktop notification when a machine's memory reaches Strained or Critical. |
+| Memory busy, strained, critical at | 75,&nbsp;88,&nbsp;95&nbsp;% | The thresholds for memory pressure, the share of memory the system no longer has available. |
+| RAM used busy at | 90&nbsp;% | A machine whose RAM used passes this counts as Busy. [Memory](#memory) has the other memory rules. |
+| Alert when memory runs short | On | Sends a desktop notification when a machine's memory reaches Strained or Critical. |
 | Orca CLI path | Empty | Leave it empty to find the CLI that ships with this Orca. |
 | Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. |
 | Monitor in the background | On | Reads machines on the slow interval while no panel is open, to keep the status bar current. |
@@ -193,7 +194,7 @@ On a server that has Fleet Monitor only so that a desktop can show it at the ful
 
 Reading a machine means running the Orca CLI, one short-lived process per read. Each takes a few tenths of a second, most of it start-up.
 
-- Fleet Monitor reads machines every 5 seconds only while a panel is open. Otherwise it reads them every 60 seconds, or not at all with background monitoring off.
+- Fleet Monitor reads machines every 5 seconds only while a panel is open. Otherwise it reads them every 60 seconds, or not at all with background monitoring off. A machine whose memory is Strained or Critical is read about every 15 seconds until it recovers.
 - While a panel is open, the diagnostics call for a full machine, and for this computer, runs every 15 seconds instead of every 5.
 - At most two reads run at once. A machine that fails to answer moves to two slots of its own, so it can hold up the others for one call at most, until the 15-second timeout.
 - Fleet Monitor retries an unreachable machine with a growing delay, up to 5 minutes.
@@ -217,7 +218,7 @@ Fleet Monitor is a full-access (`trusted-worker`) plugin: its worker runs as a N
 - It asks for two capabilities: `settings:own`, and `notifications:show` for the memory notification. It adds one panel, one status bar item and one command, **Show Fleet Monitor**.
 - It runs these Orca CLI commands, all read-only: `environment list`, `host list`, `diagnostics memory`, `plugin list` and `plugin logs`. The last three also run against paired servers.
 - It runs `plugin open` on this machine when you click the status bar item.
-- On macOS it runs `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. On Windows it runs `taskkill` to end a CLI call that timed out.
+- On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. On Windows it runs `taskkill` to end a CLI call that timed out.
 
 </details>
 
