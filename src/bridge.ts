@@ -15,7 +15,7 @@
 // detail, and last by leaving out machines (counted in `omitted`).
 import { clipText, plainJson } from './bounds.ts'
 import { DEFAULT_HEALTH } from './health.ts'
-import { downsample, toColumns, HISTORY_WINDOW_MS } from './history.ts'
+import { coreColumns, downsample, toColumns, HISTORY_WINDOW_MS } from './history.ts'
 import type {
   CliInfo,
   FleetMode,
@@ -194,7 +194,11 @@ export class PanelBridge {
       ...(omitted > 0 ? { omitted } : {}),
       ...(lean ? { lean: true as const } : {})
     })
-    // 1. History thinned by halves until it fits.
+    // 1. Everything, if it fits; else without the 1.2 history columns (network, disk, GPU and
+    //    battery), which are the first to go; then history thinned by halves until it fits.
+    const whole = build(machines.map((m) => ({ ...m.state, history: m.history })))
+    if (fits(whole)) return whole
+    for (const m of machines) m.history = coreColumns(m.history)
     for (let step = 1; step <= 1_024; step *= 2) {
       const snapshot = build(machines.map((m) => ({ ...m.state, history: downsample(m.history, step) })))
       if (fits(snapshot)) return snapshot

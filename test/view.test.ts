@@ -445,7 +445,7 @@ describe('memory (1.1)', () => {
     assert.equal(text($(section, 'h2')!), 'Memory pressure')
     // The install row says what installing adds; the note beside the figure does not repeat it.
     assert.equal(text($(section, '[data-key="pressure-note"]')!), 'Memory pressure as Orca reads it, not RAM in use.')
-    assert.equal(text($(v.root, '.fm-install-text')!), 'Install Fleet Monitor on this machine for real RAM usage, swap and pressure')
+    assert.equal(text($(v.root, '.fm-install-text')!), 'Install Fleet Monitor on this machine for real RAM usage, activity and processes')
     assert.equal($(section, '[data-key="mem-facts"]'), null)
     assert.ok(!/\bused\b/i.test(text(section).replace('not RAM in use', '')))
     // Not known yet whether Fleet Monitor is there (no install row): the note says it instead.

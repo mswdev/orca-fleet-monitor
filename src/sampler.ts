@@ -5,7 +5,7 @@
 import os from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { groupsFit } from './core-groups.ts'
-import type { CoreGroup, LocalSample, MacMemory } from './model.ts'
+import type { CoreGroup, LocalSample, MacMemory, MacSystem } from './model.ts'
 
 /** A Mac memory reading older than this (two sample intervals and a bit) is not attached. Until
  *  then, a sample whose own read failed carries the last one, marked with its age, so one failed
@@ -17,6 +17,9 @@ export const PREPARE_DEADLINE_MS = 2_750
 
 /** Reads a Mac's memory; src/mac-memory.ts's MacMemoryReader. */
 export type MemoryReader = { read(): Promise<MacMemory | null> }
+/** Reads a Mac's network, disk, GPU and battery; src/mac-system.ts's MacSystemReader. `refresh`
+ *  runs what is due, `snapshot` gives what is known now with its ages. */
+export type SystemReader = { refresh(): Promise<void>; snapshot(): MacSystem | null }
 
 export type CpuTimes = { user: number; nice: number; sys: number; idle: number; irq: number }
 export type CpuInfo = { model: string; times: CpuTimes }
@@ -99,6 +102,7 @@ export function clampPercent(value: number): number {
 export class LocalSampler {
   private readonly source: OsSource
   private readonly memory: MemoryReader | null
+  private readonly system: SystemReader | null
   private readonly mono: () => number
   private readonly later: (fn: () => void, ms: number) => unknown
   private readonly cancel: (handle: unknown) => void
@@ -112,15 +116,18 @@ export class LocalSampler {
   private generation = 0
 
   /** `memory` reads a Mac's memory (null elsewhere); `mono` is a monotonic clock in ms; `timers`
-   *  are for the read's deadline (test seams). */
+   *  are for the read's deadline (test seams); `system` reads a Mac's network, disk, GPU and
+   *  battery (null elsewhere), started with each prepare() but never waited for. */
   constructor(
     source: OsSource = realOs,
     memory: MemoryReader | null = null,
     mono: () => number = () => performance.now(),
-    timers: { setTimeout?: (fn: () => void, ms: number) => unknown; clearTimeout?: (handle: unknown) => void } = {}
+    timers: { setTimeout?: (fn: () => void, ms: number) => unknown; clearTimeout?: (handle: unknown) => void } = {},
+    system: SystemReader | null = null
   ) {
     this.source = source
     this.memory = memory
+    this.system = system
     this.mono = mono
     this.later = timers.setTimeout ?? ((fn, ms) => setTimeout(fn, ms).unref?.())
     this.cancel = timers.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
@@ -136,6 +143,10 @@ export class LocalSampler {
    *  it is given up on (what it answers later is dropped) and the next call starts a fresh one. A
    *  failed read keeps the last good reading for `sample()` to carry. Never rejects. */
   prepare(): Promise<void> {
+    // The optional reads (network, disk, GPU, battery) run on their own: the memory reading, and
+    // so the beacon and this computer's alerts, never wait for them. sample() takes what they
+    // last read, with its age.
+    if (this.system) void this.system.refresh().catch(() => undefined)
     if (!this.memory) return Promise.resolve()
     // A read older than the deadline on this sampler's own clock is given up on here too, should
     // its timer not have fired (a host that froze timers, say).
@@ -214,6 +225,15 @@ export class LocalSampler {
         const carried = Math.round(age)
         sample.macMemory = { ...mac.value, ageMs: (mac.value.ageMs ?? 0) + carried, pressureAgeMs: (mac.value.pressureAgeMs ?? 0) + carried }
       }
+    }
+    if (this.system) {
+      let system: MacSystem | null = null
+      try {
+        system = this.system.snapshot()
+      } catch {
+        system = null
+      }
+      if (system) sample.system = system
     }
     this.last = sample
     return sample

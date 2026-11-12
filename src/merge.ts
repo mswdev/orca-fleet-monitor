@@ -9,7 +9,10 @@ import type {
   LocalSample,
   LostReading,
   MacMemory,
-  MachineState
+  MacSystem,
+  MachineState,
+  ProcessAvailability,
+  TopProcess
 } from './model.ts'
 import { topWorkspaces } from './parse.ts'
 import { clampPercent } from './sampler.ts'
@@ -33,6 +36,8 @@ export type MergeInput = {
     ageMs: number | null
     pluginKey: string | null
     remotePlugin: BeaconState['remotePlugin']
+    /** Its log has been read at least once (so a missing beacon is missing, not unread). */
+    logRead?: boolean
     /** A Mac reading from one of the last two beacons, marked with its age, shown when the newest
      *  fresh beacon has none (a 1.1 build that drops it on a failed read). Display only. */
     carriedMac?: MacMemory | null
@@ -46,6 +51,43 @@ export type MergeInput = {
   /** This computer's platform, which is known before its first sample (only for the local
    *  machine), so it is tagged "This Mac" or "This PC" from the first answer on. */
   platform?: string | null
+  /** The newest process list, when one has been read: when it was taken (worker clock). A
+   *  remote's top list, or this computer's own. */
+  processLine?: { takenAt: number | null } | null
+  /** The process using the most memory, last known, and when its memory figure was read (worker
+   *  clock): kept through pauses, apart from any list (src/poller.ts, src/monitor.ts). */
+  lastLargest?: { largest: TopProcess; at: number } | null
+}
+
+/** A last-known largest process older than this is no longer shown. */
+export const LARGEST_MAX_AGE_MS = 15 * 60_000
+
+/** What `fleet.processes` can give for a machine as merged. */
+export function processAvailability(input: Pick<MergeInput, 'kind' | 'status' | 'local' | 'platform' | 'processLine' | 'beacon' | 'lastLargest'> & { now?: number }, fresh: BeaconRecord | null): ProcessAvailability {
+  // The last-known largest process rides on every state, with its age, until it is too old: a
+  // machine running out of memory pauses its sampling, or stops answering, just when it matters.
+  const known = input.lastLargest ?? null
+  const now = input.now ?? 0
+  const age = known ? now - known.at : null
+  const last = known && age !== null && age >= 0 && age <= LARGEST_MAX_AGE_MS ? { largest: known.largest, largestAt: known.at, memAgeMs: Math.round(age) } : { largest: null, largestAt: null, memAgeMs: null }
+  const none = (reason: ProcessAvailability['reason']): ProcessAvailability => ({ state: 'unavailable', reason, takenAt: null, ...last })
+  const line = input.processLine ?? null
+  if (input.kind === 'local') {
+    const platform = input.local?.platform || input.platform || null
+    return platform === 'darwin' ? { state: 'full', reason: null, takenAt: line?.takenAt ?? null, ...last } : none('not-mac')
+  }
+  if (input.status === 'connecting') return none('not-read-yet')
+  if (input.status !== 'online') return none('offline')
+  if (!fresh) {
+    const plugin = input.beacon?.remotePlugin ?? 'unknown'
+    if (plugin === 'unknown') return none('not-read-yet')
+    if (plugin === 'running') return none(input.beacon?.logRead ? 'publishing-off' : 'not-read-yet')
+    return none('basic')
+  }
+  if (fresh.platform !== 'darwin') return none('not-mac')
+  // A 1.2 Mac publishing its readings always says it publishes its processes.
+  if (!fresh.publishesProcesses) return none('outdated')
+  return line ? { state: 'top', reason: null, takenAt: line.takenAt, ...last } : { state: 'waiting', reason: null, takenAt: null, ...last }
 }
 
 /** CPU estimated from the 1-minute load average when nothing measures it directly. Load is not
@@ -177,6 +219,10 @@ export function mergeMachine(input: MergeInput): MachineState {
     },
     updatedAt: input.now
   }
+  // Network, disk, GPU and battery: this Mac's sampler, or a fresh beacon from a Mac with 1.2.
+  const system = local ? (local.system ?? null) : fresh ? (fresh.system ?? null) : null
+  if (system) state.system = system
+  state.processes = processAvailability(input, fresh)
   state.health = assessHealth({ online, cpu, memory }, input.health, input.memoryRules)
   const lost = input.kind === 'remote' ? (input.lost ?? null) : null
   if (lost) {
@@ -245,8 +291,26 @@ function macMemoryState(mac: MacMemory, source: 'sampler' | 'beacon', diag: Diag
   }
 }
 
+/** The 1.2 history fields from a Mac's network, disk, GPU and battery readings: each only where
+ *  there is a figure, so a machine without them adds nothing. */
+export function systemPointOf(system: MacSystem | null | undefined): Partial<HistoryPoint> {
+  if (!system) return {}
+  const out: Partial<HistoryPoint> = {}
+  const put = (key: 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat', value: number | null | undefined): void => {
+    if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+  }
+  put('rx', system.net?.rxBytesPerSec)
+  put('tx', system.net?.txBytesPerSec)
+  put('dr', system.disk?.readBytesPerSec)
+  put('dw', system.disk?.writeBytesPerSec)
+  put('gpu', system.gpu?.percent)
+  if (system.battery?.present) put('bat', system.battery.percent)
+  return out
+}
+
 /** The history point a merged state contributes; memory only when it can be trusted. `mem` is
- *  memory pressure (or Orca's figure); `ram` is RAM in use, only where a Mac reported it. */
+ *  memory pressure (or Orca's figure); `ram` is RAM in use, only where a Mac reported it; the 1.2
+ *  fields only where a Mac reported its network, disk, GPU or battery. */
 export function historyPointOf(state: MachineState, t: number): HistoryPoint | null {
   if (!state.online) return null
   const memory = state.memory && state.memory.reliable ? state.memory : null
@@ -254,7 +318,8 @@ export function historyPointOf(state: MachineState, t: number): HistoryPoint | n
   const mem = memory ? (used ? (memory.pressurePercent ?? null) : memory.percent) : null
   const ram = used ? memory!.percent : null
   if (state.cpu.percent === null && mem === null && ram === null) return null
-  return ram === null ? { t, cpu: state.cpu.percent, mem } : { t, cpu: state.cpu.percent, mem, ram }
+  const base: HistoryPoint = ram === null ? { t, cpu: state.cpu.percent, mem } : { t, cpu: state.cpu.percent, mem, ram }
+  return { ...base, ...systemPointOf(state.system) }
 }
 
 /** Memory from a beacon itself, when it can be trusted: a Mac's own pressure reading (1.1), or
@@ -274,7 +339,8 @@ export function beaconRamPercent(r: BeaconRecord): number | null {
 export function beaconPoint(r: BeaconRecord, offsetMs: number, fallbackMem: number | null = null): HistoryPoint {
   const ram = beaconRamPercent(r)
   const mem = beaconMemoryPercent(r) ?? fallbackMem
-  return ram === null ? { t: r.t - offsetMs, cpu: r.cpu, mem } : { t: r.t - offsetMs, cpu: r.cpu, mem, ram }
+  const base: HistoryPoint = ram === null ? { t: r.t - offsetMs, cpu: r.cpu, mem } : { t: r.t - offsetMs, cpu: r.cpu, mem, ram }
+  return { ...base, ...systemPointOf(r.system) }
 }
 
 /** Older beacons as history points on the local clock (`offsetMs` = remote minus local). */

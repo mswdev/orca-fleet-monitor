@@ -13,6 +13,7 @@
                          detail, down to the end of the CPU section, each under a caption
          ?scene=memory   memory: a full machine's memory section
          ?scene=install  install: a basic machine's install row, open
+         ?scene=activity activity: this computer's Activity tab, its tiles and the top of its list
          ?theme=light|dark
 
          Nothing here depends on how tall a section is: sizes are measured from what the panel
@@ -128,7 +129,8 @@
         frame.width = String(width)
         frame.height = String(height)
         frame.title = 'Fleet Monitor panel'
-        frame.src = `frame.html?${query}&theme=${theme}`
+        // The 1.2 frame: the sample fleet with what 1.2 adds (activity-sample.mjs).
+        frame.src = `activity-frame.html?${query}&theme=${theme}`
         return frame
       }
       /** Resolves with the panel's document once it has drawn its first answer. */
@@ -224,6 +226,19 @@
         await section('memory', detailOf(full), '[data-key="memory"]')
       } else if (scene === 'install') {
         await section('install', detailOf(basic, '&install=open'), '[data-key="install"]')
+      } else if (scene === 'activity') {
+        // This computer's Activity tab: its tiles and the top of its process list, faded out.
+        const node = tile('activity')
+        const frame = panel('machine=mbp&tab=activity', TILE_WIDTH, 2400)
+        node.append(frame)
+        const doc = await ready(frame)
+        const top = rectOf(doc, '.fm-top', 'activity').top
+        const rows = [...doc.querySelectorAll('.fm-proc')]
+        if (rows.length < 10) fail('activity: the process list did not arrive')
+        const bottom = rows[9].getBoundingClientRect().bottom
+        frame.style.top = `${-top}px`
+        node.style.height = `${Math.round(bottom - top + 4)}px`
+        fade(node, 56)
       } else {
         fail(`No scene called ${scene}`)
       }

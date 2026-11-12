@@ -13,6 +13,7 @@
 //   level-full-*.png    the top of a full machine's detail, under a caption
 //   memory-*.png        a full machine's memory section
 //   install-*.png       a basic machine's install row, open
+//   activity-*.png      this computer's Activity tab: its tiles and the top of its process list
 //   demo-*.gif          the panel in use (needs ffmpeg; skipped with a note when there is none)
 //
 // The stills are the elements marked data-shot in tools/preview/readme.html. The animation is
@@ -28,7 +29,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { ROOT, startPreviewServer } from '../preview-server.mjs'
 
-const STILL_SCENES = ['hero', 'levels', 'memory', 'install']
+const STILL_SCENES = ['hero', 'levels', 'memory', 'install', 'activity']
 const THEMES = ['light', 'dark']
 /** The animation: a sidebar-sized panel, at one and a half device pixels a pixel to keep the file small. */
 const DEMO = { width: 380, height: 676, scale: 1.5 }

@@ -223,7 +223,8 @@ export function swapRates(history: readonly Counters[], pageSize: number): Pick<
 }
 
 export type ExecResult = { error: (Error & { code?: unknown; killed?: boolean }) | null; stdout: string }
-export type ExecFile = (file: string, args: readonly string[], options: { timeout: number; maxBuffer: number }) => Promise<ExecResult>
+/** `env` is the child's whole environment; empty (the C locale) when not given. */
+export type ExecFile = (file: string, args: readonly string[], options: { timeout: number; maxBuffer: number; env?: Record<string, string> }) => Promise<ExecResult>
 
 /** A command's answer is waited for this much past its timeout, then given up on. */
 const KILL_GRACE_MS = 250
@@ -267,7 +268,7 @@ export function createRunBounded(spawn: Spawn = execFile as unknown as Spawn): E
         child = spawn(
           file,
           [...args],
-          { timeout: options.timeout, killSignal: 'SIGKILL', maxBuffer: options.maxBuffer, encoding: 'utf8', windowsHide: true, env: {} },
+          { timeout: options.timeout, killSignal: 'SIGKILL', maxBuffer: options.maxBuffer, encoding: 'utf8', windowsHide: true, env: { ...(options.env ?? {}) } },
           (error, stdout) => finish({ error: error as ExecResult['error'], stdout: String(stdout ?? '') })
         )
       } catch (error) {
@@ -293,7 +294,9 @@ export function createRunBounded(spawn: Spawn = execFile as unknown as Spawn): E
     })
 }
 
-/** The runner every MacMemoryReader uses unless given another. */
+/** The runner every MacMemoryReader uses unless given another. Only memory reads use it: the
+ *  optional readers (src/mac-system.ts, src/processes.ts) have runners of their own, so children
+ *  of theirs stuck in the kernel can never stop `vm_stat` and `sysctl` from starting. */
 export const runBounded: ExecFile = createRunBounded()
 
 /** When one command fails, what the other read is kept, with an earlier reading of the failed

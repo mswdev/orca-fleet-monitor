@@ -6,7 +6,8 @@
     <title>Fleet Monitor listing screenshot</title>
     <!-- A 1280×800 listing screenshot: a short caption beside two real panels fed with the invented
          sample fleet. ?theme=light|dark  ?scene=fleet (overview and a detail) | basic (a basic
-         machine with its install row open, and an offline one). -->
+         machine with its install row open, and an offline one) | activity (this computer's and a
+         paired Mac's Activity tab). The panels are the 1.2 frame (activity-frame.html). -->
     <style>
       html, body { margin: 0; }
       body {
@@ -43,7 +44,7 @@
     <script type="module">
       const params = new URLSearchParams(location.search)
       const theme = params.get('theme') === 'dark' ? 'dark' : 'light'
-      const scene = params.get('scene') === 'basic' ? 'basic' : 'fleet'
+      const scene = ['basic', 'activity'].includes(params.get('scene')) ? params.get('scene') : 'fleet'
       document.body.classList.toggle('dark', theme === 'dark')
       const text = {
         fleet: [
@@ -54,16 +55,22 @@
         basic: [
           'Nothing to install first',
           'Any paired Orca server shows up at once, read through Orca itself: memory, load and the busiest workspaces.',
-          'Install Fleet Monitor there too for measured CPU, per-core load and, on a Mac, real RAM usage, swap and memory pressure. The panel gives you the command.'
+          'Install Fleet Monitor there too for measured CPU, per-core load and, on a Mac, real RAM usage, swap, memory pressure, activity and processes. The panel gives you the command.'
+        ],
+        activity: [
+          'Activity, one tab away',
+          'Network, disk, GPU and battery for this Mac and every paired Mac running Fleet Monitor, each with its last 30 minutes.',
+          'Every process on this computer, and the busiest on each paired Mac, to search and sort by CPU, memory or energy impact.'
         ]
       }[scene]
       document.getElementById('title').textContent = text[0]
       document.getElementById('line1').textContent = text[1]
       document.getElementById('line2').textContent = text[2]
-      const frames =
-        scene === 'basic'
-          ? [`frame.html?state=live&machine=ci&install=open&theme=${theme}`, `frame.html?state=live&machine=air&theme=${theme}`]
-          : [`frame.html?state=live&theme=${theme}`, `frame.html?state=live&machine=studio&theme=${theme}`]
+      const frames = {
+        basic: [`activity-frame.html?machine=ci&install=open&theme=${theme}`, `activity-frame.html?machine=air&theme=${theme}`],
+        activity: [`activity-frame.html?state=activity&theme=${theme}`, `activity-frame.html?state=activity-remote&theme=${theme}`],
+        fleet: [`activity-frame.html?theme=${theme}`, `activity-frame.html?machine=studio&theme=${theme}`]
+      }[scene]
       document.getElementById('a').src = frames[0]
       document.getElementById('b').src = frames[1]
     </script>

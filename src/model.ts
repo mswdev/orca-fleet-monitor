@@ -52,6 +52,64 @@ export type MacMemory = {
   pressureAgeMs?: number
 }
 
+/** The default network interface's traffic, from `netstat -ibn` (src/mac-system.ts). */
+export type NetReading = {
+  /** The interface the default route goes out of (`en0`, say). */
+  iface: string
+  /** Bytes per second since the previous reading; null on the first one, or when the counters
+   *  went back (the interface reset, or the default route moved to another one). */
+  rxBytesPerSec: number | null
+  txBytesPerSec: number | null
+  /** How old these figures are, in ms, when carried over a failed read; absent when fresh. */
+  ageMs?: number
+}
+
+/** The main volume's space (`statfs`) and every disk's traffic (`ioreg`'s block storage
+ *  statistics, as Activity Monitor's Disk tab sums them). */
+export type DiskReading = {
+  /** The APFS container's size, and what is used of it: size minus what is available, which is
+   *  what `df` reports as available (space macOS could purge is not counted as available). */
+  totalBytes: number | null
+  usedBytes: number | null
+  /** How old the space figures are, in ms; they are read about once a minute. */
+  spaceAgeMs?: number
+  /** Bytes per second read and written, over the time since the previous traffic reading. */
+  readBytesPerSec: number | null
+  writeBytesPerSec: number | null
+  /** How old the traffic figures are, in ms; they are read about every 20 s. */
+  ioAgeMs?: number
+}
+
+/** The GPU's utilisation, `ioreg`'s "Device Utilization %" (Apple silicon and most Intel GPUs). */
+export type GpuReading = {
+  percent: number
+  /** How old it is, in ms; it is read about every 30 s. */
+  ageMs?: number
+}
+
+/** `pmset -g batt`: the power source, and the internal battery when there is one. */
+export type BatteryReading = {
+  /** False on a Mac without a battery (a desktop): the other battery fields are then null. */
+  present: boolean
+  percent: number | null
+  state: 'charging' | 'discharging' | 'charged' | 'not-charging' | null
+  /** `ac` (AC power), `battery`, or `ups`; null when pmset did not say. */
+  source: 'ac' | 'battery' | 'ups' | null
+  /** Minutes until full (charging) or empty (discharging), when macOS gives an estimate. */
+  minutesRemaining: number | null
+  /** How old it is, in ms; it is read about once a minute. */
+  ageMs?: number
+}
+
+/** A Mac's network, disk, GPU and battery readings. Each part is null when it could not be read
+ *  (or this is not a Mac, where none is read). */
+export type MacSystem = {
+  net: NetReading | null
+  disk: DiskReading | null
+  gpu: GpuReading | null
+  battery: BatteryReading | null
+}
+
 /** One reading of the machine this worker runs on, from `node:os` only. */
 export type LocalSample = {
   /** Epoch ms on this machine's clock. */
@@ -72,6 +130,8 @@ export type LocalSample = {
   coreGroups?: CoreGroup[] | null
   /** On a Mac, its memory as Activity Monitor counts it; absent elsewhere or when it could not be read. */
   macMemory?: MacMemory | null
+  /** On a Mac, its network, disk, GPU and battery (1.2); absent elsewhere. */
+  system?: MacSystem | null
 }
 
 /** A beacon read back from a remote worker's log. Times are on the remote's clock. */
@@ -97,8 +157,103 @@ export type BeaconRecord = {
   coreGroups: CoreGroup[] | null
   /** Only from a Mac running Fleet Monitor 1.1 or later; absent or null otherwise. */
   macMemory?: MacMemory | null
+  /** Only from a Mac running Fleet Monitor 1.2 or later; absent or null otherwise. */
+  system?: MacSystem | null
+  /** The beacon says its writer also publishes process lines (1.2, a Mac, publishing on). */
+  publishesProcesses?: boolean
   /** When the remote Orca appended the log line (remote clock). */
   loggedAt: number
+}
+
+// --- Processes ------------------------------------------------------------------------------
+
+/** One process, as the worker reads it (src/processes.ts). */
+export type ProcessRow = {
+  pid: number
+  ppid: number | null
+  /** The kernel's short name for the process (`ps -o ucomm`): its executable's file name, cut by
+   *  macOS to 16 characters (`Google Chrome He`). Never a path, an argument or a title the process
+   *  set itself, so nothing secret it was started with can show up here. */
+  name: string
+  user: string | null
+  /** Percent of one core over the list's `cpuWindowMs` (Activity Monitor's "% CPU"). */
+  cpu: number | null
+  /** Physical footprint in bytes: Activity Monitor's "Memory" column (`top`'s MEM). */
+  mem: number | null
+  /** `top`'s POWER, which is meant to be Activity Monitor's "Energy Impact" (not checked). */
+  energy: number | null
+  /** Start time, epoch seconds. */
+  start: number | null
+}
+
+/** A process list in columns (each the same length), as it crosses the panel bridge: one object
+ *  per column rather than per process, far inside Orca's 10,000-object limit. */
+export type ProcessColumns = {
+  pid: number[]
+  ppid: (number | null)[]
+  name: string[]
+  user: (string | null)[]
+  cpu: (number | null)[]
+  mem: (number | null)[]
+  energy: (number | null)[]
+  start: (number | null)[]
+}
+
+/** Why there is no process list for a machine. */
+export type ProcessUnavailable =
+  | 'not-mac' // only macOS lists processes
+  | 'basic' // Fleet Monitor is not installed there, or installed but not running
+  | 'outdated' // Fleet Monitor there is older than 1.2: "Update Fleet Monitor to 1.2"
+  | 'publishing-off' // it runs there, but its readings are not arriving (publishing off)
+  | 'not-read-yet' // not known yet: still connecting, or its plugins or log not read yet
+  | 'offline'
+  | 'unknown-machine'
+  | 'failed' // this computer's list could not be read just now
+
+/** The answer to `fleet.processes`. */
+export type ProcessList = {
+  machineId: string
+  /** `ok` with a list; `waiting` while the first one is on its way (a remote publishes every 30 s);
+   *  `unavailable` with a `reason`. */
+  state: 'ok' | 'waiting' | 'unavailable'
+  reason: ProcessUnavailable | null
+  /** `full`: every process on this computer. `top`: the remote's own top list, about 40 by memory
+   *  and 20 by CPU, out of `total`. */
+  scope: 'full' | 'top'
+  /** When the list was taken, on the worker's clock (a remote's time moved onto it). */
+  takenAt: number | null
+  /** How old it was when this answer was made. */
+  ageMs: number | null
+  /** What `cpu` is averaged over (the time between two process readings). */
+  cpuWindowMs: number | null
+  /** How old the memory figures were at `takenAt`: `top` reads them on its own beat. */
+  memAgeMs: number | null
+  /** What `energy` is averaged over (`top`'s interval); null when there is none. */
+  energyWindowMs: number | null
+  /** Processes on the machine; more than the list holds when `scope` is `top`. */
+  total: number | null
+  columns: ProcessColumns
+  /** Set when this computer has more processes than an answer carries (the busiest are kept). */
+  truncated?: true
+}
+
+/** The process using the most memory, from a machine's newest list. */
+export type TopProcess = { pid: number; name: string; mem: number }
+
+/** What `fleet.processes` can give for a machine, without fetching it (on each machine state). */
+export type ProcessAvailability = {
+  state: 'full' | 'top' | 'waiting' | 'unavailable'
+  reason: ProcessUnavailable | null
+  /** When the newest list was taken (worker clock); null before the first. */
+  takenAt: number | null
+  /** The process using the most memory, last known: from the newest reading that had memory
+   *  figures, kept while sampling pauses (memory critical, here or on that machine) or the
+   *  machine stops publishing, for up to 15 minutes. Null (or absent) when none is known. */
+  largest?: TopProcess | null
+  /** When `largest`'s memory figure was read (worker clock), and its age when this state was
+   *  made, in ms. A figure carried through a pause grows old here; it is never shown as new. */
+  largestAt?: number | null
+  memAgeMs?: number | null
 }
 
 export type WorkspaceUsage = {
@@ -135,11 +290,34 @@ export type DiagnosticsSample = {
 /** `mem` is the memory figure Orca measures (memory pressure on a Mac, MemAvailable on Linux), or
  *  the same pressure from a Mac's own reading. `ram` is RAM in use as Activity Monitor counts it,
  *  present only where a Mac reported it, so the two never mix on one chart. */
-export type HistoryPoint = { t: number; cpu: number | null; mem: number | null; ram?: number | null }
+export type HistoryPoint = {
+  t: number
+  cpu: number | null
+  mem: number | null
+  ram?: number | null
+  /** A Mac's network bytes per second received and sent (1.2). */
+  rx?: number | null
+  tx?: number | null
+  /** A Mac's disk bytes per second read and written (1.2). */
+  dr?: number | null
+  dw?: number | null
+  /** A Mac's GPU utilisation %, and its battery charge % (1.2). */
+  gpu?: number | null
+  bat?: number | null
+}
 
-/** Column form of a history ring, which is what crosses the panel bridge. `ram` is there only
- *  when some point has it. */
-export type HistoryColumns = { t: number[]; cpu: (number | null)[]; mem: (number | null)[]; ram?: (number | null)[] }
+/** The history keys added in 1.2, each present in columns only when some point has it
+ *  (EXTRA_HISTORY_KEYS in src/history.ts lists them). */
+export type ExtraHistoryKey = 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat'
+
+/** Column form of a history ring, which is what crosses the panel bridge. `ram` and the 1.2
+ *  columns are there only when some point has them. */
+export type HistoryColumns = {
+  t: number[]
+  cpu: (number | null)[]
+  mem: (number | null)[]
+  ram?: (number | null)[]
+} & { [K in ExtraHistoryKey]?: (number | null)[] }
 
 export type HealthThresholds = { busy: number; strained: number; critical: number }
 
@@ -224,6 +402,11 @@ export type MachineState = {
    *  elevated (src/health.ts `memoryElevated`): what the last one said. It clears once that reading
    *  comes again (src/poller.ts). */
   lost?: LostReading
+  /** Network, disk, GPU and battery: this Mac's own (sampler), or a fresh beacon's from a Mac
+   *  running Fleet Monitor 1.2. Absent or null for every other machine. */
+  system?: MacSystem | null
+  /** Whether `fleet.processes` has a list for this machine, and what kind. */
+  processes?: ProcessAvailability
   updatedAt: number
   /** Set by the panel bridge on a machine it sent without its per-core values and workspaces, to
    *  fit Orca's size caps; a panel keeps the ones it already holds for it. */

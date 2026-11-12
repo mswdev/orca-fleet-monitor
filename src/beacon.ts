@@ -2,11 +2,13 @@
 // `orca plugin logs <key> --environment <id> --json`.
 //
 // Compatibility: the version stays 1 for as long as fields are only added. A reader ignores keys
-// it does not know, and every key added after the first release (`cg`, and `mm` in 1.1) is
-// optional, so an older Fleet Monitor on either side keeps working.
+// it does not know, and every key added after the first release (`cg`; `mm` in 1.1; `nw`, `dk`,
+// `gp`, `bt` and `pl` in 1.2) is optional, so an older Fleet Monitor on either side keeps working.
+// The process list travels in lines of its own (src/process-line.ts), which beacon readers skip.
 import { clipText, COUNT_LIMITS, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
-import type { BeaconRecord, CoreGroup, LocalSample, MacMemory, PressureLevel } from './model.ts'
+import { isInterfaceName } from './mac-system.ts'
+import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel } from './model.ts'
 
 export const BEACON_PREFIX = 'FLEETMON1 '
 export const BEACON_VERSION = 1
@@ -39,6 +41,140 @@ type Wire = {
   l: [number, number, number]
   /** A Mac's memory as Activity Monitor counts it (1.1 and later). See WireMac. */
   mm?: WireMac
+  /** A Mac's network, disk, GPU and battery (1.2 and later). See WireNet and the rest. */
+  nw?: WireNet
+  dk?: WireDisk
+  gp?: WireGpu
+  bt?: WireBattery
+  /** 1 when this copy also writes process lines (1.2, a Mac, publishing on). */
+  pl?: 1
+}
+
+/** `nw`: the default interface and its bytes per second in (`r`) and out (`t`), absent on the
+ *  first reading; `a`, how old in ms, only when carried over a failed read. */
+type WireNet = { i: string; r?: number; t?: number; a?: number }
+/** `dk`: the main volume's size (`s`) and used bytes (`u`), with their age (`sa`, ms); bytes per
+ *  second read (`r`) and written (`w`) over every disk, with their age (`ia`, ms). */
+type WireDisk = { s?: number; u?: number; sa?: number; r?: number; w?: number; ia?: number }
+/** `gp`: GPU utilisation % (`u`) and its age (`a`, ms). */
+type WireGpu = { u: number; a?: number }
+/** `bt`: a battery (`b` 1) or none (`b` 0); its charge % (`p`); state `c` charging, `d`
+ *  discharging, `f` charged, `n` not charging (`st`); power source `a` AC, `b` battery, `u` UPS
+ *  (`ps`); minutes remaining (`m`); age in ms (`a`). */
+type WireBattery = { b: 0 | 1; p?: number; st?: 'c' | 'd' | 'f' | 'n'; ps?: 'a' | 'b' | 'u'; m?: number; a?: number }
+
+const WIRE_STATE: Record<NonNullable<BatteryReading['state']>, NonNullable<WireBattery['st']>> = { charging: 'c', discharging: 'd', charged: 'f', 'not-charging': 'n' }
+const WIRE_SOURCE: Record<NonNullable<BatteryReading['source']>, NonNullable<WireBattery['ps']>> = { ac: 'a', battery: 'b', ups: 'u' }
+
+/** A key with a number, or nothing for null/undefined. */
+function opt<K extends string>(key: K, value: number | null | undefined, round = true): { [P in K]?: number } {
+  return (value === null || value === undefined || !Number.isFinite(value) ? {} : { [key]: round ? Math.round(value) : value }) as { [P in K]?: number }
+}
+
+function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt'> {
+  if (!system) return {}
+  const out: Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt'> = {}
+  const { net, disk, gpu, battery } = system
+  if (net && isInterfaceName(net.iface)) out.nw = { i: net.iface, ...opt('r', net.rxBytesPerSec), ...opt('t', net.txBytesPerSec), ...opt('a', net.ageMs) }
+  if (disk) {
+    const dk: WireDisk = {
+      ...opt('s', disk.totalBytes),
+      ...opt('u', disk.usedBytes),
+      ...opt('sa', disk.spaceAgeMs),
+      ...opt('r', disk.readBytesPerSec),
+      ...opt('w', disk.writeBytesPerSec),
+      ...opt('ia', disk.ioAgeMs)
+    }
+    if (Object.keys(dk).length > 0) out.dk = dk
+  }
+  if (gpu && Number.isFinite(gpu.percent)) out.gp = { u: Math.round(gpu.percent), ...opt('a', gpu.ageMs) }
+  if (battery) {
+    out.bt = {
+      b: battery.present ? 1 : 0,
+      ...opt('p', battery.percent),
+      ...(battery.state ? { st: WIRE_STATE[battery.state] } : {}),
+      ...(battery.source ? { ps: WIRE_SOURCE[battery.source] } : {}),
+      ...opt('m', battery.minutesRemaining),
+      ...opt('a', battery.ageMs)
+    }
+  }
+  return out
+}
+
+/** Bytes per second beyond this are nonsense (a terabyte a second). */
+const MAX_RATE = 1e12
+/** A volume larger than this is nonsense (an exbibyte). */
+const MAX_VOLUME_BYTES = 2 ** 60
+
+function record(raw: unknown): Record<string, unknown> | null {
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null
+}
+
+/** An age in ms that is there: kept, bounded; one out of shape still says "carried", at the
+ *  longest. Absent stays absent. */
+function ageOf(value: unknown): number | undefined {
+  if (value === undefined) return undefined
+  const n = num(value)
+  return n === null ? MAX_FIGURE_AGE_MS : Math.min(MAX_FIGURE_AGE_MS, Math.max(0, Math.round(n)))
+}
+
+const within = (value: unknown, min: number, max: number): number | null => {
+  const n = num(value)
+  return n === null || n < min || n > max ? null : n
+}
+
+/** The 1.2 keys from another machine's beacon: each part bounded, or null when out of shape. */
+function decodeSystem(w: Record<string, unknown>): MacSystem | null {
+  let net: NetReading | null = null
+  const nw = record(w.nw)
+  if (nw && isInterfaceName(nw.i)) {
+    const age = ageOf(nw.a)
+    net = { iface: nw.i, rxBytesPerSec: within(nw.r, 0, MAX_RATE), txBytesPerSec: within(nw.t, 0, MAX_RATE), ...(age === undefined ? {} : { ageMs: age }) }
+  }
+  let disk: DiskReading | null = null
+  const dk = record(w.dk)
+  if (dk) {
+    const total = within(dk.s, 1, MAX_VOLUME_BYTES)
+    const used = total === null ? null : within(dk.u, 0, total)
+    const spaceAge = ageOf(dk.sa)
+    const ioAge = ageOf(dk.ia)
+    const read = within(dk.r, 0, MAX_RATE)
+    const write = within(dk.w, 0, MAX_RATE)
+    if (used !== null || read !== null || write !== null) {
+      disk = {
+        totalBytes: used === null ? null : total,
+        usedBytes: used,
+        ...(used !== null && spaceAge !== undefined ? { spaceAgeMs: spaceAge } : {}),
+        readBytesPerSec: read,
+        writeBytesPerSec: write,
+        ...((read !== null || write !== null) && ioAge !== undefined ? { ioAgeMs: ioAge } : {})
+      }
+    }
+  }
+  let gpu: GpuReading | null = null
+  const gp = record(w.gp)
+  const gpuPercent = gp ? within(gp.u, 0, 100) : null
+  if (gp && gpuPercent !== null) {
+    const age = ageOf(gp.a)
+    gpu = { percent: gpuPercent, ...(age === undefined ? {} : { ageMs: age }) }
+  }
+  let battery: BatteryReading | null = null
+  const bt = record(w.bt)
+  if (bt && (bt.b === 0 || bt.b === 1)) {
+    const age = ageOf(bt.a)
+    const source = bt.ps === 'a' ? 'ac' : bt.ps === 'b' ? 'battery' : bt.ps === 'u' ? 'ups' : null
+    const present = bt.b === 1
+    const state = bt.st === 'c' ? 'charging' : bt.st === 'd' ? 'discharging' : bt.st === 'f' ? 'charged' : bt.st === 'n' ? 'not-charging' : null
+    battery = {
+      present,
+      percent: present ? within(bt.p, 0, 100) : null,
+      state: present ? state : null,
+      source,
+      minutesRemaining: present ? within(bt.m, 0, 100_000) : null,
+      ...(age === undefined ? {} : { ageMs: age })
+    }
+  }
+  return net || disk || gpu || battery ? { net, disk, gpu, battery } : null
 }
 
 /** `mm`: bytes, except `ps` (page size), the page rates and `pl`. Only `t` and `u` are always
@@ -201,10 +337,11 @@ const round1 = (value: number): number => Math.round(value * 10) / 10
 const round2 = (value: number): number => Math.round(value * 100) / 100
 const clip = (text: string, max: number): string => (text.length > max ? text.slice(0, max) : text)
 
-/** One beacon line for `orca.log`, or null when even the trimmed form will not fit. */
+/** One beacon line for `orca.log`, or null when even the trimmed form will not fit. `processes`
+ *  says that this copy also writes process lines. */
 export function encodeBeacon(
   sample: LocalSample,
-  meta: { run: string; seq: number; intervalMs: number },
+  meta: { run: string; seq: number; intervalMs: number; processes?: boolean },
   maxChars = BEACON_MAX_CHARS
 ): string | null {
   const wire: Wire = {
@@ -226,16 +363,16 @@ export function encodeBeacon(
     mt: sample.memory.total,
     mf: sample.memory.free,
     l: [round2(sample.load[0]), round2(sample.load[1]), round2(sample.load[2])],
-    ...(sample.macMemory ? { mm: encodeMac(sample.macMemory) } : {})
+    ...(sample.macMemory ? { mm: encodeMac(sample.macMemory) } : {}),
+    ...encodeSystem(sample.system),
+    ...(meta.processes ? { pl: 1 as const } : {})
   }
-  // Degrade in steps: per-core values (and the groups over them) first, then long free-text fields.
-  // The Mac memory figures (about 200 characters) stay in every step: they are what health and
-  // alerts are judged on.
-  const attempts: Wire[] = [
-    wire,
-    { ...wire, pc: undefined, cg: undefined },
-    { ...wire, pc: undefined, cg: undefined, h: clip(wire.h, TEXT_LIMIT), m: clip(wire.m, TEXT_LIMIT), rl: clip(wire.rl, 32) }
-  ]
+  // Degrade in steps: per-core values (and the groups over them) first, then the network, disk,
+  // GPU and battery figures, then long free-text fields. The Mac memory figures (about 200
+  // characters) stay in every step: they are what health and alerts are judged on.
+  const bare = { ...wire, pc: undefined, cg: undefined }
+  const plain = { ...bare, nw: undefined, dk: undefined, gp: undefined, bt: undefined }
+  const attempts: Wire[] = [wire, bare, plain, { ...plain, h: clip(wire.h, TEXT_LIMIT), m: clip(wire.m, TEXT_LIMIT), rl: clip(wire.rl, 32) }]
   for (const attempt of attempts) {
     const line = BEACON_PREFIX + JSON.stringify(attempt)
     if (line.length <= maxChars) {
@@ -302,6 +439,7 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
       ? (w.pc as number[]).map((value) => Math.min(100, Math.max(0, value)))
       : null
   const total = clamp(memTotal, MAX_MEMORY_BYTES)
+  const system = decodeSystem(w)
   return {
     run,
     seq,
@@ -321,6 +459,9 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
     load: [load[0] ?? 0, load[1] ?? 0, load[2] ?? 0],
     coreGroups: perCore ? decodeGroups(w.cg, perCore.length) : null,
     macMemory: decodeMac(w.mm),
+    // Only where a 1.2 beacon has them, so an older one decodes exactly as it always did.
+    ...(system ? { system } : {}),
+    ...(w.pl === 1 ? { publishesProcesses: true } : {}),
     loggedAt: loggedAt ?? t
   }
 }

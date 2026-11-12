@@ -9,6 +9,8 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { createProcessRunner, resolveCli, workerCliEnvironment } from './cli.ts'
 import { readCoreGroups } from './core-groups.ts'
 import { MacMemoryReader } from './mac-memory.ts'
+import { MacSystemReader } from './mac-system.ts'
+import { ProcessSampler } from './processes.ts'
 import { startFleetMonitor, type FleetMonitor, type MonitorDeps } from './monitor.ts'
 import { LocalSampler, realOs } from './sampler.ts'
 
@@ -55,9 +57,16 @@ export function realDeps(): MonitorDeps {
     handle.unref?.()
     return handle
   }
-  // On a Mac, each sample also reads memory as Activity Monitor counts it (one vm_stat, one sysctl).
-  const memory = os.platform() === 'darwin' ? new MacMemoryReader({ osTotal: () => os.totalmem() }) : null
-  const sampler = new LocalSampler(realOs, memory)
+  // On a Mac, each sample also reads memory as Activity Monitor counts it (one vm_stat, one sysctl),
+  // and network, disk, GPU and battery on their own cadences (src/mac-system.ts).
+  const mac = os.platform() === 'darwin'
+  const memory = mac ? new MacMemoryReader({ osTotal: () => os.totalmem() }) : null
+  const own: { sampler: LocalSampler | null } = { sampler: null }
+  // The I/O Kit reads wait while macOS memory pressure is critical.
+  const system = mac ? new MacSystemReader({ heavyAllowed: () => own.sampler?.latest()?.macMemory?.pressure !== 'critical' }) : null
+  const sampler = new LocalSampler(realOs, memory, undefined, {}, system)
+  own.sampler = sampler
+  const processes = mac ? new ProcessSampler({ cores: () => os.cpus().length }) : null
   // Once per worker start; until it answers (and wherever there is no split) cores are one group.
   void readCoreGroups(os.platform(), os.cpus().length).then((groups) => sampler.setCoreGroups(groups))
   return {
@@ -72,7 +81,9 @@ export function realDeps(): MonitorDeps {
     localName: () => localMachineName(),
     runId: () => randomBytes(4).toString('hex'),
     workerFile: workerFile(),
-    declaredCommands: declaredCommands()
+    declaredCommands: declaredCommands(),
+    processes,
+    wall: Date.now
   }
 }
 

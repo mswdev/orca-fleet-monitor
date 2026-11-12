@@ -6,7 +6,8 @@
 // Orca, so the clip runs at five times real speed. The panel's clock is the frame number too.
 //
 // Only CPU, load and the workspaces' CPU move. Memory stays as tools/preview/sample-fleet.mjs
-// gives it, so this file needs no change when the sample's memory figures do.
+// gives it, so this file needs no change when the sample's memory figures do. Network, disk, GPU,
+// battery and the process lists are activity-sample.mjs's, and hold still.
 //
 // For the capture script (tools/preview/shoot-readme.mjs):
 //   demo.ready, demo.fps, demo.frames
@@ -16,6 +17,7 @@
 import { applyHealthContrast } from '../../panel/contrast.mjs'
 import { createFleetBinding } from '../../panel/fleet-binding.mjs'
 import { mountFleetView } from '../../panel/view.mjs'
+import { sampleActivitySnapshot, sampleProcesses } from './activity-sample.mjs'
 import * as sample from './sample-fleet.mjs'
 
 const { FLEET, sampleSnapshot } = sample
@@ -84,8 +86,9 @@ const orca = {
   api: Object.freeze({ major: 1, minor: 6 }),
   locale: 'en',
   plugin: {
-    request(name) {
-      if (name === 'fleet.snapshot') return Promise.resolve({ ...sampleSnapshot('live', clock), seq })
+    request(name, input) {
+      if (name === 'fleet.snapshot') return Promise.resolve({ ...sampleActivitySnapshot(clock), seq })
+      if (name === 'fleet.processes') return Promise.resolve(sampleProcesses(input?.id, START))
       if (name === 'fleet.heartbeat') return Promise.resolve({ ok: true, mode: 'fast', seq })
       return Promise.resolve({ ok: true })
     },
@@ -100,10 +103,12 @@ const orca = {
 function post(k) {
   setReading(k)
   seq += 1
-  const snapshot = sampleSnapshot('live', clock)
+  const snapshot = sampleActivitySnapshot(clock)
   const appended = {}
   for (const m of snapshot.machines) {
-    if (m.online) appended[m.id] = { t: [clock], cpu: [m.cpu?.percent ?? null], mem: [m.memory?.percent ?? null] }
+    if (!m.online) continue
+    appended[m.id] = { t: [clock], cpu: [m.cpu?.percent ?? null], mem: [m.memory?.percent ?? null] }
+    for (const key of ['rx', 'tx', 'gpu']) if (Array.isArray(m.history[key])) appended[m.id][key] = [m.history[key].at(-1)]
   }
   const machines = snapshot.machines.map(({ history, ...m }) => ({ ...m, lastSeenAt: m.online ? clock : m.lastSeenAt }))
   const update = { ...snapshot, seq, generatedAt: clock, recentMs: 30_000, machines, appended }
@@ -143,18 +148,21 @@ const centreOf = (selector) => {
   return rect ? { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) } : null
 }
 /** Pointer moves, each over frames `from`..`to`, to where `target` is when the move starts: in to
- *  a machine's card, out of the way while its detail is read, in to Back, and out again. */
+ *  a machine's card, to its Activity tab, out of the way while the list scrolls, to Overview, in
+ *  to Back, and out again. */
 const MOVES = [
   { from: 9, to: 19, target: () => centreOf(`[data-action="open"][data-id="${CSS.escape(opened.id)}"]`) },
-  { from: 27, to: 35, target: () => REST },
-  { from: 70, to: 82, target: () => centreOf('[data-action="back"]') },
-  { from: 88, to: 95, target: () => REST }
+  { from: 27, to: 35, target: () => centreOf('[data-tab="activity"]') },
+  { from: 41, to: 47, target: () => REST },
+  { from: 63, to: 71, target: () => centreOf('[data-tab="overview"]') },
+  { from: 79, to: 87, target: () => centreOf('[data-action="back"]') },
+  { from: 93, to: 100, target: () => REST }
 ]
 /** Frames on which the button is held down; the click lands when it comes up. */
-const PRESSES = [22, 85]
-/** The detail is taller than the panel: the page scrolls to its end over these frames. */
-const SCROLL = { from: 40, to: 52 }
-const FRAMES = 96
+const PRESSES = [22, 38, 74, 90]
+/** The Activity tab is taller than the panel: its list scrolls part of the way over these frames. */
+const SCROLL = { from: 49, to: 59, share: 0.5 }
+const FRAMES = 104
 
 const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2)
 const positions = [REST]
@@ -192,10 +200,10 @@ window.demo = {
     clock = START + Math.round((n * TICK_MS) / TICK_FRAMES)
     if (n % TICK_FRAMES === 0) post(n / TICK_FRAMES)
     everySecond()
-    if (document.getElementById('app').dataset.screen === 'detail' && n >= SCROLL.from) {
+    if (document.querySelector('#fm-tab-activity[aria-selected="true"]') && n >= SCROLL.from && n <= SCROLL.to) {
       const end = document.documentElement.scrollHeight - window.innerHeight
       const t = ease(Math.min(1, (n - SCROLL.from + 1) / (SCROLL.to - SCROLL.from + 1)))
-      window.scrollTo(0, Math.round(end * t))
+      window.scrollTo(0, Math.round(end * SCROLL.share * t))
     }
     const at = pointerAt(n)
     const sincePress = Math.min(...PRESSES.map((p) => (n >= p ? n - p : Infinity)))

@@ -42,7 +42,7 @@ Live CPU, memory, per-core load and the busiest workspaces for this computer and
 
 Fleet Monitor is a plugin for [Orca](https://github.com/stablyai/orca). It puts live performance stats for all your machines in Orca's right sidebar: CPU and RAM for this computer and for every remote machine you have paired, with 30 minutes of history. If you would otherwise open an activity monitor or task manager on each machine to find out which one is busy, this shows them side by side.
 
-A paired server shows up without anything installed on it. Install Fleet Monitor there as well and you get measured CPU, the load on every core and, on a Mac, real RAM usage.
+A paired server shows up without anything installed on it. Install Fleet Monitor there as well and you get measured CPU, the load on every core and, on a Mac, real RAM usage, network, disk, GPU and battery readings, and its busiest processes.
 
 To install it on this computer, [open it in Orca](https://orca.dev/plugins/mswdev.fleet-monitor?catalog=community) or run:
 
@@ -60,7 +60,7 @@ orca plugin install mswdev.fleet-monitor
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="media/readme/demo-dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="media/readme/demo-light.gif">
-  <img src="media/readme/demo-dark.gif" align="right" width="300" alt="The panel in use: the overview updates, a click on one machine opens its detail with charts, per-core load and workspaces, and Back returns to the overview.">
+  <img src="media/readme/demo-dark.gif" align="right" width="300" alt="The panel in use: the overview updates, a click on one machine opens its detail, Activity shows its network, disk and GPU readings and its processes, Overview brings the charts back, and Back returns to the overview.">
 </picture>
 
 The panel opens on an overview with one card per machine. Click a card for that machine's detail.
@@ -68,6 +68,8 @@ The panel opens on an overview with one card per machine. Click a card for that 
 - Each card has the machine's health, its CPU and memory, and a 30-minute sparkline of each.
 - The detail has CPU and memory charts with the average and peak, the load on every core (P-cores and E-cores apart on Apple silicon), the five busiest workspaces, load averages, uptime, the chip, and what Orca itself is using.
 - On a Mac running Fleet Monitor, memory is real RAM usage with its breakdown, swap and the kernel's pressure level. [Memory](#memory) has the details.
+- On a Mac running Fleet Monitor, the detail has two tabs. **Overview** is everything above. **Activity** has network, disk, GPU and battery readings and the machine's processes, to search and sort. [Activity](#activity) has the details.
+- While a machine's memory is strained or critical, its Memory card names the process using the most memory and how much it uses, when that is at least 5% of the machine's RAM. A machine short of memory can pause reading its processes; the card then gives the last figure it has, for up to 15 minutes, and says how old it is.
 - Health has four levels: OK, busy, strained and critical. It is the worse of the CPU level and the memory level, and the detail says why, for example "Strained: CPU 86% ≥ 85%".
 - A desktop notification tells you when a machine's memory reaches Strained or Critical, and when a machine stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details.
 - Each level is drawn as one to four bars as well as a colour, so you can read it without the colour.
@@ -104,6 +106,8 @@ A paired server appears at the basic level as soon as Orca reaches it. Install F
 | CPU | An estimate from the load average, labelled as one | Measured |
 | Per-core load, P-cores and E-cores | No | Yes |
 | Memory | Orca's memory-pressure percentage, labelled "memory pressure" | On a Mac, RAM used and its breakdown, swap and the kernel's pressure level |
+| Network, disk, GPU and battery | No | On a Mac |
+| Processes | No | On a Mac: every process on this computer, the busiest 60 or so on a paired server |
 | Busiest workspaces | Yes | Yes |
 | Orca's own CPU and memory | Yes | Yes |
 | Load average | 1 minute | 1, 5 and 15 minutes |
@@ -137,6 +141,38 @@ A machine without Fleet Monitor reports only Orca's memory-pressure percentage. 
 The memory level is there to warn you before a machine locks up. Kernel pressure at warning makes a machine Strained, and at critical makes it Critical. RAM used above a threshold you can change, 90% by default, makes it Busy. Memory pressure has its own thresholds (75, 88 and 95% by default), and sustained swapping counts as well.
 
 If one of a Mac's two memory commands fails, Fleet Monitor keeps what the other returned. If both fail, it carries the last reading over the next two, marked with its age, and after that the reading is unknown. The panel says when figures are carried. When Orca reports only free memory for a Mac, which Orca can do for the rest of its run after one slow reading, the panel says memory is unavailable and nothing is judged on it.
+
+<br clear="right">
+
+## Activity
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="media/readme/activity-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="media/readme/activity-light.png">
+  <img src="media/readme/activity-dark.png" align="right" width="320" alt="This computer's Activity tab: network and GPU readings with their last 30 minutes, disk space and battery charge as bars, above its processes sorted by CPU.">
+</picture>
+
+A Mac running Fleet Monitor 1.2 or later, and this computer when it is a Mac, has a second tab in its detail, **Activity**. Opening a machine always lands on **Overview**, the view described above.
+
+The top of the tab has a reading for each of these that the machine reports. One it does not report, such as the battery of a desktop Mac, is left out.
+
+- Network: what the main network interface receives and sends, with the last 30 minutes of both.
+- Disk: the space used on the startup disk, and what all disks read and write.
+- GPU: how busy the GPU is, with its peak in the last 30 minutes.
+- Battery: the charge, whether it is charging, and the time to full or to empty when macOS has an estimate.
+
+Network is read every 5 seconds, disk traffic every 20, the GPU every 30, and the battery and disk space every 60.
+
+Below them is the machine's list of processes. It shows the first 25, and **Show all** shows the rest. You can search by name or process ID, and sort by CPU, memory, energy impact or name. A row opens to show its process ID, its owner and how long it has been running. The list keeps its order while a row is open or the keyboard is in it, so rows do not move under you.
+
+- Names are the system's short process names, at most 16 characters, so a name can be cut short: Google Chrome Helper shows as `Google Chrome He`. They are not always the names Activity Monitor shows, and no command line or path is ever shown or published.
+- CPU is a share of one core, as Activity Monitor shows it, so a process busy on four cores shows 400%.
+- Memory is the footprint Activity Monitor shows in its Memory column. A process started in the last two minutes may not have a figure yet, and shows a dash.
+- Energy impact is the figure `top` reports.
+
+For this computer, the list has every process, up to what one answer to the panel holds; past that it has the busiest, and says so. A paired Mac sends only its busiest, about 60 by memory and CPU, and a new list about every 30 seconds. The panel says so under the list, with how old it is. A machine on a Fleet Monitor older than 1.2 has no Activity tab, and its detail says to update it.
+
+The list is asked for only while a machine's Activity tab is on screen and the panel is visible.
 
 <br clear="right">
 
@@ -213,14 +249,14 @@ On a Linux desktop, type `orca-ide` where these commands say `orca`.
 | RAM used busy at | 90&nbsp;% | A machine whose RAM used passes this counts as Busy. [Memory](#memory) has the other memory rules. |
 | Alert when memory runs short | On | Sends a desktop notification when a machine's memory reaches Strained or Critical, or when it stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details. |
 | Orca CLI path | Empty | Leave it empty to find the CLI that ships with this Orca. |
-| Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. |
+| Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. On a Mac it also writes the names and owners of its top processes about every 30 seconds. |
 | Monitor in the background | On | Reads machines on the slow interval while no panel is open, to keep the status bar current and to send memory alerts for paired machines. Off, paired machines alert only while a panel is open. |
 
 ## In the background
 
 Each installed copy runs a worker for as long as the plugin is enabled. With no panel open, the worker does two things:
 
-- It publishes this machine's readings every 5 seconds. **Publish this machine's readings** turns that off.
+- It publishes this machine's readings every 5 seconds and, on a Mac, its top processes every 30. **Publish this machine's readings** turns that off.
 - It reads every machine its Orca reaches every 60 seconds, the slow interval, to keep its status bar item current and to send memory alerts. **Monitor in the background** turns that off.
 
 On a server that has Fleet Monitor only so that a desktop can show it at the full level, nobody looks at the status bar. Turn **Monitor in the background** off there. The server then makes no CLI calls unless one of its own panels is open, and it keeps publishing. The setting is on by default everywhere because Orca gives a plugin no reliable way to tell such a server from a desktop. On a desktop with it off, the status bar sums up this computer only, and paired machines send no alerts while no panel is open.
@@ -233,6 +269,9 @@ Reading a machine means running the Orca CLI, one short-lived process per read. 
 - While a panel is open, the diagnostics call for a full machine, and for this computer, runs every 15 seconds instead of every 5.
 - At most two reads run at once. A machine that fails to answer moves to two slots of its own, so it can hold up the others for one call at most, until the 15-second timeout.
 - Fleet Monitor retries an unreachable machine with a growing delay, up to 5 minutes.
+- While a machine's Activity tab is on screen, the panel asks for its processes every 5 seconds for this computer and every 10 seconds for a paired Mac. This computer reads its processes only while asked.
+
+Measured on a Mac, the worker uses about 1% of one core with nobody looking. While this computer's Activity tab is open, it uses about 8% of one core to read its processes, and stops 20 seconds after the tab closes.
 
 ### What a machine publishes
 
@@ -241,7 +280,10 @@ With **Publish this machine's readings** on, which is the default, the worker wr
 - the hostname, platform, architecture, OS release and CPU model;
 - the number of cores, the uptime, total and per-core CPU use, and on Apple silicon which cores are performance cores and which are efficiency cores;
 - the load averages, and the memory figures listed under [Memory](#memory);
+- on a Mac, the network, disk, GPU and battery readings listed under [Activity](#activity);
 - a random id for the worker run, a sequence number and the time.
+
+On a Mac, about every 30 seconds, it also writes a line starting `FLEETPS1` with its top processes, about 60 by memory and CPU. For each one it holds the process ID, the parent's process ID, the short name (at most 16 characters, with no arguments or path), the owner's user name, CPU, memory, energy impact and the start time.
 
 The same log gets one line for each memory alert the machine shows, with the alert's title, which names the machine the alert is about, and whether Orca delivered it.
 
@@ -256,7 +298,7 @@ Fleet Monitor is a full-access (`trusted-worker`) plugin: its worker runs as a N
 - In the desktop app, the panel's **Star on GitHub** link opens this project's page, `https://github.com/mswdev/orca-fleet-monitor`, in your browser through Orca, which asks you first. It is the only address the plugin opens, and only when you click it.
 - It runs these Orca CLI commands, all read-only: `environment list`, `host list`, `diagnostics memory`, `plugin list` and `plugin logs`. The last three also run against paired servers.
 - It runs `plugin open` on this machine when you click the status bar item.
-- On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. On Windows it runs `taskkill` to end a CLI call that timed out.
+- On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. It also runs `ps` and `top` for the process list, `netstat` and `route` for the network, `ioreg` for disk traffic and the GPU, and `pmset` for the battery. On Windows it runs `taskkill` to end a CLI call that timed out.
 
 </details>
 
@@ -280,6 +322,7 @@ Fleet Monitor treats a paired server, the CLI's answers about it and the lines i
 - macOS, both for this computer and for paired servers. It is the only platform Fleet Monitor is tested on and, in practice, the only one it supports. Linux and Windows are implemented but untested. That covers the launcher names, ending a timed-out CLI call's process tree, and Windows having no load average.
 - History covers the last 30 minutes. The worker keeps it in memory, so it starts again whenever Orca or the plugin restarts. So does what it has already alerted about: after a restart, a machine that is still short of memory alerts again.
 - When a machine reaches the full level, the readings still in its log, about the last 16 minutes, fill the gaps in its history. They are added only where there is no reading yet.
+- The Activity tab (network, disk, GPU, battery and processes) is a Mac's only: this computer when it is a Mac, and paired Macs running Fleet Monitor 1.2 or later.
 - Only Apple silicon reports the split into P-cores and E-cores. Which core is which was measured on an Apple M2 Max, and other Apple chips are assumed to number their cores the same way. Where the split is unknown, the panel draws the cores as one group.
 
 ## Development
@@ -297,12 +340,13 @@ There are no runtime dependencies and no build step. Orca runs the TypeScript as
 
 ### Previewing the panel
 
-`tools/preview/` runs the real panel against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`). It covers every state in light and dark and with three invented host themes, at 220, 360 and 700 px. No real machine names appear, so its images are safe to publish.
+`tools/preview/` runs the real panel against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`, and `tools/preview/activity-sample.mjs` for what 1.2 adds). It covers every state in light and dark and with three invented host themes, at 220, 360 and 700 px; `tools/preview/activity.html` has each state of the Activity tab. No real machine names appear, so its images are safe to publish.
 
 ```sh
 npm run preview                       # then open http://127.0.0.1:4173/tools/preview/
 node tools/shoot-preview.mjs          # the listing images in media/
 node tools/preview/shoot-readme.mjs   # the images on this page, in media/readme/
+node tools/preview/shoot-activity.mjs --playwright <path to playwright-core>   # each Activity state, to compare with a design
 ```
 
 Both capture scripts use a locally installed Chrome, Chromium or Edge (`--chrome <path>` to choose one) and download nothing. The README script needs Node 22 or later, and `ffmpeg` on the PATH for the animation. Run it again whenever the panel's look or the sample data changes.
@@ -319,7 +363,7 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$TMPDIR" ELECTRON_RUN_AS_NODE=1 \
 ### Layout
 
 - `src/` is the worker: sampler, beacon, poller, merge, health, history, bridge, bounds, settings and status bar. It schedules on its own steady clock (`steadyClock` in `src/worker.ts`), which a wall clock set back does not move.
-- `panel/` is plain HTML, CSS and JavaScript modules. `fleet-binding.mjs` keeps the fleet current and turns it into the panel's model, `view.mjs` draws that model, and `style.css` holds the design.
+- `panel/` is plain HTML, CSS and JavaScript modules. `fleet-binding.mjs` keeps the fleet current and turns it into the panel's model, `view.mjs` draws that model, `activity.mjs` draws the Activity tab and the memory line from its own view-model, and `style.css` holds the design.
 - `test/` has unit tests for both, run by `orca plugin test`. The panel's drawing is tested in a small fake DOM (`test/fake-dom.ts`) that refuses to parse any string as markup.
 - `media/` has the icon, cover and screenshots the manifest lists, and `media/readme/` the images on this page.
 

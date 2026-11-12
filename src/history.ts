@@ -1,5 +1,5 @@
 // A time-windowed ring of { t, cpu, mem } points, oldest first.
-import type { HistoryColumns, HistoryPoint } from './model.ts'
+import type { ExtraHistoryKey, HistoryColumns, HistoryPoint } from './model.ts'
 
 export const HISTORY_WINDOW_MS = 30 * 60_000
 /** Hard cap so a tiny fast interval cannot grow the ring without bound. */
@@ -95,17 +95,29 @@ export class HistoryRing {
   }
 }
 
-/** Columns of the points. `ram` (RAM in use, from a Mac's own reading) is there only when some
- *  point has it, so a machine without it sends what it always did. */
+/** The history keys added in 1.2: network (`rx`, `tx`) and disk (`dr`, `dw`) bytes per second,
+ *  GPU % and battery %. Each is in a machine's columns only when some point has it. */
+export const EXTRA_HISTORY_KEYS: readonly ExtraHistoryKey[] = ['rx', 'tx', 'dr', 'dw', 'gpu', 'bat']
+/** Bytes per second are kept whole; percentages to one decimal. */
+const WHOLE_KEYS: ReadonlySet<ExtraHistoryKey> = new Set(['rx', 'tx', 'dr', 'dw'])
+
+/** Columns of the points. `ram` (RAM in use, from a Mac's own reading) and the 1.2 columns are
+ *  there only when some point has them, so a machine without them sends what it always did. */
 export function toColumns(points: readonly HistoryPoint[]): HistoryColumns {
   const round = (value: number | null | undefined): number | null =>
     value === null || value === undefined ? null : Math.round(value * 10) / 10
+  const whole = (value: number | null | undefined): number | null => (value === null || value === undefined ? null : Math.round(value))
   const columns: HistoryColumns = {
     t: points.map((p) => p.t),
     cpu: points.map((p) => round(p.cpu)),
     mem: points.map((p) => round(p.mem))
   }
   if (points.some((p) => typeof p.ram === 'number')) columns.ram = points.map((p) => round(p.ram))
+  for (const key of EXTRA_HISTORY_KEYS) {
+    if (!points.some((p) => typeof p[key] === 'number')) continue
+    const fit = WHOLE_KEYS.has(key) ? whole : round
+    columns[key] = points.map((p) => fit(p[key]))
+  }
   return columns
 }
 
@@ -115,5 +127,16 @@ export function downsample(columns: HistoryColumns, step: number): HistoryColumn
   const keep = (_: unknown, i: number, arr: readonly unknown[]): boolean => (arr.length - 1 - i) % step === 0
   const out: HistoryColumns = { t: columns.t.filter(keep), cpu: columns.cpu.filter(keep), mem: columns.mem.filter(keep) }
   if (columns.ram) out.ram = columns.ram.filter(keep)
+  for (const key of EXTRA_HISTORY_KEYS) {
+    const column = columns[key]
+    if (column) out[key] = column.filter(keep)
+  }
+  return out
+}
+
+/** The columns without the 1.2 ones: what a snapshot that is too large sheds first. */
+export function coreColumns(columns: HistoryColumns): HistoryColumns {
+  const out: HistoryColumns = { t: columns.t, cpu: columns.cpu, mem: columns.mem }
+  if (columns.ram) out.ram = columns.ram
   return out
 }

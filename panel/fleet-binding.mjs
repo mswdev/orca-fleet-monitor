@@ -6,6 +6,7 @@
 //   plugin.request('fleet.snapshot')  -> the whole fleet with history; counts as a heartbeat
 //   plugin.request('fleet.heartbeat') -> keeps the worker polling fast while the panel is visible
 //   plugin.request('fleet.retry')     -> reads one machine now ("Retry connection")
+//   plugin.request('fleet.processes') -> one machine's processes (watchProcesses, toProcessList)
 //   plugin.on('fleet.update', ...)    -> current states plus each machine's recent points
 //
 // toFleet() is where the live data meets the visual design: it produces the shape of the design's
@@ -14,6 +15,10 @@
 
 export const HEARTBEAT_MS = 5_000
 const REQUEST_TIMEOUT_MS = 10_000
+/** How often watchProcesses asks: this computer's list is read only while asked (its memory
+ *  figures come every 5 s, as Activity Monitor's do), and a paired Mac publishes its top list
+ *  about every 30 s, which this computer reads within 5 s while a panel is open. */
+export const PROCESS_POLL_MS = Object.freeze({ local: 5_000, remote: 10_000 })
 /** Older history rewritten (a back-fill) re-fetches the fleet at most this often. */
 export const REWRITE_REFRESH_MS = 15_000
 
@@ -22,13 +27,15 @@ export const REWRITE_REFRESH_MS = 15_000
  *  reading) is kept when either side has it, and left out when neither does. */
 export function mergeColumns(base, extra, windowMs) {
   const byTime = new Map()
-  let withRam = false
+  // Optional columns: `ram`, then the 1.2 ones (network, disk, GPU, battery).
+  const optional = ['ram', ...EXTRA_HISTORY_KEYS]
+  const present = new Set()
   for (const cols of [base, extra]) {
     if (!cols || !Array.isArray(cols.t)) continue
-    const ram = Array.isArray(cols.ram) ? cols.ram : null
-    if (ram) withRam = true
+    const columns = optional.map((key) => (Array.isArray(cols[key]) ? cols[key] : null))
+    optional.forEach((key, k) => columns[k] && present.add(key))
     for (let i = 0; i < cols.t.length; i += 1) {
-      byTime.set(cols.t[i], [cols.cpu?.[i] ?? null, cols.mem?.[i] ?? null, ram?.[i] ?? null])
+      byTime.set(cols.t[i], [cols.cpu?.[i] ?? null, cols.mem?.[i] ?? null, ...columns.map((c) => c?.[i] ?? null)])
     }
   }
   const times = [...byTime.keys()].sort((a, b) => a - b)
@@ -39,9 +46,15 @@ export function mergeColumns(base, extra, windowMs) {
     cpu: kept.map((t) => byTime.get(t)[0]),
     mem: kept.map((t) => byTime.get(t)[1])
   }
-  if (withRam) merged.ram = kept.map((t) => byTime.get(t)[2])
+  optional.forEach((key, k) => {
+    if (present.has(key)) merged[key] = kept.map((t) => byTime.get(t)[2 + k])
+  })
   return merged
 }
+
+/** The history columns 1.2 adds: network bytes per second received and sent, disk bytes per
+ *  second read and written, GPU %, battery %. */
+export const EXTRA_HISTORY_KEYS = Object.freeze(['rx', 'tx', 'dr', 'dw', 'gpu', 'bat'])
 
 const emptyColumns = () => ({ t: [], cpu: [], mem: [] })
 
@@ -271,11 +284,61 @@ export function createFleetBinding(orca, options = {}) {
       .catch(() => false)
   }
 
+  /** One machine's processes (`fleet.processes`): the answer, or `{ state: 'error', error }`. */
+  function processes(id) {
+    if (disposed) return Promise.resolve({ state: 'error', error: 'disposed', machineId: id })
+    return plugin
+      .request('fleet.processes', { id }, { timeoutMs: REQUEST_TIMEOUT_MS })
+      .then((answer) => (answer && typeof answer === 'object' ? answer : { state: 'error', error: 'bad answer', machineId: id }))
+      .catch((err) => ({ state: 'error', error: (err && (err.code || err.message)) || 'request failed', machineId: id }))
+  }
+
+  /**
+   * Keeps one machine's process list coming while the panel is visible: asks now, then every
+   * `intervalMs` (PROCESS_POLL_MS: 5 s for this computer, whose list is read only while asked;
+   * 10 s for a paired Mac, which publishes every 30 s), never two at once, and not while hidden
+   * (asking again as it comes back). Returns a function that stops it; stop it as soon as the
+   * list is off screen, so this computer stops reading its processes.
+   */
+  function watchProcesses(id, listener, opts = {}) {
+    const intervalMs = finite(opts.intervalMs) && opts.intervalMs >= 1_000 ? opts.intervalMs : id === 'local' ? PROCESS_POLL_MS.local : PROCESS_POLL_MS.remote
+    let stopped = false
+    let inFlight = false
+    const ask = () => {
+      if (stopped || disposed || inFlight || !isVisible()) return
+      inFlight = true
+      processes(id)
+        .then((answer) => {
+          if (stopped || disposed) return
+          try {
+            listener(answer)
+          } catch (err) {
+            console.error('process view failed', err)
+          }
+        })
+        .finally(() => {
+          inFlight = false
+        })
+    }
+    const handle = startTimer(ask, intervalMs)
+    const stopWatching = onVisibilityChange(() => {
+      if (isVisible()) ask()
+    })
+    ask()
+    return () => {
+      stopped = true
+      stopTimer(handle)
+      stopWatching()
+    }
+  }
+
   return {
     ready,
     current: view,
     refresh,
     retry,
+    processes,
+    watchProcesses,
     subscribe(listener) {
       listeners.add(listener)
       listener(view())
@@ -630,6 +693,113 @@ function pressureNoteOf(m, local, basic) {
   return 'update'
 }
 
+const ageSecOf = (ms) => (finite(ms) && ms >= 1_000 ? Math.round(ms / 1_000) : null)
+const nonNegative = (value) => (finite(value) && value >= 0 ? value : null)
+const BATTERY_STATES = ['charging', 'discharging', 'charged', 'not-charging']
+const POWER_SOURCES = ['ac', 'battery', 'ups']
+
+/** A history column as the charts take it: HISTORY_SLOTS one-minute means, and the window's
+ *  average and peak. */
+function seriesOf(history, key, now) {
+  return { history: bucketHistory(history, key, now), stats: windowStats(history, key, now) }
+}
+
+/**
+ * A Mac's network, disk, GPU and battery, as the panel shows them; each null where the machine
+ * reports none (anything but a Mac running Fleet Monitor 1.2, or this Mac) or it is not online.
+ * Rates are bytes per second; `ageSec` is set only on a figure carried from an earlier read.
+ */
+function systemOf(m, history, now) {
+  const s = m.online === true && m.system && typeof m.system === 'object' ? m.system : null
+  const net = s?.net && typeof s.net === 'object' && typeof s.net.iface === 'string' ? s.net : null
+  const disk = s?.disk && typeof s.disk === 'object' ? s.disk : null
+  const gpu = s?.gpu && typeof s.gpu === 'object' && finite(s.gpu.percent) ? s.gpu : null
+  const bat = s?.battery && typeof s.battery === 'object' && typeof s.battery.present === 'boolean' ? s.battery : null
+  const total = disk ? nonNegative(disk.totalBytes) : null
+  const used = disk && total !== null && total > 0 ? nonNegative(disk.usedBytes) : null
+  return {
+    net: net
+      ? {
+          iface: plainText(net.iface).slice(0, 16),
+          rxBytesPerSec: nonNegative(net.rxBytesPerSec),
+          txBytesPerSec: nonNegative(net.txBytesPerSec),
+          ageSec: ageSecOf(net.ageMs),
+          rx: seriesOf(history, 'rx', now),
+          tx: seriesOf(history, 'tx', now)
+        }
+      : null,
+    disk: disk
+      ? {
+          totalBytes: used === null ? null : total,
+          usedBytes: used === null ? null : Math.min(used, total),
+          freeBytes: used === null ? null : Math.max(0, total - used),
+          usedPct: used === null ? null : Math.min(100, (used / total) * 100),
+          spaceAgeSec: ageSecOf(disk.spaceAgeMs),
+          readBytesPerSec: nonNegative(disk.readBytesPerSec),
+          writeBytesPerSec: nonNegative(disk.writeBytesPerSec),
+          ioAgeSec: ageSecOf(disk.ioAgeMs),
+          read: seriesOf(history, 'dr', now),
+          write: seriesOf(history, 'dw', now)
+        }
+      : null,
+    gpu: gpu ? { pct: Math.min(100, Math.max(0, gpu.percent)), ageSec: ageSecOf(gpu.ageMs), ...seriesOf(history, 'gpu', now) } : null,
+    battery: bat
+      ? {
+          present: bat.present,
+          pct: bat.present && finite(bat.percent) ? Math.min(100, Math.max(0, bat.percent)) : null,
+          state: bat.present && BATTERY_STATES.includes(bat.state) ? bat.state : null,
+          source: POWER_SOURCES.includes(bat.source) ? bat.source : null,
+          minutesRemaining: bat.present ? nonNegative(bat.minutesRemaining) : null,
+          ageSec: ageSecOf(bat.ageMs),
+          ...seriesOf(history, 'bat', now)
+        }
+      : null
+  }
+}
+
+const PROCESS_STATES = ['full', 'top', 'waiting', 'unavailable']
+const PROCESS_REASONS = ['not-mac', 'basic', 'outdated', 'publishing-off', 'not-read-yet', 'offline', 'unknown-machine', 'failed']
+
+/** Whether a machine has a process list, and the process using the most memory in its newest
+ *  one, with its share of the machine's RAM. */
+function processSummaryOf(m, memTotal, now) {
+  const p = m.processes && typeof m.processes === 'object' ? m.processes : null
+  const state = p && PROCESS_STATES.includes(p.state) ? p.state : 'unavailable'
+  const l = p?.largest && typeof p.largest === 'object' ? p.largest : null
+  const largest =
+    l && Number.isInteger(l.pid) && typeof l.name === 'string' && finite(l.mem) && l.mem > 0
+      ? { pid: l.pid, name: cleanName(l.name), memBytes: l.mem, memPct: finite(memTotal) && memTotal > 0 ? Math.min(100, (l.mem / memTotal) * 100) : null }
+      : null
+  const takenAt = p && finite(p.takenAt) ? p.takenAt : null
+  const ageMs = takenAt === null ? null : Math.max(0, now - takenAt)
+  const memAgeMs = p && finite(p.memAgeMs) && p.memAgeMs >= 0 ? p.memAgeMs : null
+  const largestAt = p && finite(p.largestAt) ? p.largestAt : null
+  return {
+    state,
+    reason: state === 'unavailable' ? (PROCESS_REASONS.includes(p?.reason) ? p.reason : null) : null,
+    /** A paired Mac's own top list (about 60 processes), not the whole list. */
+    topList: state === 'top' || state === 'waiting',
+    takenAt,
+    ageSec: ageMs === null ? null : Math.round(ageMs / 1_000),
+    /** How old the largest process's memory figure is now: it is carried through pauses (memory
+     *  critical there), so it can be minutes old while the list itself is newer, or gone. */
+    memAgeSec:
+      largest === null
+        ? null
+        : largestAt !== null
+          ? Math.max(0, Math.round((now - largestAt) / 1_000))
+          : ageMs === null || memAgeMs === null
+            ? null
+            : Math.round((ageMs + memAgeMs) / 1_000),
+    largest
+  }
+}
+
+/** A process name or user name from a list: plain text on one line, bounded. */
+function cleanName(value) {
+  return plainText(String(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')).trim().slice(0, 128)
+}
+
 function toMachine(m, thresholds, now, context) {
   const local = m.kind === 'local'
   const online = m.online === true
@@ -711,7 +881,9 @@ function toMachine(m, thresholds, now, context) {
     orca: m.orca && finite(m.orca.cpu) ? { cpuPct: m.orca.cpu / Math.max(1, cores ?? 1), memBytes: finite(m.orca.memory) ? m.orca.memory : null } : null,
     workspaces: online ? workspacesOf(m.workspaces, cores) : [],
     install: !local && online && basic ? installHintOf(m, context, isMac) : null,
-    lastKnown: { cpuPct: newestCpu?.value ?? cpuPct, memPct: newestMem?.value ?? (memReliable ? memPct : null) }
+    lastKnown: { cpuPct: newestCpu?.value ?? cpuPct, memPct: newestMem?.value ?? (memReliable ? memPct : null) },
+    ...systemOf(m, history, now),
+    processes: processSummaryOf(m, m.memory && finite(m.memory.total) ? m.memory.total : null, now)
   }
 }
 
@@ -755,3 +927,109 @@ export function toFleet(view, now = Date.now()) {
     machines
   }
 }
+
+// --- Process lists ----------------------------------------------------------------------------
+
+/** The keys a process list sorts by, and the direction each starts in. */
+export const PROCESS_SORT_KEYS = Object.freeze({ name: 'asc', pid: 'asc', user: 'asc', cpu: 'desc', mem: 'desc', energy: 'desc' })
+/** Most rows a list model holds: far more than any Mac runs. */
+export const MAX_PROCESS_ROWS = 10_000
+
+const LIST_STATES = ['ok', 'waiting', 'unavailable']
+
+/** One process row from an answer's columns, checked; null when its pid is not a whole number. */
+function processRowAt(c, i) {
+  const pid = c.pid[i]
+  if (!Number.isInteger(pid) || pid < 0) return null
+  const name = typeof c.name?.[i] === 'string' ? cleanName(c.name[i]) : ''
+  const user = typeof c.user?.[i] === 'string' ? cleanName(c.user[i]).slice(0, 32) : null
+  return {
+    pid,
+    ppid: Number.isInteger(c.ppid?.[i]) ? c.ppid[i] : null,
+    name: name || String(pid),
+    user,
+    cpuPct: nonNegative(c.cpu?.[i]),
+    memBytes: nonNegative(c.mem?.[i]),
+    energy: nonNegative(c.energy?.[i]),
+    start: nonNegative(c.start?.[i]),
+    largest: false
+  }
+}
+
+const SORT_FIELD = { name: 'name', pid: 'pid', user: 'user', cpu: 'cpuPct', mem: 'memBytes', energy: 'energy' }
+
+/** A comparison for `key` in `dir`: rows without a figure last whichever way, then by pid. */
+export function compareProcesses(key, dir) {
+  const field = own(SORT_FIELD, key) ?? 'memBytes'
+  const sign = dir === 'asc' ? 1 : -1
+  return (a, b) => {
+    const x = a[field]
+    const y = b[field]
+    if (x === null || x === undefined) return y === null || y === undefined ? a.pid - b.pid : 1
+    if (y === null || y === undefined) return -1
+    const order = typeof x === 'string' ? x.localeCompare(y, undefined, { sensitivity: 'base', numeric: true }) : x - y
+    return order !== 0 ? sign * order : a.pid - b.pid
+  }
+}
+
+/** Does a row match a filter (already trimmed and lower case)? Its name or user contains it, or
+ *  its pid starts with it. */
+function matches(row, query) {
+  if (!query) return true
+  if (/^\d+$/.test(query) && String(row.pid).startsWith(query)) return true
+  return row.name.toLowerCase().includes(query) || (row.user !== null && row.user.toLowerCase().includes(query))
+}
+
+/**
+ * A `fleet.processes` answer as the panel shows it: rows checked, filtered by `query` (name, user
+ * or pid), sorted by `sort` (a PROCESS_SORT_KEYS key; `dir` defaults to that key's own), and the
+ * row using the most memory marked `largest` (worked out here from the figures, whatever the
+ * worker or a remote said). `now` is the worker's clock, as for toFleet().
+ */
+export function toProcessList(answer, options = {}, now = Date.now()) {
+  const key = typeof options.sort === 'string' && own(PROCESS_SORT_KEYS, options.sort) ? options.sort : 'mem'
+  const dir = options.dir === 'asc' || options.dir === 'desc' ? options.dir : PROCESS_SORT_KEYS[key]
+  const query = typeof options.query === 'string' ? options.query.trim().toLowerCase().slice(0, 100) : ''
+  const base = { machineId: typeof answer?.machineId === 'string' ? answer.machineId : null, sort: { key, dir }, query, rows: [], count: 0, shown: 0, largest: null }
+  if (!answer || typeof answer !== 'object') return { ...base, state: 'loading', reason: null, error: null, scope: null, topList: false, takenAt: null, ageSec: null, cpuWindowSec: null, memAgeSec: null, energyWindowSec: null, total: null, truncated: false }
+  const state = answer.state === 'error' ? 'error' : LIST_STATES.includes(answer.state) ? answer.state : 'error'
+  const c = answer.columns && typeof answer.columns === 'object' && Array.isArray(answer.columns.pid) ? answer.columns : null
+  const rows = []
+  const seen = new Set()
+  if (state === 'ok' && c) {
+    for (let i = 0; i < c.pid.length && rows.length < MAX_PROCESS_ROWS; i += 1) {
+      const row = processRowAt(c, i)
+      if (row && !seen.has(row.pid)) {
+        seen.add(row.pid)
+        rows.push(row)
+      }
+    }
+  }
+  let largest = null
+  for (const row of rows) if (row.memBytes !== null && row.memBytes > 0 && (!largest || row.memBytes > largest.memBytes)) largest = row
+  if (largest) largest.largest = true
+  const shown = rows.filter((row) => matches(row, query)).sort(compareProcesses(key, dir))
+  const takenAt = finite(answer.takenAt) ? answer.takenAt : null
+  const sec = (ms) => (finite(ms) && ms >= 0 ? Math.round(ms / 1_000) : null)
+  return {
+    ...base,
+    state,
+    reason: state === 'unavailable' && PROCESS_REASONS.includes(answer.reason) ? answer.reason : null,
+    error: state === 'error' ? plainText(String(answer.error ?? 'bad answer')).slice(0, 200) : null,
+    scope: answer.scope === 'top' ? 'top' : answer.scope === 'full' ? 'full' : null,
+    /** A paired Mac's own top list (about 40 by memory and 20 by CPU), not every process. */
+    topList: answer.scope === 'top',
+    takenAt,
+    ageSec: takenAt === null ? null : Math.max(0, Math.round((now - takenAt) / 1_000)),
+    cpuWindowSec: sec(answer.cpuWindowMs),
+    memAgeSec: sec(answer.memAgeMs),
+    energyWindowSec: sec(answer.energyWindowMs),
+    total: Number.isInteger(answer.total) && answer.total >= 0 ? answer.total : null,
+    truncated: answer.truncated === true,
+    count: rows.length,
+    shown: shown.length,
+    largest: largest ? { pid: largest.pid, name: largest.name, memBytes: largest.memBytes } : null,
+    rows: shown
+  }
+}
+

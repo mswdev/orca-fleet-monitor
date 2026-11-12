@@ -1,6 +1,6 @@
 // The panel <-> worker contract, declared once so the worker type-checks against it.
 // The html panel (panel/*.mjs) follows the same names by hand.
-import type { FleetSnapshot, FleetUpdate } from './model.ts'
+import type { FleetSnapshot, FleetUpdate, ProcessList } from './model.ts'
 
 export {}
 
@@ -13,6 +13,9 @@ declare module 'orca' {
     'fleet.heartbeat': { output: { ok: true; mode: 'fast' | 'slow'; seq: number } }
     /** "Retry connection" on an offline machine: read it now rather than after its back-off. */
     'fleet.retry': { input: { id: string }; output: { ok: boolean } }
+    /** One machine's processes: this computer's whole list (read while asked), or a paired Mac's
+     *  newest top list. Counts as a heartbeat. */
+    'fleet.processes': { input: { id: string }; output: ProcessList }
   }
   // oxlint-disable-next-line typescript/consistent-type-definitions -- declaration merging needs an interface
   interface PluginPanelEvents {

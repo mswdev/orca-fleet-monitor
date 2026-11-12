@@ -52,10 +52,27 @@ function syncAttributes(from, to) {
   }
 }
 
+/** Puts `node` before `at` in `parent`. A node already there is moved with `moveBefore` where the
+ *  browser has it, which keeps focus inside the node; `insertBefore` would drop it. */
+function place(parent, node, at) {
+  if (node.parentNode === parent && typeof parent.moveBefore === 'function' && parent.isConnected) {
+    try {
+      parent.moveBefore(node, at)
+      return
+    } catch {
+      // Not movable in place here: fall back to inserting.
+    }
+  }
+  parent.insertBefore(node, at)
+}
+
 /**
  * Makes the live children of `parent` match `next` (detached nodes) while keeping every node that
  * stays the same kind in place, so focus, hover, text selection and running animations survive a
  * redraw. Event handlers live on the panel root (delegation), never on the nodes morphed here.
+ *
+ * Nodes that go are removed before anything is placed, so a list that only loses or gains rows
+ * moves none of the rows that stay (moving a node drops the focus held inside it).
  */
 export function morphChildren(parent, next) {
   const old = [...parent.childNodes]
@@ -66,7 +83,7 @@ export function morphChildren(parent, next) {
   }
   const used = new Set()
   let cursor = 0
-  next.forEach((incoming, index) => {
+  const pairs = next.map((incoming) => {
     const key = keyOf(incoming)
     let match = null
     if (key !== null) {
@@ -78,14 +95,16 @@ export function morphChildren(parent, next) {
     if (match && sameKind(match, incoming) && !used.has(match)) {
       used.add(match)
       if (key === null) cursor += 1
-      morph(match, incoming)
-    } else {
-      match = incoming
+      return [match, incoming]
     }
-    const at = parent.childNodes[index] ?? null
-    if (at !== match) parent.insertBefore(match, at)
+    return [incoming, null]
   })
   for (const node of old) if (!used.has(node) && node.parentNode === parent) node.remove()
+  pairs.forEach(([node], index) => {
+    const at = parent.childNodes[index] ?? null
+    if (at !== node) place(parent, node, at)
+  })
+  for (const [node, incoming] of pairs) if (incoming) morph(node, incoming)
 }
 
 function morph(from, to) {

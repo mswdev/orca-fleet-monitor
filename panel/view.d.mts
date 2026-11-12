@@ -5,7 +5,8 @@ export const PAIR_PATH: string
 export const REPOSITORY_URL: string
 
 export type FleetViewOptions = {
-  binding: Pick<FleetBinding, 'current' | 'subscribe' | 'retry' | 'refresh'>
+  /** `watchProcesses` feeds a machine's Activity tab; without it the list stays loading. */
+  binding: Pick<FleetBinding, 'current' | 'subscribe' | 'retry' | 'refresh'> & Partial<Pick<FleetBinding, 'watchProcesses'>>
   /** This frame's clock; Date.now when not given. */
   now?: () => number
   setInterval?: (fn: () => void, ms: number) => unknown
@@ -20,6 +21,8 @@ export type FleetViewHandle = {
   model(): FleetModel
   /** Shows one machine's detail, or the overview with no id, without moving focus. */
   show(id: string | null): void
+  /** Shows a tab of the machine on screen (when it has tabs), without moving focus. */
+  showTab(tab: 'overview' | 'activity'): void
   dispose(): void
 }
 

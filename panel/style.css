@@ -1022,3 +1022,570 @@ body {
   color: var(--fm-fg);
   text-decoration-color: currentColor;
 }
+
+/* === 1.2: the Overview | Activity control, the memory line, the tiles, the Processes card and the
+ * search and sort controls (fm-seg, fm-suggest, fm-tiles, fm-procs). The
+ * panel is the whole frame, so widths are media queries: under 300 px is "narrow", 520 px and up
+ * is "wide". No new colours: everything uses the --fm-* tokens above. */
+
+/* --- fm-seg ------------------------------------------------------------------------------------ */
+
+.fm-seg {
+  flex: 1 1 100%;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 2px;
+  min-width: 0;
+  margin-top: 2px;
+  padding: 2px;
+  background: var(--fm-muted);
+  border-radius: var(--fm-radius);
+}
+.fm-seg-btn {
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fm-muted-fg);
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--fm-radius) - 2px);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.fm-seg-btn:hover {
+  color: var(--fm-fg);
+}
+.fm-seg-btn[aria-selected='true'] {
+  font-weight: 600;
+  color: var(--fm-fg);
+  background: var(--fm-card);
+  box-shadow: 0 0 0 1px var(--fm-border);
+}
+.fm .fm-seg-btn:focus-visible {
+  outline-offset: 1px;
+}
+
+/* --- fm-procs: its head and toolbar (fm-proc-bar: fm-search and fm-sort) ----------------------- */
+
+/* "Processes" and how many, then the toolbar: on its own line, or beside them on a wide panel. */
+.fm-proc-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px 8px;
+}
+.fm-proc-top > .fm-sub {
+  margin-left: auto;
+}
+.fm-proc-bar {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.fm-search {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--fm-muted-fg);
+}
+.fm-search > svg {
+  position: absolute;
+  left: 8px;
+  pointer-events: none;
+}
+.fm-search-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 28px 0 30px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fm-fg);
+  background: var(--fm-card);
+  border: 1px solid var(--fm-border);
+  border-radius: 6px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.fm-search-input::placeholder {
+  color: var(--fm-muted-fg);
+  opacity: 1;
+}
+.fm-search-input::-webkit-search-cancel-button,
+.fm-search-input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  display: none;
+}
+.fm-search-input:focus-visible {
+  outline: 2px solid var(--fm-ring);
+  outline-offset: 1px;
+}
+.fm-search-clear {
+  position: absolute;
+  right: 2px;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+}
+.fm-sort {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.fm-sort > svg {
+  position: absolute;
+  pointer-events: none;
+  color: var(--fm-muted-fg);
+}
+.fm-sort-icon {
+  left: 7px;
+}
+.fm-sort-caret {
+  right: 4px;
+}
+.fm-sort-select {
+  height: 28px;
+  margin: 0;
+  padding: 0 22px 0 29px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fm-fg);
+  background: transparent;
+  border: 1px solid var(--fm-border);
+  border-radius: 6px;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.fm-sort-select:hover {
+  background: var(--fm-accent);
+}
+.fm-sort-select:focus-visible {
+  outline: 2px solid var(--fm-ring);
+  outline-offset: 2px;
+}
+
+/* --- fm-procs: the list ------------------------------------------------------------------------ */
+
+.fm-procs-card {
+  grid-column: 1 / -1;
+}
+.fm-proc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* The CPU column is 48 px, not the Top workspaces grid's 40: its label says what the figure is
+ * ("% of core": percent of one core, which passes 100 for a process busy on several cores). */
+.fm-proc-head,
+.fm-proc-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px 58px;
+  column-gap: 8px;
+}
+.fm-proc-head {
+  padding-bottom: 2px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--fm-muted-fg);
+}
+.fm-proc-head > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fm-proc-head > span + span {
+  text-align: right;
+}
+.fm-proc-head > .is-key {
+  color: var(--fm-card-fg);
+}
+.fm-procs {
+  display: flex;
+  flex-direction: column;
+  /* A row's hover and its open state reach 6 px into the card's padding; the text stays on the
+   * card's own edge. */
+  margin: 0 -6px;
+  padding: 0;
+  list-style: none;
+}
+.fm-proc-row {
+  align-items: center;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 6px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--fm-card-fg);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fm-proc-row:hover {
+  background: var(--fm-accent);
+}
+.fm .fm-proc-row:focus-visible {
+  outline-offset: -2px;
+}
+.fm-proc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Wide only: what the process was started with, so twelve rows called node can be told apart. */
+.fm-proc-hint {
+  display: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--fm-mono);
+  font-size: 11px;
+  color: var(--fm-muted-fg);
+}
+.fm-proc-num {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--fm-mono);
+  text-align: right;
+  color: var(--fm-muted-fg);
+}
+.fm-proc-num.is-key {
+  color: var(--fm-card-fg);
+}
+/* Which numbers a row shows. Medium (300 to 519 px): CPU and memory; sorted by energy, energy
+ * takes CPU's place. */
+.fm-proc-energy {
+  display: none;
+}
+[data-sort='energy'] .fm-proc-cpu {
+  display: none;
+}
+[data-sort='energy'] .fm-proc-energy {
+  display: block;
+}
+
+/* An open row: one muted block holding the row and what is behind it. */
+.fm-proc.is-open {
+  margin: 2px 0;
+  background: var(--fm-muted);
+  border-radius: var(--fm-radius);
+}
+.fm-proc.is-open > .fm-proc-row {
+  min-height: 30px;
+  border-radius: var(--fm-radius) var(--fm-radius) 6px 6px;
+}
+.fm-proc.is-open .fm-proc-name {
+  font-weight: 600;
+}
+.fm-proc-more {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 6px 8px;
+  animation: fm-reveal 120ms ease;
+}
+@keyframes fm-reveal {
+  from {
+    opacity: 0;
+  }
+}
+.fm-proc-cmd {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-family: var(--fm-mono);
+  font-size: 11px;
+  color: var(--fm-muted-fg);
+  overflow-wrap: anywhere;
+}
+.fm-proc-more .fm-facts {
+  gap: 5px;
+}
+/* An open row's facts start with whichever of CPU, memory and energy the row itself does not show
+ * at this width, so nothing is said twice and nothing is lost on a narrow panel. Medium: the row
+ * shows CPU and memory. */
+.fm-fact--cpu,
+.fm-fact--mem {
+  display: none;
+}
+[data-sort='energy'] .fm-fact--cpu {
+  display: flex;
+}
+[data-sort='energy'] .fm-fact--energy {
+  display: none;
+}
+.fm-proc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 4px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--fm-muted-fg);
+}
+.fm-proc-empty h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fm-card-fg);
+  overflow-wrap: anywhere;
+}
+.fm-proc-empty p {
+  max-width: 260px;
+}
+.fm-proc-empty .fm-btn {
+  margin-top: 6px;
+}
+.fm-proc-foot {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+.fm-proc-note {
+  margin-top: 6px;
+}
+/* Loading: the list's own shape, pulsing. A skeleton row has a row's columns, so it shows the
+ * numbers a row would show at this width. */
+.fm-proc-skel {
+  display: flex;
+  flex-direction: column;
+}
+.fm-proc-skel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px 58px;
+  column-gap: 8px;
+  align-items: center;
+  justify-items: end;
+  height: 28px;
+}
+.fm-proc-skel .fm-skel-bar {
+  height: 9px;
+}
+.fm-proc-skel .fm-skel-bar:first-child {
+  justify-self: start;
+}
+.fm-proc-skel .fm-proc-cpu,
+.fm-proc-skel .fm-proc-energy {
+  width: 24px;
+}
+.fm-proc-skel .fm-proc-mem {
+  width: 40px;
+}
+
+/* --- fm-suggest -------------------------------------------------------------------------------- */
+
+.fm-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 10px;
+  padding: 8px 8px 8px 10px;
+  font-size: 12px;
+  color: var(--fm-muted-fg);
+  background: var(--fm-muted);
+  border-radius: 6px;
+}
+.fm-suggest p {
+  flex: 1 1 150px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.fm-suggest strong {
+  font-weight: 600;
+  color: var(--fm-card-fg);
+}
+
+/* --- fm-tiles ---------------------------------------------------------------------------------- */
+
+.fm-tiles {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(128px, 100%), 1fr));
+  gap: 14px 16px;
+}
+.fm-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+/* The figure, then one line under it: a tile is the same height at every width. */
+.fm-tile .fm-metric-row {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 3px;
+}
+.fm-tile .fm-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fm-unit--sp {
+  margin-left: 3px;
+}
+.fm-dir {
+  flex: none;
+  display: inline-block;
+  vertical-align: baseline;
+  margin-right: 3px;
+}
+.fm-big .fm-dir {
+  margin-right: 4px;
+  color: var(--fm-tone);
+}
+/* A sparkline, or a bar with one line under it: 28 px either way. */
+.fm-tile-slot {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  margin-top: 2px;
+}
+.fm-tile-slot .fm-ws-bar > span {
+  background: var(--fm-tone);
+}
+.fm-tile-cap {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--fm-mono);
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--fm-muted-fg);
+}
+/* The second series of a two-series sparkline (upload): a line, no fill, in the muted text colour. */
+.fm-line--second {
+  stroke: var(--fm-muted-fg);
+  stroke-width: 1.25;
+}
+
+/* --- widths ------------------------------------------------------------------------------------ */
+
+/* Narrow: one number per row (the one the list is sorted by; CPU when sorted by name), and the
+ * sort control is its icon. */
+@media (max-width: 299px) {
+  .fm-proc-head,
+  .fm-proc-row,
+  .fm-proc-skel-row {
+    grid-template-columns: minmax(0, 1fr) 58px;
+  }
+  .fm-proc-mem {
+    display: none;
+  }
+  [data-sort='memory'] .fm-proc-cpu {
+    display: none;
+  }
+  [data-sort='memory'] .fm-proc-mem {
+    display: block;
+  }
+  .fm-fact--mem,
+  [data-sort='memory'] .fm-fact--cpu {
+    display: flex;
+  }
+  [data-sort='memory'] .fm-fact--mem {
+    display: none;
+  }
+  .fm-sort-select {
+    width: 28px;
+    padding: 0;
+    color: transparent;
+  }
+  .fm-sort-select option {
+    color: var(--fm-fg);
+  }
+  .fm-sort-icon {
+    left: 6px;
+  }
+  .fm-sort-caret {
+    display: none;
+  }
+}
+
+/* Wide: the segmented control sits in the header's row and the toolbar beside the card's title; a
+ * row has room for what the process was started with and, on a Mac, for all three numbers. */
+@media (min-width: 520px) {
+  /* The control joins the header's one row, before the health level, which keeps its corner. */
+  .fm-seg {
+    flex: 0 0 232px;
+    margin-top: 0;
+  }
+  .fm-top--detail > .fm-level,
+  .fm-top--detail > .fm-state {
+    order: 1;
+    margin-left: 4px;
+  }
+  .fm-proc-top {
+    align-items: center;
+  }
+  .fm-proc-top > .fm-sub {
+    margin-left: 0;
+    margin-right: auto;
+  }
+  .fm-proc-bar {
+    flex: 0 1 320px;
+  }
+  .fm-proc-head,
+  .fm-proc-row,
+  .fm-proc-skel-row {
+    grid-template-columns: minmax(0, 240px) minmax(0, 1fr) 52px 64px;
+    column-gap: 12px;
+  }
+  [data-energy] .fm-proc-head,
+  [data-energy] .fm-proc-row,
+  [data-energy] .fm-proc-skel-row {
+    grid-template-columns: minmax(0, 240px) minmax(0, 1fr) 52px 48px 64px;
+  }
+  .fm-proc-hint {
+    display: block;
+  }
+  /* An open row shows the whole command under it, so its hint steps aside. */
+  .fm-proc.is-open .fm-proc-hint {
+    visibility: hidden;
+  }
+  /* Facts and answers keep a readable measure rather than stretch across the card. */
+  .fm-proc-more > .fm-facts {
+    max-width: 360px;
+  }
+  [data-energy] .fm-proc-cpu,
+  [data-energy] .fm-proc-energy {
+    display: block;
+  }
+  [data-energy] .fm-fact--energy,
+  [data-energy][data-sort='energy'] .fm-fact--cpu {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fm-seg-btn {
+    transition: none;
+  }
+  .fm-proc-more {
+    animation: none;
+  }
+}

@@ -4,7 +4,7 @@
   "execution": "trusted-worker",
   "id": "fleet-monitor",
   "name": "Fleet Monitor",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "System monitor for Orca: live CPU usage, per-core load and memory usage (RAM, swap, memory pressure) for this computer and all your paired remote servers. Like an activity monitor or task manager for all your machines: performance monitoring, stats and system resources in one sidebar panel.",
   "author": { "name": "mswdev" },
   "repository": "https://github.com/mswdev/orca-fleet-monitor",
@@ -17,7 +17,7 @@
   "screenshots": [
     {
       "path": "media/screenshot-light.png",
-      "alt": "Five sample machines with health, CPU, memory and sparklines, beside one strained machine's charts, per-core load and busiest workspaces.",
+      "alt": "Five sample machines with health, CPU and memory, beside one strained machine's detail: its tabs, charts, per-core load and the process using the most memory.",
       "caption": "The overview and a machine's detail",
       "theme": "light"
     },
@@ -31,6 +31,12 @@
       "path": "media/screenshot-basic.png",
       "alt": "A basic machine with its CPU estimate labelled and the command that installs Fleet Monitor there, beside an offline machine's last readings.",
       "caption": "A machine with nothing installed, and one that is offline"
+    },
+    {
+      "path": "media/screenshot-activity.png",
+      "alt": "This computer's network, disk, GPU and battery readings above its processes sorted by CPU, beside a paired Mac's readings and its 60 busiest processes.",
+      "caption": "Activity: network, disk, GPU, battery and processes",
+      "theme": "dark"
     }
   ],
   "engines": { "orca": ">=1.4.248" },
@@ -153,7 +159,7 @@
       {
         "key": "beacon",
         "title": "Publish this machine's readings",
-        "description": "Write a short reading to this plugin's log every 5 seconds, so a paired desktop can show per-core CPU for this machine.",
+        "description": "Write a short reading to this plugin's log every 5 seconds, so a paired desktop can show per-core CPU for this machine. On a Mac it also publishes the names and owners of that machine's top processes, about every 30 seconds.",
         "type": "boolean",
         "default": true
       },

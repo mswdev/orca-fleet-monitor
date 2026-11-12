@@ -1,7 +1,22 @@
 // The Fleet Monitor panel: an overview card per machine and a detail screen per machine, after
 // the visual design (Main.dc.html in the design project). It draws toFleet() from
-// fleet-binding.mjs and nothing else. Untrusted text (machine, workspace and error text) only
-// ever becomes text nodes or attribute values; see dom.mjs.
+// fleet-binding.mjs and, for a machine's Activity tab and memory line, toActivityModel() from
+// activity.mjs. Untrusted text (machine, workspace, process and error text) only ever becomes
+// text nodes or attribute values; see dom.mjs.
+import {
+  arrangeRows,
+  FIRST_ROWS,
+  matchesSpoken,
+  matchRows,
+  processesSection,
+  segControl,
+  SORT_SPOKEN,
+  suggestLine,
+  TAB_IDS,
+  TAB_PANEL_ID,
+  tilesSection,
+  toActivityModel
+} from './activity.mjs'
 import { seriesPaths } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
 import { INSTALL_SOURCE, MAX_CORES_DRAWN, toFleet } from './fleet-binding.mjs'
@@ -378,7 +393,7 @@ function overview(fleet, ui, now) {
 
 // --- detail ------------------------------------------------------------------------------------
 
-function detailHeader(m, now) {
+function detailHeader(m, now, act, tab) {
   let subtitle
   if (m.status === 'connecting') subtitle = h('p', { class: 'fm-summary' }, 'Connecting…')
   else if (!m.online) {
@@ -402,7 +417,8 @@ function detailHeader(m, now) {
       subtitle,
       reasons
     ),
-    m.online ? level(m.health, m.healthLabel) : m.lost ? level(m.lost.level, m.lost.label) : h('span', { class: 'fm-state' }, m.status === 'connecting' ? 'Connecting…' : 'Offline')
+    m.online ? level(m.health, m.healthLabel) : m.lost ? level(m.lost.level, m.lost.label) : h('span', { class: 'fm-state' }, m.status === 'connecting' ? 'Connecting…' : 'Offline'),
+    act?.tabs ? segControl(m.name, tab) : null
   )
 }
 
@@ -578,7 +594,7 @@ const PRESSURE_NOTES = {
   own: 'This Mac’s own memory reading is not available right now.'
 }
 
-function memorySection(m) {
+function memorySection(m, suggest = null) {
   const value = m.mem.reliable ? m.mem.pct : null
   const used = m.mem.kind === 'used'
   // With the install row on screen, it says what installing adds; the note does not repeat it.
@@ -589,6 +605,7 @@ function memorySection(m) {
     { class: 'fm-section', data: { tone: m.mem.tone }, 'aria-label': m.mem.label, 'data-key': 'memory' },
     h('div', { class: 'fm-section-head' }, h('h2', {}, m.mem.label), h('span', { class: 'fm-sub' }, memSub(m, true))),
     h('div', { class: 'fm-reading' }, big(value, true), used ? h('span', { class: 'fm-sub' }, 'used') : null, h('span', { class: 'fm-sub' }, statsText(m.mem.stats))),
+    suggestLine(suggest),
     note !== null ? h('p', { class: 'fm-note', 'data-key': 'pressure-note' }, `Memory pressure as Orca reads it, not RAM in use.${note ? ` ${note}` : ''}`) : null,
     m.mem.kind === 'unavailable'
       ? h('p', { class: 'fm-note', 'data-key': 'unavailable-note' }, 'Memory unavailable: Orca reports only free memory for this machine right now, which is neither RAM in use nor memory pressure, so it is not shown or judged.')
@@ -629,10 +646,11 @@ const INSTALL_TEXT = {
   installed: 'Fleet Monitor is installed on this machine but not running',
   quiet: 'Fleet Monitor runs on this machine, but its readings are not arriving'
 }
-/** On a Mac, what installing it adds is said in so many words. */
+/** On a Mac, what installing it adds is said in so many words. Activity (network, disk and the
+ *  process list) is a Mac's only. */
 const INSTALL_TEXT_MAC = {
   ...INSTALL_TEXT,
-  absent: 'Install Fleet Monitor on this machine for real RAM usage, swap and pressure'
+  absent: 'Install Fleet Monitor on this machine for real RAM usage, activity and processes'
 }
 
 /** The install row's body, drawn closed too (hidden) so the toggle's aria-controls names it. One
@@ -794,9 +812,29 @@ function lastKnownFacts(m) {
   return facts
 }
 
-function detail(m, ui, now) {
+/** The Activity tab: the tiles, then the Processes card. */
+function activitySections(m, act, ui, now, list) {
+  const sections = [tilesSection(act.tiles)]
+  if (act.processes) {
+    sections.push(
+      processesSection(act.processes, {
+        ...list,
+        open: ui.openKey,
+        machineName: m.name,
+        announce: ui.announce,
+        since: (tagName, props, template, at) => since(tagName, props, template, at, now)
+      })
+    )
+  }
+  return sections.filter(Boolean)
+}
+
+function detail(m, ui, now, act, list) {
   const sections = []
-  if (m.status === 'connecting') {
+  const tab = act?.tabs ? ui.tab : 'overview'
+  if (tab === 'activity') {
+    sections.push(...activitySections(m, act, ui, now, list))
+  } else if (m.status === 'connecting') {
     sections.push(h('section', { class: 'fm-section fm-skel', 'aria-label': 'Connecting', 'data-key': 'waiting' }, skeletonMetrics()))
   } else if (!m.online) {
     if (m.lost) sections.push(lostSection(m, now))
@@ -805,25 +843,46 @@ function detail(m, ui, now) {
     if (facts.length > 0) sections.push(factsSection('Last known', facts))
   } else {
     if (m.lost) sections.push(lostSection(m, now))
-    sections.push(cpuSection(m), memorySection(m))
+    sections.push(cpuSection(m), memorySection(m, act?.suggest ?? null))
     if (m.workspaces.length > 0) sections.push(workspacesSection(m))
     if (m.install) sections.push(installRow(m, ui))
     const facts = systemFacts(m)
     if (facts.length > 0) sections.push(factsSection('System', facts))
+    if (act?.notice) sections.push(h('p', { class: 'fm-notice', 'data-key': 'activity-notice' }, act.notice))
   }
-  return [detailHeader(m, now), h('div', { class: 'fm-sections', 'data-key': `sections:${m.id}` }, sections)]
+  const panel = act?.tabs ? { role: 'tabpanel', id: TAB_PANEL_ID, 'aria-labelledby': TAB_IDS[tab] } : {}
+  return [detailHeader(m, now, act, tab), h('div', { class: 'fm-sections', 'data-key': `sections:${m.id}`, ...panel }, sections)]
 }
 
 // --- mounting ----------------------------------------------------------------------------------
 
+/** A field, where a typed "/" is text rather than the search shortcut. */
+function isField(node) {
+  return node instanceof Element && (['INPUT', 'SELECT', 'TEXTAREA'].includes(node.tagName) || node.isContentEditable === true)
+}
+
+/** How long after typing stops the live region says how many processes match. */
+const ANNOUNCE_MS = 500
+const TAB_ORDER = ['overview', 'activity']
+
 /**
- * Draws the panel into `root` and keeps it current. `binding` is createFleetBinding(...).
- * Options are test seams: `now`, `setInterval`, `clearInterval`, `setTimeout`.
+ * Draws the panel into `root` and keeps it current. `binding` is createFleetBinding(...); a
+ * machine's process list is watched through `binding.watchProcesses` only while that machine's
+ * Activity tab is on screen.
+ * Other options are test seams: `now`, `setInterval`, `clearInterval`, `setTimeout`.
  */
 export function mountFleetView(
   root,
-  { binding, now = () => Date.now(), setInterval: every = setInterval, clearInterval: stop = clearInterval, setTimeout: later = setTimeout, openExternal = null } = {}
+  {
+    binding,
+    now = () => Date.now(),
+    setInterval: every = setInterval,
+    clearInterval: stop = clearInterval,
+    setTimeout: later = setTimeout,
+    openExternal = null
+  } = {}
 ) {
+  const doc = root.ownerDocument
   const ui = {
     canOpenExternal: typeof openExternal === 'function',
     nav: { view: 'overview', id: null },
@@ -832,22 +891,129 @@ export function mountFleetView(
     copied: new Map(),
     copyFailed: new Set(),
     retrying: new Set(),
-    overviewScroll: 0
+    overviewScroll: 0,
+    // A machine's detail: its tab and its Processes card. All of it is forgotten when the machine
+    // is left, so every machine opens on Overview with the list sorted by CPU.
+    tab: 'overview',
+    sort: 'cpu',
+    sortShown: 'cpu',
+    query: '',
+    showAll: false,
+    /** The open row's key; one at a time. */
+    openKey: null,
+    /** The row holding the list's one tab stop. */
+    rowFocus: null,
+    /** The list's last order, as keys: kept while a row is open or focus is inside the list. */
+    held: null,
+    matches: 0,
+    announce: '',
+    /** Machine id → the newest answer binding.watchProcesses gave for it. */
+    lists: new Map(),
+    /** The process list being watched: { id, stop }, or null. */
+    watch: null
   }
+  let announceToken = 0
   let view = binding.current()
   /** This frame's clock moved onto the worker's, which history and "last seen" times use. */
   const workerNow = () => now() + (Number.isFinite(view?.clockOffsetMs) ? view.clockOffsetMs : 0)
   let fleet = toFleet(view, workerNow())
 
+  function resetActivity() {
+    Object.assign(ui, { tab: 'overview', sort: 'cpu', sortShown: 'cpu', query: '', showAll: false, openKey: null, rowFocus: null, held: null, matches: 0, announce: '' })
+    ui.lists = new Map()
+    announceToken += 1
+  }
+
+  /** The order holds still while a row is open or focus is inside the list. */
+  function listHeld() {
+    if (ui.openKey !== null) return true
+    const list = root.querySelector('.fm-procs')
+    const active = doc.activeElement
+    return Boolean(list && active && list.contains(active))
+  }
+
+  /** The rows to draw (ordered, searched, cut), how many matched, and which row is the tab stop. */
+  function arrange(p) {
+    if (p.state !== 'ready') return { shown: [], matches: 0, tabStop: null }
+    const ordered = arrangeRows(p.rows, p.sort, ui.held && listHeld() ? ui.held : null)
+    ui.held = ordered.map((r) => r.key)
+    const matched = matchRows(ordered, p.query)
+    const shown = ui.showAll ? matched : matched.slice(0, FIRST_ROWS)
+    const keys = new Set(shown.map((r) => r.key))
+    if (ui.openKey !== null && !keys.has(ui.openKey)) ui.openKey = null
+    ui.matches = matched.length
+    const tabStop = [ui.rowFocus, ui.openKey].find((k) => k !== null && keys.has(k)) ?? shown[0]?.key ?? null
+    return { shown, matches: matched.length, tabStop }
+  }
+
+  let drawing = false
+  let redraw = false
   function draw() {
+    drawing = true
+    try {
+      drawOnce()
+    } finally {
+      drawing = false
+    }
+    if (redraw) {
+      redraw = false
+      draw()
+    }
+  }
+
+  function drawOnce() {
     const t = workerNow()
     fleet = toFleet(view, t)
     if (ui.nav.view === 'detail' && fleet.state === 'live' && !fleet.machines.some((m) => m.id === ui.nav.id)) {
       ui.nav = { view: 'overview', id: null }
+      resetActivity()
     }
     const machine = ui.nav.view === 'detail' ? fleet.machines.find((m) => m.id === ui.nav.id) : null
+    let act = null
+    let list = null
+    if (machine) {
+      act = toActivityModel({ machine, list: ui.lists.get(machine.id), ui: { sort: ui.sort, query: ui.query }, now: t })
+      if (!act.tabs) ui.tab = 'overview'
+      if (ui.tab === 'activity' && act.processes) {
+        ui.sortShown = act.processes.sort
+        list = arrange(act.processes)
+      }
+    }
     root.dataset.screen = machine ? 'detail' : 'overview'
-    morphChildren(root, machine ? detail(machine, ui, t) : overview(fleet, ui, t))
+    morphChildren(root, machine ? detail(machine, ui, t, act, list) : overview(fleet, ui, t))
+    syncFields()
+    watch(machine, act)
+  }
+
+  /** Morphing sets attributes only: the search text and the sort are properties of their fields. */
+  function syncFields() {
+    const input = root.querySelector('[data-input="search"]')
+    if (input && input.value !== ui.query) input.value = ui.query
+    const select = root.querySelector('[data-input="sort"]')
+    if (select && select.value !== ui.sortShown) select.value = ui.sortShown
+  }
+
+  /** Watches the shown machine's process list while its Activity tab is on screen (the binding
+   *  asks for it on its own beat, never while the panel is hidden); stops when the tab hides or
+   *  the machine changes. */
+  function watch(machine, act) {
+    const id = machine && ui.tab === 'activity' && act?.processes && typeof binding.watchProcesses === 'function' ? machine.id : null
+    if (ui.watch?.id === id) return
+    if (ui.watch) {
+      // A list from before is not shown as current when the tab comes back: it loads again.
+      ui.watch.stop()
+      ui.lists.delete(ui.watch.id)
+    }
+    ui.watch = null
+    if (id === null) return
+    const run = { id, stop: () => {} }
+    ui.watch = run
+    run.stop = binding.watchProcesses(id, (answer) => {
+      if (ui.watch !== run) return
+      ui.lists.set(id, answer)
+      if (drawing) redraw = true
+      else draw()
+    })
   }
 
   function focusSoon(selector) {
@@ -859,6 +1025,7 @@ export function mountFleetView(
   function open(id, moveFocus = true) {
     ui.overviewScroll = window.scrollY
     ui.nav = { view: 'detail', id }
+    resetActivity()
     draw()
     window.scrollTo(0, 0)
     if (moveFocus) focusSoon('[data-action="back"]')
@@ -867,9 +1034,32 @@ export function mountFleetView(
   function back(moveFocus = true) {
     const id = ui.nav.id
     ui.nav = { view: 'overview', id: null }
+    resetActivity()
     draw()
     window.scrollTo(0, ui.overviewScroll)
     if (id && moveFocus) focusSoon(`[data-action="open"][data-id="${CSS.escape(id)}"]`)
+  }
+
+  /** Overview or Activity. Switching keeps the header, scrolls to the top and closes an open row. */
+  function selectTab(tab, moveFocus = false) {
+    if (ui.tab !== tab) {
+      ui.tab = tab
+      ui.openKey = null
+      ui.rowFocus = null
+      ui.held = null
+      ui.announce = ''
+      draw()
+      window.scrollTo(0, 0)
+    }
+    if (moveFocus) focusSoon(`#${TAB_IDS[ui.tab]}`)
+  }
+
+  function clearSearch(focusField) {
+    ui.query = ''
+    ui.announce = ''
+    announceToken += 1
+    draw()
+    if (focusField) focusSoon('[data-input="search"]')
   }
 
   function copy(id) {
@@ -912,6 +1102,21 @@ export function mountFleetView(
       case 'back':
         back()
         break
+      case 'tab':
+        if (TAB_ORDER.includes(target.getAttribute('data-tab'))) selectTab(target.getAttribute('data-tab'))
+        break
+      case 'proc':
+        ui.openKey = ui.openKey === id ? null : id
+        ui.rowFocus = id
+        draw()
+        break
+      case 'clear-search':
+        clearSearch(true)
+        break
+      case 'show-all':
+        ui.showAll = true
+        draw()
+        break
       case 'pair':
         ui.pairOpen = !ui.pairOpen
         draw()
@@ -943,19 +1148,109 @@ export function mountFleetView(
     }
   })
 
-  root.ownerDocument.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return
-    if (ui.nav.view === 'detail') back()
-    else if (ui.pairOpen) {
+  // Search as typed; the live region says how many match once typing stops.
+  root.addEventListener('input', (event) => {
+    const target = event.target instanceof Element ? event.target : null
+    if (target?.getAttribute('data-input') !== 'search') return
+    ui.query = String(target.value ?? '')
+    draw()
+    const token = ++announceToken
+    later(() => {
+      if (token !== announceToken) return
+      ui.announce = ui.query.trim() ? matchesSpoken(ui.matches, ui.query) : ''
+      draw()
+    }, ANNOUNCE_MS)
+  })
+
+  root.addEventListener('change', (event) => {
+    const target = event.target instanceof Element ? event.target : null
+    if (target?.getAttribute('data-input') !== 'sort') return
+    const sort = String(target.value ?? '')
+    if (!SORT_SPOKEN[sort]) return
+    ui.sort = sort
+    // A sort a person chose applies at once, held order or not.
+    ui.held = null
+    ui.announce = SORT_SPOKEN[sort]
+    draw()
+  })
+
+  // The list's one tab stop follows focus (roving tabindex).
+  root.addEventListener('focusin', (event) => {
+    const row = event.target instanceof Element ? event.target.closest('.fm-proc-row') : null
+    const key = row?.getAttribute('data-id') ?? null
+    if (key !== null && key !== ui.rowFocus) {
+      ui.rowFocus = key
+      draw()
+    }
+  })
+
+  function onTabKey(target, event) {
+    const at = TAB_ORDER.indexOf(target.getAttribute('data-tab') ?? '')
+    const next = { ArrowRight: TAB_ORDER[(at + 1) % 2], ArrowLeft: TAB_ORDER[(at + 1) % 2], Home: 'overview', End: 'activity' }[event.key]
+    if (!next || at < 0) return
+    event.preventDefault?.()
+    selectTab(next, true)
+  }
+
+  function onRowKey(target, event) {
+    const rows = [...root.querySelectorAll('.fm-procs .fm-proc-row')]
+    const at = rows.indexOf(target)
+    if (at < 0) return
+    const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: rows.length - 1 }[event.key]
+    if (to === undefined) return
+    event.preventDefault?.()
+    const row = rows[Math.max(0, Math.min(rows.length - 1, to))]
+    ui.rowFocus = row.getAttribute('data-id')
+    draw()
+    row.focus({ preventScroll: false })
+  }
+
+  /** Esc, innermost first: clear the search, else close the open row, else go back. */
+  function onEscape(event) {
+    if (ui.nav.view === 'detail') {
+      if (ui.tab === 'activity' && ui.query) {
+        event.preventDefault?.()
+        const active = doc.activeElement
+        clearSearch(active instanceof Element && active.getAttribute('data-input') === 'search')
+        return
+      }
+      if (ui.tab === 'activity' && ui.openKey !== null) {
+        const key = ui.openKey
+        ui.openKey = null
+        draw()
+        focusSoon(`.fm-proc-row[data-id="${CSS.escape(key)}"]`)
+        return
+      }
+      back()
+    } else if (ui.pairOpen) {
       ui.pairOpen = false
       draw()
       focusSoon('[data-action="pair"]')
     }
+  }
+
+  doc.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      onEscape(event)
+      return
+    }
+    if (ui.nav.view !== 'detail') return
+    const target = event.target instanceof Element && root.contains(event.target) ? event.target : null
+    if (event.key === '/' && ui.tab === 'activity' && !isField(doc.activeElement) && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      const field = root.querySelector('[data-input="search"]')
+      if (field instanceof HTMLElement) {
+        event.preventDefault?.()
+        field.focus()
+      }
+      return
+    }
+    if (target?.getAttribute('role') === 'tab') onTabKey(target, event)
+    else if (target?.matches('.fm-proc-row')) onRowKey(target, event)
   })
 
   // "Updated 4s ago" and friends move every second without redrawing the rest.
   const ticker = every(() => {
-    if (root.ownerDocument.visibilityState === 'hidden') return
+    if (doc.visibilityState === 'hidden') return
     const t = workerNow()
     for (const node of root.querySelectorAll('[data-since]')) {
       const at = Number(node.getAttribute('data-since'))
@@ -974,8 +1269,12 @@ export function mountFleetView(
     model: () => fleet,
     /** Shows one machine's detail, or the overview with no id, without moving focus. */
     show: (id) => (id ? open(id, false) : back(false)),
+    /** For the preview: shows a tab of the machine on screen, without moving focus. */
+    showTab: (tab) => selectTab(tab),
     dispose() {
       stop(ticker)
+      ui.watch?.stop()
+      ui.watch = null
       unsubscribe()
     }
   }

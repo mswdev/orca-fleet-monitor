@@ -4,10 +4,14 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { MemoryAlerts, oneLine, type AlertNotice } from './alerts.ts'
 import { BEACON_INTERVAL_MS, encodeBeacon } from './beacon.ts'
 import { PanelBridge } from './bridge.ts'
+import { localAnswer, remoteAnswer, unavailableAnswer } from './process-answer.ts'
+import { encodeProcessLine, PROCESS_INTERVAL_MS } from './process-line.ts'
+import { largestProcess, type ProcessTable } from './processes.ts'
+import type { TopProcess } from './model.ts'
 import { cliLauncherName, type CliResolution, type CommandRunner } from './cli.ts'
 import type { CliInfo, LocalSample } from './model.ts'
 import { openOwnPanel, SHOW_COMMAND_ID } from './open-panel.ts'
-import { FleetPoller } from './poller.ts'
+import { FleetPoller, LOCAL_ID } from './poller.ts'
 import { readSettings, type FleetSettings } from './settings.ts'
 import { STATUS_BAR_ID, statusBarView, type StatusBarView } from './status-bar.ts'
 // src/protocol.ts types `fleet.*` requests and posts; tsconfig includes it, nothing imports it.
@@ -27,6 +31,8 @@ const HEADLESS_RETRY_MS = 60_000
 const LOG_REPEAT_MS = 10 * 60_000
 /** Longest wait for the sampler's own reads (a Mac's memory) before a sample is taken anyway. */
 const PREPARE_WAIT_MS = 3_000
+/** After memory pressure was last critical, process reads wait this long (one slow `top` beat). */
+export const CRITICAL_HOLD_MS = 120_000
 
 export type WorkerOrca = Pick<OrcaWorkerApi, 'settings' | 'panels' | 'host' | 'log' | 'commands'>
 
@@ -49,6 +55,19 @@ export type MonitorDeps = {
   declaredCommands?: readonly string[]
   /** This computer's platform; process.platform when not given. */
   platform?: string
+  /** This Mac's processes (src/processes.ts ProcessSampler); absent where there are none to list. */
+  processes?: ProcessSource | null
+  /** Wall clock, epoch ms (process tables carry wall times); Date.now when not given. */
+  wall?: () => number
+}
+
+/** What the monitor needs of src/processes.ts's ProcessSampler. */
+export type ProcessSource = {
+  readonly supported: boolean
+  setPublishing(on: boolean): void
+  localTable(): Promise<ProcessTable | null>
+  publishTable(): Promise<ProcessTable | null>
+  stop(): void
 }
 
 export type FleetMonitor = {
@@ -152,6 +171,65 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
 
   // One id per worker run: the beacon carries it, and so do the panel posts.
   const runId = deps.runId()
+  const wall = deps.wall ?? Date.now
+  const processes = deps.processes?.supported ? deps.processes : null
+  /** A table's wall time on the worker's clock. */
+  const onWorkerClock = (wallAt: number): number => deps.now() - Math.max(0, wall() - wallAt)
+  /** When this computer's newest process list was read (worker clock), and its largest process,
+   *  last known: replaced only by a newer reading that has memory figures, so it survives a pause
+   *  of the sampling (src/merge.ts shows it with its age, and drops it after 15 minutes). The
+   *  table itself is not kept for anything. */
+  let localListAt: number | null = null
+  let localLargest: { largest: TopProcess; at: number } | null = null
+  const noteTable = (table: ProcessTable | null): void => {
+    if (!table) return
+    const takenAt = onWorkerClock(table.takenAt)
+    localListAt = takenAt
+    const largest = largestProcess(table.rows)
+    if (!largest || table.memAgeMs === null) return
+    const at = takenAt - table.memAgeMs
+    if (!localLargest || at >= localLargest.at) localLargest = { largest, at }
+  }
+  /** This Mac publishes its top processes along with its readings (the beacon setting). */
+  const publishingProcesses = (): boolean => processes !== null && settings.beacon
+  /** The background process beat waits while macOS memory pressure is critical, and for
+   *  CRITICAL_HOLD_MS after it was last seen critical: a Mac flipping between warning and critical
+   *  would otherwise restart `top` (about 2 s of CPU each time) every few seconds, just when it
+   *  can least afford it. A reading that says nothing about pressure (none came, or no level in
+   *  it) keeps a hold going rather than ending it. A person asking for this computer's list is
+   *  still answered (src/processes.ts localTable), critical or not: someone is looking. */
+  let criticalUntil = Number.NEGATIVE_INFINITY
+  const memoryCritical = (): boolean => {
+    const now = deps.now()
+    const pressure = deps.sampler.latest()?.macMemory?.pressure ?? null
+    if (pressure === 'critical' || (pressure === null && now < criticalUntil)) criticalUntil = now + CRITICAL_HOLD_MS
+    return now < criticalUntil
+  }
+  /** The process beat (one `ps` every PROCESS_INTERVAL_MS, with the slow `top` stream) runs while
+   *  the list is published, and while a panel is open here (for this computer's largest process,
+   *  which the overview names); not while memory is critical (memoryCritical). An open process
+   *  list keeps the fast stream going regardless, until 20 s after its last request. */
+  const processBeat = (): boolean => processes !== null && (publishingProcesses() || poller?.mode() === 'fast') && !memoryCritical()
+  const syncPublishing = (): void => {
+    processes?.setPublishing(processBeat())
+  }
+  let processSeq = 0
+  let processStopped = false
+  /** One process beat: this Mac's processes read, and its top list logged for paired desktops
+   *  while publishing. */
+  const publishProcesses = async (): Promise<void> => {
+    syncPublishing()
+    if (processStopped || !processes || !processBeat()) return
+    const table = await processes.publishTable()
+    if (processStopped || !table) return
+    noteTable(table)
+    if (publishingProcesses()) {
+      processSeq += 1
+      const line = encodeProcessLine(table, { run: runId, seq: processSeq, intervalMs: PROCESS_INTERVAL_MS })
+      if (line) orca.log(line)
+    }
+    poller?.onLocalProcesses()
+  }
   let bridge: PanelBridge | null = null
   const activePoller = new FleetPoller(
     {
@@ -161,6 +239,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       localName: deps.localName,
       localPlatform: platform,
       pluginId: PLUGIN_ID,
+      localProcesses: () => (localListAt === null && !localLargest ? null : { takenAt: localListAt, lastLargest: localLargest }),
       idleWhenSlow,
       onChange: () => {
         bridge?.notify()
@@ -201,6 +280,19 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       activePoller.heartbeat()
       return { ok: true as const, mode: activePoller.mode(), seq: activeBridge.currentSeq }
     }),
+    // This computer's whole process list (read only while asked), or a paired Mac's newest top
+    // list with its age. Counts as a heartbeat: a panel is open.
+    orca.panels.handle('fleet.processes', async (input) => {
+      const id = input && typeof input === 'object' && typeof input.id === 'string' ? input.id : null
+      if (!id) throw Object.assign(new Error('fleet.processes needs { id }'), { code: 'invalid_params' })
+      activePoller.heartbeat()
+      if (id !== LOCAL_ID) return remoteAnswer(id, activePoller.stateOf(id), activePoller.processLineOf(id), deps.now())
+      if (!processes) return unavailableAnswer(id, 'not-mac', 'full')
+      const table = await processes.localTable()
+      noteTable(table)
+      activePoller.onLocalProcesses()
+      return localAnswer(id, table, deps.now(), wall())
+    }),
     orca.panels.handle('fleet.retry', (input) => {
       const id = input && typeof input === 'object' && typeof input.id === 'string' ? input.id : null
       if (!id) throw Object.assign(new Error('fleet.retry needs { id }'), { code: 'invalid_params' })
@@ -217,6 +309,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     }
     settings = next
     activePoller.updateSettings(next)
+    syncPublishing()
   }
   disposables.push(orca.settings.onDidChange(() => void reloadSettings()))
   // "Show Fleet Monitor", run by the status bar item. Orca stops a worker that registers a command
@@ -245,9 +338,10 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
   const takeSample = (): void => {
     if (stopped) return
     const sample = deps.sampler.sample()
+    syncPublishing()
     if (settings.beacon) {
       seq += 1
-      const line = encodeBeacon(sample, { run: runId, seq, intervalMs: BEACON_INTERVAL_MS })
+      const line = encodeBeacon(sample, { run: runId, seq, intervalMs: BEACON_INTERVAL_MS, processes: publishingProcesses() })
       if (line) orca.log(line)
     }
     activePoller.onLocalSample()
@@ -278,6 +372,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     })
   }
   const sampleTimer = deps.setInterval(() => void sampleNow(), BEACON_INTERVAL_MS)
+  const processTimer = deps.setInterval(() => void publishProcesses(), PROCESS_INTERVAL_MS)
+  syncPublishing()
   const tickTimer = deps.setInterval(() => activePoller.tick(), TICK_MS)
   activePoller.tick()
   scheduleStatus()
@@ -294,7 +390,10 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     stop: async () => {
       stopped = true
       deps.clearInterval(sampleTimer)
+      deps.clearInterval(processTimer)
       deps.clearInterval(tickTimer)
+      processStopped = true
+      processes?.stop()
       if (statusTimer !== null) deps.clearTimeout(statusTimer)
       activeBridge.dispose()
       activePoller.stop()

@@ -9,6 +9,7 @@
 //   screenshot-light.png   2560×1600, the overview and a detail, light
 //   screenshot-dark.png    2560×1600, the same, dark
 //   screenshot-basic.png   2560×1600, a basic machine (install row open) and an offline one
+//   screenshot-activity.png 2560×1600, this computer's and a paired Mac's Activity tab, dark
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import os from 'node:os'
@@ -60,7 +61,8 @@ const shots = [
   { file: 'cover.png', page: 'cover.html', size: [1600, 1000], scale: 1 },
   { file: 'screenshot-light.png', page: 'listing.html?theme=light', size: [1280, 800], scale: 2 },
   { file: 'screenshot-dark.png', page: 'listing.html?theme=dark', size: [1280, 800], scale: 2 },
-  { file: 'screenshot-basic.png', page: 'listing.html?theme=light&scene=basic', size: [1280, 800], scale: 2 }
+  { file: 'screenshot-basic.png', page: 'listing.html?theme=light&scene=basic', size: [1280, 800], scale: 2 },
+  { file: 'screenshot-activity.png', page: 'listing.html?theme=dark&scene=activity', size: [1280, 800], scale: 2 }
 ]
 try {
   for (const shot of shots) {

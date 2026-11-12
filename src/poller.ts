@@ -34,7 +34,9 @@ import type { CommandResult, CommandRunner } from './cli.ts'
 import { MAC_FIGURES_MAX_AGE_MS, memoryElevated, memoryReasons, memorySummary, type HealthSettings, type MemoryRules } from './health.ts'
 import { HistoryRing } from './history.ts'
 import { beaconMemoryOf, beaconPoint, historyPointOf, mergeMachine } from './merge.ts'
-import type { BeaconRecord, DiagnosticsSample, FleetMode, LocalSample, LostReading, MacMemory, MachineState } from './model.ts'
+import { readProcessLog, type ProcessRecord } from './process-line.ts'
+import { largestProcess } from './processes.ts'
+import type { BeaconRecord, DiagnosticsSample, FleetMode, LocalSample, LostReading, MacMemory, MachineState, TopProcess } from './model.ts'
 import {
   findPluginKeys,
   parseDiagnostics,
@@ -92,6 +94,8 @@ export const ALERT_READ_MS = 15_000
 export const FIRST_JUDGE_MS = 30_000
 /** Beacons older than this when read are not judged (this desktop slept, say). */
 export const JUDGE_BACKLOG_MS = 5 * 60_000
+/** A process line's time is moved onto the local clock and bounded to this long ago. */
+const PROCESS_LINE_MAX_AGE_MS = 24 * 60 * 60_000
 /** Runs whose judged sequence is remembered per machine. */
 const JUDGED_RUNS = 16
 /** A machine that reports its own Mac readings, marked `lost`, stays marked while only Orca's
@@ -127,7 +131,20 @@ export type PollerDeps = {
   onMemoryReading?: (reading: MemoryReading) => void
   /** The reading that carries a machine's memory stopped arriving while that memory was elevated. */
   onMemoryLost?: (event: LostEvent) => void
+  /** This computer's process lists (src/monitor.ts): when the newest was taken (worker clock),
+   *  and the process using the most memory, last known, with when its figure was read. */
+  localProcesses?: () => { takenAt: number | null; lastLargest: { largest: TopProcess; at: number } | null } | null
   log?: (message: string) => void
+}
+
+/** A remote's newest process line, as the poller holds it. */
+export type RemoteProcessLine = {
+  record: ProcessRecord
+  /** When it was taken (the remote's time moved onto the local clock), and when it was read. */
+  takenAt: number
+  readAt: number
+  /** The process using the most memory in it. */
+  largest: TopProcess | null
 }
 
 type Feed = 'diag' | 'keys' | 'beacon'
@@ -199,6 +216,11 @@ type Slot = {
   watch: boolean
   /** The last diagnostics handed on as a memory reading. */
   diagFed: number | null
+  /** The newest process line from the worker run its beacons come from (1.2). */
+  processes: RemoteProcessLine | null
+  /** The process using the most memory, last known from its lines, and when its figure was read
+   *  (local clock): kept while it publishes no newer line with memory figures. */
+  lastLargest: { largest: TopProcess; at: number } | null
 }
 
 export type MachineEntry = { state: MachineState; history: HistoryRing }
@@ -320,6 +342,20 @@ export class FleetPoller {
   historyRevision(): number {
     return this.historyRev
   }
+
+  /** One machine's merged state, or null for an id the poller does not know. */
+  stateOf(id: string): MachineState | null {
+    return this.slots.get(id)?.state ?? null
+  }
+
+  /** A remote's newest process line, with the remote's clock offset (remote minus local) when
+   *  known; null when none has been read from its current worker run. */
+  processLineOf(id: string): RemoteProcessLine | null {
+    const slot = this.slots.get(id)
+    return slot && slot.kind === 'remote' ? slot.processes : null
+  }
+
+
 
   stop(): void {
     this.stopped = true
@@ -714,6 +750,8 @@ export class FleetPoller {
       slot.latest = null
       slot.beaconFresh = false
       slot.beaconAge = null
+      slot.processes = null
+      slot.lastLargest = null
     }
     slot.due.keys = now + PLUGIN_LIST_INTERVAL_MS
     this.remerge(slot, false)
@@ -801,9 +839,34 @@ export class FleetPoller {
       slot.lostDiagSince = null
     }
     if (latest && assessed.fresh && slot.offsetMs !== null) this.recordBeacons(slot, records, latest, now)
+    this.takeProcessLine(slot, logs.lines, latest, now)
     this.remerge(slot, assessed.fresh && assessed.advanced)
     if (latest) this.judgeBeacons(slot, records, latest, now)
     this.changed()
+  }
+
+  /**
+   * The newest process line in this read, when it comes from the worker run that wrote the newest
+   * beacon (one from an earlier run describes processes of a plugin that has since restarted, and
+   * is dropped). Only a line newer than the one held replaces it.
+   */
+  private takeProcessLine(slot: Slot, lines: readonly unknown[], latest: BeaconRecord | null, now: number): void {
+    const record = latest ? readProcessLog(lines) : null
+    if (!record || !latest || record.run !== latest.run) {
+      if (slot.processes && (!latest || slot.processes.record.run !== latest.run)) slot.processes = null
+      return
+    }
+    const held = slot.processes?.record
+    if (held && held.run === record.run && held.seq >= record.seq) return
+    // On the local clock, and never older than a day (whatever the remote's clock says).
+    const takenAt = slot.offsetMs === null ? now : Math.max(now - PROCESS_LINE_MAX_AGE_MS, Math.min(now, record.t - slot.offsetMs))
+    const largest = largestProcess(record.rows)
+    slot.processes = { record, takenAt, readAt: now, largest }
+    // A line without memory figures (its `top` stream had just restarted) keeps the last known.
+    if (largest && record.memAgeMs !== null) {
+      const at = takenAt - record.memAgeMs
+      if (!slot.lastLargest || at >= slot.lastLargest.at) slot.lastLargest = { largest, at }
+    }
   }
 
   /**
@@ -1050,7 +1113,9 @@ export class FleetPoller {
       lostDiagSince: null,
       lostPending: null,
       watch: false,
-      diagFed: null
+      diagFed: null,
+      processes: null,
+      lastLargest: null
     }
     this.remerge(slot, false)
     return slot
@@ -1091,13 +1156,16 @@ export class FleetPoller {
               ageMs: slot.beaconAge,
               pluginKey: slot.plugin?.keys[slot.keyIndex % Math.max(1, slot.plugin.keys.length)] ?? null,
               remotePlugin: slot.plugin?.state ?? 'unknown',
+              logRead: slot.logReadAt !== null,
               carriedMac: slot.carriedMac
             }
           : null,
       lost: slot.lost,
       health: this.settings.health,
       memoryRules: this.settings.memoryRules,
-      platform: slot.kind === 'local' ? (this.deps.localPlatform ?? null) : null
+      platform: slot.kind === 'local' ? (this.deps.localPlatform ?? null) : null,
+      processLine: slot.kind === 'local' ? this.localProcessList() : slot.processes ? { takenAt: slot.processes.takenAt } : null,
+      lastLargest: slot.kind === 'local' ? (this.localProcessesNow()?.lastLargest ?? null) : slot.lastLargest
     })
     // Watch mode follows the last reading; offline, it keeps what it was.
     if (slot.state.online) slot.watch = this.elevated(slot.state)
@@ -1119,6 +1187,27 @@ export class FleetPoller {
     const feed = this.alertFeed(slot)
     if (feed === 'diag') slot.due.diag = Math.min(slot.due.diag, (slot.diagAt ?? now) + ALERT_READ_MS)
     else if (feed === 'beacon' && slot.logFailures === 0) slot.due.beacon = Math.min(slot.due.beacon, (slot.logReadAt ?? now) + ALERT_READ_MS)
+  }
+
+  private localProcessesNow(): ReturnType<NonNullable<PollerDeps['localProcesses']>> {
+    try {
+      return this.deps.localProcesses?.() ?? null
+    } catch {
+      return null
+    }
+  }
+
+  private localProcessList(): { takenAt: number | null } | null {
+    const local = this.localProcessesNow()
+    return local && local.takenAt !== null ? { takenAt: local.takenAt } : null
+  }
+
+  /** This computer read its process list: its largest process may have changed. */
+  onLocalProcesses(): void {
+    const slot = this.slots.get(LOCAL_ID)
+    if (!slot) return
+    this.remerge(slot, false)
+    this.changed()
   }
 
   private changed(): void {

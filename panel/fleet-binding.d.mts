@@ -1,7 +1,7 @@
 // Types for fleet-binding.mjs: what a Fleet Monitor view is given. A machine is the worker's
 // MachineState (src/model.ts) plus its history in columns; toFleet() turns a view into the
 // panel's model, shaped like the design's sample FLEET object.
-import type { CliInfo, FleetMode, FleetThresholds, HealthLevel, HealthThresholds, HistoryColumns, MachineView } from '../src/model.ts'
+import type { CliInfo, FleetMode, FleetThresholds, HealthLevel, HealthThresholds, HistoryColumns, MachineView, ProcessList } from '../src/model.ts'
 
 export const HEARTBEAT_MS: number
 export const HISTORY_SLOTS: number
@@ -38,6 +38,11 @@ export type FleetBinding = {
   refresh(): Promise<void>
   /** "Retry connection": true when the worker took the request. */
   retry(id: string): Promise<boolean>
+  /** One machine's processes (`fleet.processes`), or `{ state: 'error', error }`. */
+  processes(id: string): Promise<ProcessList | { state: 'error'; error: string; machineId: string }>
+  /** Asks for one machine's processes now and every `intervalMs` while the panel is visible;
+   *  returns a function that stops it. */
+  watchProcesses(id: string, listener: (answer: ProcessList | { state: 'error'; error: string; machineId: string }) => void, options?: { intervalMs?: number }): () => void
   /** Calls `listener` at once with the current view, then after every change. */
   subscribe(listener: (view: FleetView) => void): () => void
   dispose(): void
@@ -155,7 +160,111 @@ export type MachineModel = {
   workspaces: WorkspaceModel[]
   install: InstallHint | null
   lastKnown: { cpuPct: number | null; memPct: number | null }
+  /** Network, disk, GPU and battery (1.2): each null unless the machine is online and is this Mac
+   *  or a Mac running Fleet Monitor 1.2. Rates are bytes per second. */
+  net: NetModel | null
+  disk: DiskModel | null
+  gpu: GpuModel | null
+  battery: BatteryModel | null
+  processes: ProcessSummary
 }
+
+/** One history series, as the charts take it. */
+export type Series = { history: (number | null)[]; stats: Stats | null }
+/** `ageSec` is set only on a figure carried from an earlier read (1 s or older). */
+export type NetModel = { iface: string; rxBytesPerSec: number | null; txBytesPerSec: number | null; ageSec: number | null; rx: Series; tx: Series }
+export type DiskModel = {
+  /** The main volume's APFS container; used = size − available. Null when not read. */
+  totalBytes: number | null
+  usedBytes: number | null
+  freeBytes: number | null
+  usedPct: number | null
+  spaceAgeSec: number | null
+  /** Every disk's traffic, summed. */
+  readBytesPerSec: number | null
+  writeBytesPerSec: number | null
+  ioAgeSec: number | null
+  read: Series
+  write: Series
+}
+export type GpuModel = { pct: number; ageSec: number | null } & Series
+export type BatteryModel = {
+  /** False on a Mac without a battery: then only `source` means anything. */
+  present: boolean
+  pct: number | null
+  state: 'charging' | 'discharging' | 'charged' | 'not-charging' | null
+  source: 'ac' | 'battery' | 'ups' | null
+  /** To full while charging, to empty while discharging, when macOS has an estimate. */
+  minutesRemaining: number | null
+  ageSec: number | null
+} & Series
+export type ProcessSummary = {
+  /** `full`: this computer, every process. `top`: a paired Mac's own top list. `waiting`: one is
+   *  coming. `unavailable`: see `reason`. */
+  state: 'full' | 'top' | 'waiting' | 'unavailable'
+  /** `outdated`: Fleet Monitor there is older than 1.2 ("Update Fleet Monitor to 1.2").
+   *  `publishing-off`: it runs there but its readings are not arriving. `basic`: not installed or
+   *  not running there. `not-read-yet`: not known yet. `not-mac`, `offline`, `unknown-machine`,
+   *  and `failed` (this computer's list could not be read just now). */
+  reason: 'not-mac' | 'basic' | 'outdated' | 'publishing-off' | 'not-read-yet' | 'offline' | 'unknown-machine' | 'failed' | null
+  topList: boolean
+  takenAt: number | null
+  ageSec: number | null
+  /** How old `largest`'s memory figure is now. It is the last known, carried through a pause of
+   *  the sampling (memory critical) for up to 15 minutes, so it can be much older than `ageSec`
+   *  ("3 min ago"); null with no `largest`. */
+  memAgeSec: number | null
+  /** The process using the most memory in the newest list, with its share of RAM. */
+  largest: { pid: number; name: string; memBytes: number; memPct: number | null } | null
+}
+
+export type ProcessSortKey = 'name' | 'pid' | 'user' | 'cpu' | 'mem' | 'energy'
+export type ProcessRowModel = {
+  pid: number
+  ppid: number | null
+  name: string
+  user: string | null
+  /** Percent of one core (can pass 100), over `cpuWindowSec`. */
+  cpuPct: number | null
+  /** Physical footprint: Activity Monitor's Memory column. */
+  memBytes: number | null
+  /** Energy impact (`top`'s POWER), over `energyWindowSec`. */
+  energy: number | null
+  /** Start time, epoch seconds. */
+  start: number | null
+  /** The process using the most memory in the whole list (filter or not). */
+  largest: boolean
+}
+export type ProcessListModel = {
+  state: 'loading' | 'ok' | 'waiting' | 'unavailable' | 'error'
+  reason: ProcessSummary['reason']
+  error: string | null
+  machineId: string | null
+  scope: 'full' | 'top' | null
+  topList: boolean
+  takenAt: number | null
+  ageSec: number | null
+  cpuWindowSec: number | null
+  memAgeSec: number | null
+  energyWindowSec: number | null
+  /** Processes on the machine (more than `count` for a top list). */
+  total: number | null
+  truncated: boolean
+  /** Rows in the answer, and rows after the filter. */
+  count: number
+  shown: number
+  sort: { key: ProcessSortKey; dir: 'asc' | 'desc' }
+  query: string
+  largest: { pid: number; name: string; memBytes: number } | null
+  rows: ProcessRowModel[]
+}
+
+export const PROCESS_POLL_MS: Readonly<{ local: number; remote: number }>
+export const PROCESS_SORT_KEYS: Readonly<Record<ProcessSortKey, 'asc' | 'desc'>>
+export const MAX_PROCESS_ROWS: number
+export const EXTRA_HISTORY_KEYS: readonly ['rx', 'tx', 'dr', 'dw', 'gpu', 'bat']
+export function toProcessList(answer: unknown, options?: { query?: string; sort?: ProcessSortKey; dir?: 'asc' | 'desc' }, now?: number): ProcessListModel
+export function compareProcesses(key: ProcessSortKey, dir: 'asc' | 'desc'): (a: ProcessRowModel, b: ProcessRowModel) => number
 
 export type FleetModel = {
   state: 'loading' | 'error' | 'live'
@@ -183,18 +292,18 @@ export function createFleetBinding(orca: FleetOrca, options?: FleetBindingOption
 export function levelFor(value: number | null | undefined, thresholds: HealthThresholds): Level
 export function bucketHistory(
   columns: HistoryColumns | null | undefined,
-  key: 'cpu' | 'mem' | 'ram',
+  key: 'cpu' | 'mem' | 'ram' | 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat',
   end: number,
   slots?: number,
   slotMs?: number
 ): (number | null)[]
 export function windowStats(
   columns: HistoryColumns | null | undefined,
-  key: 'cpu' | 'mem' | 'ram',
+  key: 'cpu' | 'mem' | 'ram' | 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat',
   end: number,
   windowMs?: number
 ): Stats | null
-export function newestReading(columns: HistoryColumns | null | undefined, key: 'cpu' | 'mem' | 'ram'): { value: number; t: number } | null
+export function newestReading(columns: HistoryColumns | null | undefined, key: 'cpu' | 'mem' | 'ram' | 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat'): { value: number; t: number } | null
 export function safeMachineName(name: unknown): boolean
 /** A server name as Orca's CLI compares it: trimmed, unquoted, case ignored. */
 export function typedName(name: unknown): string
