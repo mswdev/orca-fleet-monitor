@@ -1,4 +1,15 @@
-// Parsers for the JSON the Orca CLI prints with --json.
+// Parsers for the JSON the Orca CLI prints with --json. Answers about another machine carry that
+// machine's text, so every string and list is bounded here, on the way in (src/bounds.ts).
+import {
+  boundedNumber,
+  clipText,
+  COUNT_LIMITS,
+  firstEntries,
+  isEnvironmentId,
+  isPluginKey,
+  lastEntries,
+  TEXT_LIMITS
+} from './bounds.ts'
 import type { DiagnosticsSample, WorkspaceUsage } from './model.ts'
 
 export type Envelope =
@@ -20,8 +31,8 @@ export function parseEnvelope(stdout: string, stderr = ''): Envelope {
       const error = (parsed.error ?? {}) as { code?: unknown; message?: unknown }
       return {
         ok: false,
-        code: typeof error.code === 'string' ? error.code : 'cli_error',
-        message: typeof error.message === 'string' ? error.message : 'The Orca CLI reported an error'
+        code: clipText(error.code, TEXT_LIMITS.label, 'cli_error') || 'cli_error',
+        message: clipText(error.message, TEXT_LIMITS.message, 'The Orca CLI reported an error')
       }
     }
   }
@@ -55,7 +66,12 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
 
 const num = (value: unknown, fallback = 0): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback
-const text = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback)
+const text = (value: unknown, fallback = '', max: number = TEXT_LIMITS.name): string => clipText(value, max, fallback)
+/** Bytes, percentages of one core and load averages beyond these are nonsense, not readings. */
+const MAX_BYTES = 2 ** 52
+const MAX_CORE_PERCENT = 1_000_000
+const MAX_CORES = 4_096
+const MAX_LOAD = 1_000_000
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 
@@ -69,38 +85,39 @@ export function parseDiagnostics(envelope: Envelope): DiagnosticsSample | null {
   if (!('totalMemory' in host) || num(host.totalMemory) <= 0) {
     return null
   }
-  const total = num(host.totalMemory)
-  const available = Math.min(total, Math.max(0, num(host.availableMemory, num(host.freeMemory))))
-  const used = Math.max(0, num(host.usedMemory, total - available))
+  const bytes = (value: unknown, fallback = 0): number => boundedNumber(value, 0, MAX_BYTES, fallback)
+  const share = (value: unknown): number => boundedNumber(value, 0, MAX_CORE_PERCENT, 0)
+  const total = bytes(host.totalMemory)
+  const available = Math.min(total, bytes(host.availableMemory, bytes(host.freeMemory)))
+  const used = Math.min(total, bytes(host.usedMemory, total - available))
   const app = record(result.app)
-  const worktrees = Array.isArray(result.worktrees) ? result.worktrees : []
-  const workspaces: WorkspaceUsage[] = worktrees.map((entry) => {
+  const workspaces: WorkspaceUsage[] = firstEntries(result.worktrees, COUNT_LIMITS.workspaces).map((entry) => {
     const w = record(entry)
     return {
       id: text(w.worktreeId),
       name: text(w.worktreeName, text(w.worktreeId)),
       repo: text(w.repoName),
-      cpu: Math.max(0, num(w.cpu)),
-      memory: Math.max(0, num(w.memory)),
+      cpu: share(w.cpu),
+      memory: bytes(w.memory),
       sessions: Array.isArray(w.sessions) ? w.sessions.length : 0
     }
   })
-  const runtimeId = envelope.meta && typeof envelope.meta.runtimeId === 'string' ? envelope.meta.runtimeId : null
+  const runtimeId = envelope.meta ? clipText(envelope.meta.runtimeId, TEXT_LIMITS.name) || null : null
   return {
-    collectedAt: num(result.collectedAt, 0),
+    collectedAt: Math.max(0, num(result.collectedAt, 0)),
     runtimeId,
     host: {
       totalMemory: total,
       availableMemory: available,
       usedMemory: used,
-      memoryPercent: Math.min(100, Math.max(0, num(host.memoryUsagePercent, total > 0 ? (used / total) * 100 : 0))),
-      availableMemorySource: text(host.availableMemorySource, 'unknown'),
-      cores: Math.max(1, Math.round(num(host.cpuCoreCount, 1))),
-      load1: Math.max(0, num(host.loadAverage1m))
+      memoryPercent: boundedNumber(host.memoryUsagePercent, 0, 100, total > 0 ? (used / total) * 100 : 0),
+      availableMemorySource: text(host.availableMemorySource, 'unknown', TEXT_LIMITS.label),
+      cores: Math.round(boundedNumber(host.cpuCoreCount, 1, MAX_CORES, 1)),
+      load1: boundedNumber(host.loadAverage1m, 0, MAX_LOAD, 0)
     },
-    app: { cpu: Math.max(0, num(app.cpu)), memory: Math.max(0, num(app.memory)) },
-    totalCpu: Math.max(0, num(result.totalCpu)),
-    totalMemory: Math.max(0, num(result.totalMemory)),
+    app: { cpu: share(app.cpu), memory: bytes(app.memory) },
+    totalCpu: share(result.totalCpu),
+    totalMemory: bytes(result.totalMemory),
     workspaces
   }
 }
@@ -130,12 +147,14 @@ export function parseEnvironments(envelope: Envelope, localRuntimeId: string | n
   const seenRuntimes = new Set<string>()
   const seenIds = new Set<string>()
   for (const entry of Array.isArray(list) ? list : []) {
+    if (out.length >= COUNT_LIMITS.environments) break
     const e = record(entry)
-    const id = text(e.id)
+    // Orca makes the id when a server is paired; anything else could not be passed to the CLI.
+    const id = isEnvironmentId(e.id) ? e.id : ''
     if (!id || seenIds.has(id)) {
       continue
     }
-    const runtimeId = typeof e.runtimeId === 'string' && e.runtimeId ? e.runtimeId : null
+    const runtimeId = text(e.runtimeId) || null
     if (runtimeId && (runtimeId === localRuntimeId || seenRuntimes.has(runtimeId))) {
       continue
     }
@@ -143,7 +162,7 @@ export function parseEnvironments(envelope: Envelope, localRuntimeId: string | n
     if (runtimeId) {
       seenRuntimes.add(runtimeId)
     }
-    out.push({ id, name: text(e.name, id) || id, runtimeId })
+    out.push({ id, name: text(e.name, id).trim() || id, runtimeId })
   }
   return out
 }
@@ -183,14 +202,13 @@ export function findPluginKeys(envelope: Envelope, pluginId: string): RemotePlug
   }
   const list = record(envelope.result).plugins
   const matches: { key: string; status: string; isDev: boolean }[] = []
-  for (const entry of Array.isArray(list) ? list : []) {
+  for (const entry of firstEntries(list, COUNT_LIMITS.plugins)) {
     const p = record(entry)
-    const key = text(p.pluginKey)
-    const dot = key.indexOf('.')
-    if (dot <= 0 || key.slice(dot + 1) !== pluginId) {
+    // The key goes into a CLI argument (`orca plugin logs <key>`), so only a well-formed one.
+    if (!isPluginKey(p.pluginKey, pluginId)) {
       continue
     }
-    matches.push({ key, status: text(p.status), isDev: p.isDev === true })
+    matches.push({ key: p.pluginKey, status: text(p.status, '', TEXT_LIMITS.label), isDev: p.isDev === true })
   }
   if (matches.length === 0) {
     return { state: 'absent', keys: [] }
@@ -216,5 +234,5 @@ export function parseLogs(envelope: Envelope): LogLines | null {
     return null
   }
   const result = record(envelope.result)
-  return { pluginKey: text(result.pluginKey), lines: Array.isArray(result.lines) ? result.lines : [] }
+  return { pluginKey: text(result.pluginKey), lines: lastEntries(result.lines, COUNT_LIMITS.logLines) }
 }

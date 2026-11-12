@@ -55,6 +55,7 @@ export function createFleetBinding(orca, options = {}) {
       return () => document.removeEventListener('visibilitychange', handler)
     })
 
+  const now = options.now ?? (() => Date.now())
   const listeners = new Set()
   /** { seq, generatedAt, mode, intervalMs, historyWindowMs, cli, order: string[], machines: Map } */
   let model = null
@@ -63,6 +64,12 @@ export function createFleetBinding(orca, options = {}) {
   let buffered = []
   let wasVisible = isVisible()
   let disposed = false
+  /** The worker's clock minus this frame's, from the newest answer or post (see src/worker.ts:
+   *  the worker keeps its own steady clock, which a wall-clock step does not move). */
+  let clockOffsetMs = 0
+  const noteClock = (generatedAt) => {
+    if (finite(generatedAt)) clockOffsetMs = generatedAt - now()
+  }
 
   function view() {
     if (!model) return { ready: false, error, machines: [] }
@@ -76,6 +83,8 @@ export function createFleetBinding(orca, options = {}) {
       historyWindowMs: model.historyWindowMs,
       cli: model.cli,
       thresholds: model.thresholds,
+      omitted: model.omitted,
+      clockOffsetMs,
       machines: model.order.map((id) => model.machines.get(id))
     }
   }
@@ -106,6 +115,7 @@ export function createFleetBinding(orca, options = {}) {
       thresholds: readThresholds(snapshot.thresholds),
       historyRev: typeof snapshot.historyRev === 'number' ? snapshot.historyRev : null,
       run: typeof snapshot.run === 'string' ? snapshot.run : null,
+      omitted: finite(snapshot.omitted) && snapshot.omitted > 0 ? snapshot.omitted : 0,
       order: (snapshot.machines ?? []).map((m) => m.id),
       machines
     }
@@ -133,6 +143,7 @@ export function createFleetBinding(orca, options = {}) {
 
   function onUpdate(update) {
     if (disposed || !update || update.v !== 1) return
+    noteClock(update.generatedAt)
     if (fetching) buffered.push(update)
     if (update.resync) {
       refresh()
@@ -156,13 +167,21 @@ export function createFleetBinding(orca, options = {}) {
     if (missed || rewritten) refresh()
   }
 
+  /**
+   * Fetches the whole fleet again. Only a visible panel does: every snapshot request counts as a
+   * heartbeat and keeps the worker polling fast, so a hidden panel that re-fetched on each
+   * resync would keep it fast for ever. A hidden panel notes that it is behind and fetches as it
+   * comes back into view.
+   */
   function refresh() {
     if (disposed) return Promise.resolve()
+    if (!isVisible()) return fetching ?? Promise.resolve()
     if (fetching) return fetching
     buffered = []
     fetching = plugin
       .request('fleet.snapshot', undefined, { timeoutMs: REQUEST_TIMEOUT_MS })
       .then((snapshot) => {
+        noteClock(snapshot?.generatedAt)
         model = fromSnapshot(snapshot)
         error = null
         for (const update of buffered) {
@@ -201,7 +220,8 @@ export function createFleetBinding(orca, options = {}) {
   const timer = startTimer(heartbeat, HEARTBEAT_MS)
   const stopWatchingVisibility = onVisibilityChange(() => {
     const visible = isVisible()
-    // Coming back after a while: the worker has slowed down and stopped posting.
+    // Coming back: the worker has slowed down and stopped posting, and anything a hidden panel
+    // was told to re-fetch is still to do.
     if (visible && !wasVisible) refresh()
     wasVisible = visible
   })
@@ -260,6 +280,12 @@ export const LEVEL_LABELS = Object.freeze({
 })
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value)
+/** Own keys only: a lookup by remote text must never reach Object.prototype (`toString`, ...). */
+const own = (table, key) => (typeof key === 'string' && Object.hasOwn(table, key) ? table[key] : undefined)
+const LEVELS = ['ok', 'busy', 'strained', 'critical']
+const levelOrNull = (value) => (LEVELS.includes(value) ? value : null)
+/** More cores than this are not drawn one by one. */
+export const MAX_CORES_DRAWN = 256
 
 function readThresholds(raw) {
   const one = (r, fallback) => {
@@ -338,20 +364,38 @@ export function newestReading(columns, key) {
   return null
 }
 
+/** The launcher names Orca's CLI goes by: `orca-ide` on Linux desktops (where `orca` is GNOME's
+ *  screen reader), `orca` elsewhere. */
+export const LAUNCHERS = Object.freeze(['orca', 'orca-ide'])
+
+/** A machine name that reads the same, as one argument, in every common shell (sh, bash, zsh,
+ *  fish, cmd.exe and PowerShell) inside straight double quotes: plain ASCII letters, digits,
+ *  spaces, `.`, `_`, `-` and the straight apostrophe. Not curly quotes, which PowerShell takes for
+ *  quote marks; not `$`, backticks, `%`, `!` or `^`; and not a leading `-`, which the CLI would
+ *  read as an option. */
+const SAFE_NAME = /^[A-Za-z0-9._' -]{1,64}$/
+/** An environment id that needs no quotes anywhere: Orca makes them (UUIDs) when it pairs. */
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+export function safeMachineName(name) {
+  return typeof name === 'string' && SAFE_NAME.test(name) && !name.startsWith('-') && name.trim() === name
+}
+
 /**
- * The command that installs Fleet Monitor on a paired machine, run on this computer. The machine
- * name is untrusted text pasted into a shell, so it is used only when double quotes keep it
- * literal in every common shell; otherwise the environment id (which Orca also accepts) is used.
+ * The command that installs Fleet Monitor on a paired machine, run on this computer, or null when
+ * none can be written safely. The machine name comes from that machine, so it is untrusted text
+ * a person will paste into a shell: it is used only when `safeMachineName` allows it (and no other
+ * paired machine shares it), and otherwise the environment id, which Orca also accepts, in the
+ * `--environment=<id>` form. With neither, there is no command, only words.
  */
-export function installCommand(machine) {
+export function installCommand(machine, options = {}) {
   const name = typeof machine?.name === 'string' ? machine.name : ''
   const id = typeof machine?.id === 'string' ? machine.id : ''
-  const safe = (text) => text.length > 0 && text.length <= 128 && !/["$`\\!%^\u0000-\u001f\u007f]/.test(text)
-  let target
-  if (safe(name)) target = `"${name}"`
-  else if (/^[A-Za-z0-9._:-]+$/.test(id)) target = id
-  else target = `"${id.replace(/[^A-Za-z0-9._:-]/g, '')}"`
-  return `orca plugin install ${INSTALL_SOURCE} --environment ${target}`
+  const launcher = LAUNCHERS.includes(options.launcher) ? options.launcher : 'orca'
+  const head = `${launcher} plugin install ${INSTALL_SOURCE}`
+  if (safeMachineName(name) && !options.ambiguous) return `${head} --environment "${name}"`
+  if (SAFE_ID.test(id)) return `${head} --environment=${id}`
+  return null
 }
 
 function localTag(platform) {
@@ -368,7 +412,7 @@ function validGroups(groups, cores) {
   if (!Array.isArray(groups) || groups.length === 0) return null
   const seen = new Array(cores).fill(false)
   for (const g of groups) {
-    if (!g || !(g.kind in GROUP_ORDER) || !Number.isInteger(g.start) || !Number.isInteger(g.count) || g.start < 0 || g.count < 1) return null
+    if (!g || own(GROUP_ORDER, g.kind) === undefined || !Number.isInteger(g.start) || !Number.isInteger(g.count) || g.start < 0 || g.count < 1) return null
     for (let i = g.start; i < g.start + g.count; i += 1) {
       if (i >= cores || seen[i]) return null
       seen[i] = true
@@ -380,7 +424,7 @@ function validGroups(groups, cores) {
 /** Per-core load in the design's groups: P-cores then E-cores, or one group of every core. */
 function coreGroupsOf(cpu, thresholds) {
   const perCore = Array.isArray(cpu?.perCore) && cpu.perCore.every(finite) ? cpu.perCore : null
-  if (!perCore || perCore.length === 0) return null
+  if (!perCore || perCore.length === 0 || perCore.length > MAX_CORES_DRAWN) return null
   const groups = validGroups(cpu.groups, perCore.length)
   const list = groups
     ? [...groups].sort((a, b) => GROUP_ORDER[a.kind] - GROUP_ORDER[b.kind])
@@ -408,7 +452,7 @@ function workspacesOf(lists, cores) {
       id: key,
       name: String(w.name || w.id || ''),
       repo: typeof w.repo === 'string' ? w.repo : '',
-      cpuPct: Math.max(0, finite(w.cpu) ? w.cpu : 0) / Math.max(1, cores ?? 1),
+      cpuPct: Math.min(100, Math.max(0, finite(w.cpu) ? w.cpu : 0) / Math.max(1, cores ?? 1)),
       memBytes: Math.max(0, finite(w.memory) ? w.memory : 0)
     })
   }
@@ -416,10 +460,14 @@ function workspacesOf(lists, cores) {
 }
 
 /** What the basic-tier row should say: install it there, enable it there, or check its beacon. */
-function installHintOf(machine) {
+function installHintOf(machine, context) {
   switch (machine.beacon?.remotePlugin) {
     case 'absent':
-      return { reason: 'absent', command: installCommand(machine) }
+      return {
+        reason: 'absent',
+        command: installCommand(machine, { launcher: context.launcher, ambiguous: context.sharedNames.has(machine.name) }),
+        launcher: context.launcher
+      }
     case 'installed':
       return { reason: 'installed', command: null }
     case 'running':
@@ -429,7 +477,7 @@ function installHintOf(machine) {
   }
 }
 
-function toMachine(m, thresholds, now) {
+function toMachine(m, thresholds, now, context) {
   const local = m.kind === 'local'
   const online = m.online === true
   const status = online ? 'online' : m.status === 'connecting' ? 'connecting' : 'offline'
@@ -437,13 +485,16 @@ function toMachine(m, thresholds, now) {
   const platform = m.host?.platform ?? null
   const cores = finite(m.host?.cores) && m.host.cores > 0 ? m.host.cores : Array.isArray(m.cpu?.perCore) ? m.cpu.perCore.length || null : null
   const basic = !local && m.tier !== 'full'
-  const cpuPct = finite(m.cpu?.percent) ? m.cpu.percent : null
+  const percent = (value) => (finite(value) ? Math.min(100, Math.max(0, value)) : null)
+  const cpuPct = percent(m.cpu?.percent)
+  // An estimate from the load average is shown, labelled, but never judged or coloured.
+  const estimated = m.cpu?.source === 'load'
   const memReliable = Boolean(m.memory) && m.memory.reliable !== false
-  const memPct = m.memory && finite(m.memory.percent) ? m.memory.percent : null
+  const memPct = m.memory ? percent(m.memory.percent) : null
   const newestCpu = newestReading(history, 'cpu')
   const newestMem = newestReading(history, 'mem')
   const seen = [m.lastSeenAt, newestCpu?.t, newestMem?.t].filter(finite)
-  const health = online ? (m.health?.level ?? 'unknown') : 'unknown'
+  const health = online ? (levelOrNull(m.health?.level) ?? 'unknown') : 'unknown'
   return {
     id: String(m.id),
     name: String(m.name || m.id),
@@ -454,8 +505,8 @@ function toMachine(m, thresholds, now) {
     tier: basic ? 'basic' : 'full',
     tag: local ? localTag(platform) : basic ? 'Basic' : '',
     health,
-    healthLabel: LEVEL_LABELS[health] ?? LEVEL_LABELS.unknown,
-    reasons: Array.isArray(m.health?.reasons) ? m.health.reasons.filter((r) => typeof r === 'string') : [],
+    healthLabel: own(LEVEL_LABELS, health) ?? LEVEL_LABELS.unknown,
+    reasons: online && Array.isArray(m.health?.reasons) ? m.health.reasons.filter((r) => typeof r === 'string' && r !== 'offline').slice(0, 4) : [],
     updatedAt: seen.length > 0 ? Math.max(...seen) : null,
     lastSeenAt: finite(m.lastSeenAt) ? m.lastSeenAt : null,
     error: typeof m.error === 'string' && m.error ? m.error : null,
@@ -466,8 +517,8 @@ function toMachine(m, thresholds, now) {
     load: m.load && finite(m.load.one) ? { one: m.load.one, five: finite(m.load.five) ? m.load.five : null, fifteen: finite(m.load.fifteen) ? m.load.fifteen : null } : null,
     cpu: {
       pct: cpuPct,
-      estimated: m.cpu?.source === 'load',
-      tone: m.health?.cpu ?? (cpuPct === null ? 'ok' : levelFor(cpuPct, thresholds.cpu)),
+      estimated,
+      tone: estimated ? 'ok' : (levelOrNull(m.health?.cpu) ?? (cpuPct === null ? 'ok' : levelFor(cpuPct, thresholds.cpu))),
       history: bucketHistory(history, 'cpu', now),
       stats: windowStats(history, 'cpu', now),
       groups: online ? coreGroupsOf(m.cpu, thresholds) : null
@@ -477,13 +528,13 @@ function toMachine(m, thresholds, now) {
       reliable: memReliable,
       usedBytes: m.memory && finite(m.memory.used) ? m.memory.used : null,
       totalBytes: m.memory && finite(m.memory.total) ? m.memory.total : null,
-      tone: m.health?.memory ?? (memReliable && memPct !== null ? levelFor(memPct, thresholds.memory) : 'ok'),
+      tone: levelOrNull(m.health?.memory) ?? (memReliable && memPct !== null ? levelFor(memPct, thresholds.memory) : 'ok'),
       history: bucketHistory(history, 'mem', now),
       stats: windowStats(history, 'mem', now)
     },
     orca: m.orca && finite(m.orca.cpu) ? { cpuPct: m.orca.cpu / Math.max(1, cores ?? 1), memBytes: finite(m.orca.memory) ? m.orca.memory : null } : null,
     workspaces: online ? workspacesOf(m.workspaces, cores) : [],
-    install: !local && online && basic ? installHintOf(m) : null,
+    install: !local && online && basic ? installHintOf(m, context) : null,
     lastKnown: { cpuPct: newestCpu?.value ?? cpuPct, memPct: newestMem?.value ?? (memReliable ? memPct : null) }
   }
 }
@@ -500,6 +551,8 @@ export function toFleet(view, now = Date.now()) {
       error: view?.error ?? null,
       thresholds: readThresholds(null),
       cliError: null,
+      launcher: 'orca',
+      omitted: 0,
       online: 0,
       total: 0,
       remotes: 0,
@@ -507,12 +560,25 @@ export function toFleet(view, now = Date.now()) {
     }
   }
   const thresholds = view.thresholds ?? readThresholds(null)
-  const machines = (view.machines ?? []).filter((m) => m && m.id).map((m) => toMachine(m, thresholds, now))
+  const raw = (view.machines ?? []).filter((m) => m && m.id)
+  const localPlatform = raw.find((m) => m.kind === 'local')?.host?.platform ?? null
+  const launcher = LAUNCHERS.includes(view.cli?.launcher) ? view.cli.launcher : localPlatform === 'linux' ? 'orca-ide' : 'orca'
+  const seen = new Set()
+  const sharedNames = new Set()
+  for (const m of raw) {
+    if (m.kind === 'local' || typeof m.name !== 'string') continue
+    if (seen.has(m.name)) sharedNames.add(m.name)
+    seen.add(m.name)
+  }
+  const machines = raw.map((m) => toMachine(m, thresholds, now, { launcher, sharedNames }))
+  const cliError = [view.cli?.error, view.cli?.runError].find((e) => typeof e === 'string' && e) ?? null
   return {
     state: 'live',
     error: view.error ?? null,
     thresholds,
-    cliError: view.cli?.error ?? null,
+    cliError,
+    launcher,
+    omitted: finite(view.omitted) && view.omitted > 0 ? view.omitted : 0,
     online: machines.filter((m) => m.online).length,
     total: machines.length,
     remotes: machines.filter((m) => !m.local).length,

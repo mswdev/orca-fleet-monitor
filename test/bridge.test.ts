@@ -1,5 +1,6 @@
 import { assert, describe, test } from 'orca/testing'
-import { estimateCloneBytes, PanelBridge, type BridgeSource } from '../src/bridge.ts'
+import { BEACON_PREFIX, decodeBeacon } from '../src/beacon.ts'
+import { estimateCloneBytes, PanelBridge, SNAPSHOT_MAX_BYTES, type BridgeSource } from '../src/bridge.ts'
 import { DEFAULT_HEALTH } from '../src/health.ts'
 import { HistoryRing } from '../src/history.ts'
 import { mergeMachine } from '../src/merge.ts'
@@ -136,6 +137,97 @@ describe('PanelBridge', () => {
   })
 })
 
+/** Whether a value survives a structured clone, which is how Orca hands it to a panel. */
+function clones(value: unknown): boolean {
+  try {
+    structuredClone(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+describe('only plain data, never over the cap', () => {
+  const bridgeOf = (entries: MachineEntry[], extra: Partial<ConstructorParameters<typeof PanelBridge>[0]> = {}) => {
+    const time = new FakeTime()
+    const posts: FleetUpdate[] = []
+    const bridge = new PanelBridge({
+      source: source(time, entries, { value: 'fast' }),
+      post: (p) => posts.push(p),
+      now: time.now,
+      cli: () => ({ path: null, source: null, error: null }),
+      setTimeout: time.setTimeout,
+      clearTimeout: time.clearTimeout,
+      ...extra
+    })
+    return { bridge, posts, time }
+  }
+
+  test('a beacon whose core kind is "constructor" cannot put a function in front of the panel', () => {
+    const line = (kind: string) =>
+      `${BEACON_PREFIX}${JSON.stringify({ v: 1, r: 'run', q: 1, t: 1, iv: 5000, h: 'h', p: 'linux', a: 'x64', rl: '1', m: 'cpu', n: 4, u: 1, c: 10, pc: [1, 2, 3, 4], cg: [[kind, 0, 4]], mt: 1000, mf: 500, l: [1, 2, 3] })}`
+    for (const kind of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
+      const latest = decodeBeacon(line(kind))
+      assert.ok(latest)
+      assert.equal(latest.coreGroups, null, kind)
+      const state = mergeMachine({
+        id: 'env-x', name: 'x', kind: 'remote', now: 0, status: 'online', lastSeenAt: 0, latencyMs: 1, error: null,
+        beacon: { latest, fresh: true, ageMs: 0, pluginKey: 'local.fleet-monitor', remotePlugin: 'running' }, health: DEFAULT_HEALTH
+      })
+      const { bridge } = bridgeOf([{ state: machine('local'), history: new HistoryRing() }, { state, history: new HistoryRing() }])
+      const snap = bridge.snapshot()
+      assert.ok(clones(snap), kind)
+      assert.deepEqual(snap.machines.map((m) => m.id), ['local', 'env-x'])
+    }
+  })
+
+  test('whatever slips into a state, the snapshot and the posts carry plain data only', () => {
+    const bad = machine('env-bad') as unknown as Record<string, unknown>
+    bad.cpu = { ...(bad.cpu as object), groups: [{ kind: Object, start: 0, count: 1 }], percent: Number.NaN }
+    bad.extra = () => 1
+    bad.when = new Date(0)
+    const { bridge, posts } = bridgeOf([{ state: machine('local'), history: new HistoryRing() }, { state: bad as unknown as MachineState, history: new HistoryRing() }])
+    const snap = bridge.snapshot()
+    assert.ok(clones(snap))
+    const sent = snap.machines.find((m) => m.id === 'env-bad') as unknown as Record<string, unknown>
+    assert.equal('extra' in sent, false)
+    assert.equal('when' in sent, false)
+    assert.deepEqual((sent.cpu as { groups: unknown }).groups, [{ start: 0, count: 1 }])
+    bridge.flush()
+    assert.ok(clones(posts[0]))
+    assert.equal(posts[0]?.resync, undefined)
+  })
+
+  test('the cap holds without history: thin, then drop detail, then leave machines out (counted)', () => {
+    const huge = (id: string): MachineState => {
+      const m = machine(id)
+      const w = { id: 'w'.repeat(128), name: 'n'.repeat(128), repo: 'r'.repeat(128), cpu: 1, memory: 1, sessions: 1 }
+      return { ...m, error: 'e'.repeat(500), cpu: { ...m.cpu, perCore: Array.from({ length: 2_048 }, () => 50) }, workspaces: { byCpu: [w, w, w, w, w], byMemory: [w, w, w, w, w] } }
+    }
+    const entries = Array.from({ length: 64 }, (_, i) => ({ state: huge(i === 0 ? 'local' : `env-${i}`), history: new HistoryRing() }))
+    const { bridge } = bridgeOf(entries)
+    const snap = bridge.snapshot()
+    assert.ok(estimateCloneBytes(snap) <= SNAPSHOT_MAX_BYTES, `${estimateCloneBytes(snap)} bytes`)
+    assert.equal(snap.machines.length, 64, 'every machine is still listed, without its bulk')
+    assert.equal(snap.machines[5]?.cpu.perCore, null)
+    const tight = bridgeOf(entries, { snapshotMaxBytes: 12_000 }).bridge.snapshot()
+    assert.ok(estimateCloneBytes(tight) <= 12_000)
+    assert.ok(tight.machines.length > 0 && tight.machines.length < 64)
+    assert.equal(tight.machines[0]?.id, 'local', 'this computer first')
+    assert.equal(tight.omitted, 64 - tight.machines.length)
+  })
+
+  test('a post too large with detail is sent lean before it falls back to a resync', () => {
+    const big = (id: string): MachineState => ({ ...machine(id), cpu: { ...machine(id).cpu, perCore: Array.from({ length: 1_000 }, () => 1) } })
+    const entries = Array.from({ length: 30 }, (_, i) => ({ state: big(`env-${i}`), history: new HistoryRing() }))
+    const { bridge, posts } = bridgeOf(entries)
+    bridge.flush()
+    assert.equal(posts[0]?.resync, undefined)
+    assert.equal(posts[0]?.machines.length, 30)
+    assert.equal(posts[0]?.machines[0]?.cpu.perCore, null)
+  })
+})
+
 test('estimateCloneBytes counts as Orca does, not as JSON', () => {
   assert.equal(estimateCloneBytes(null), 1)
   assert.equal(estimateCloneBytes(1), 8)
@@ -167,6 +259,29 @@ describe('statusBarView', () => {
     const critical = statusBarView([machine('env-a', { cpu: 99, name: 'A very long machine name that keeps going' })])
     assert.equal(critical.tone, 'danger')
     assert.equal(critical.text, 'A very long machine nam… critical')
+  })
+
+  test('an estimate never names a machine or sets the tone, and is labelled in the tooltip', () => {
+    const basicState = mergeMachine({
+      id: 'env-b', name: 'Basic Box', kind: 'remote', now: 0, status: 'online', lastSeenAt: 0, latencyMs: 1, error: null,
+      diag: {
+        collectedAt: 1, runtimeId: null,
+        host: { totalMemory: 100, availableMemory: 80, usedMemory: 20, memoryPercent: 20, availableMemorySource: 'proc-meminfo', cores: 4, load1: 8 },
+        app: { cpu: 0, memory: 0 }, totalCpu: 0, totalMemory: 0, workspaces: []
+      },
+      health: DEFAULT_HEALTH
+    })
+    const v = statusBarView([machine('local'), basicState])
+    assert.equal(v.text, '2 machines ok', 'a 100% estimate is not "critical"')
+    assert.equal(v.tone, 'neutral')
+    assert.match(v.tooltip, /Basic Box: ok · CPU ~100% \(estimate\) · mem 20%/)
+  })
+
+  test('with background monitoring off and no panel, only this computer is summed up', () => {
+    const v = statusBarView([machine('local'), machine('env-a', { cpu: 99, name: 'Hot Box' })], { remotesPaused: true })
+    assert.equal(v.text, '1 machine ok')
+    assert.ok(!/Hot Box/.test(v.tooltip))
+    assert.match(v.tooltip, /background monitoring is off/)
   })
 
   test('counts offline machines and warns', () => {

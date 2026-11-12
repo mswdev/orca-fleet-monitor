@@ -118,6 +118,23 @@ body {
 .fm-flex-none {
   flex: none;
 }
+/* Collapsed regions stay in the page (aria-controls points at them); `hidden` must win over the
+ * display each one sets. */
+.fm [hidden] {
+  display: none !important;
+}
+/* Text for screen readers only. */
+.fm-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Health of a machine sets --fm-level; the level of one metric sets --fm-tone. Charts stay in the
  * primary colour until the metric is elevated. */
@@ -393,6 +410,15 @@ body {
 .fm-sub--xs {
   font-size: 10px;
 }
+/* A long figure (a huge machine's memory, say) is cut short rather than push the panel sideways. */
+.fm-metric-row .fm-sub,
+.fm-section-head .fm-sub,
+.fm-reading .fm-sub {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .fm-spark {
   display: block;
   width: 100%;
@@ -539,6 +565,10 @@ body {
   gap: 8px;
   min-width: 0;
 }
+.fm-reasons {
+  color: var(--fm-level, var(--fm-muted-fg));
+  font-weight: 500;
+}
 .fm-detail-name {
   min-width: 0;
   margin: 0;
@@ -650,17 +680,28 @@ body {
   flex: 1 1 0%;
   min-width: 0;
 }
+/* One row of bars, or several (each at most 32 bars) on a machine with many cores. Bars may
+ * shrink to nothing rather than push the panel sideways. */
+.fm-core-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
 .fm-core-bars {
   display: flex;
   gap: 2px;
   height: 40px;
+  min-width: 0;
+}
+.fm-core-rows--multi .fm-core-bars {
+  height: 20px;
 }
 .fm-core-bars--dense {
   gap: 1px;
 }
 .fm-core {
   flex: 1 1 0%;
-  min-width: 2px;
+  min-width: 0;
   display: flex;
   align-items: flex-end;
   overflow: hidden;
@@ -668,7 +709,6 @@ body {
   border-radius: 2px;
 }
 .fm-core-bars--dense .fm-core {
-  min-width: 1px;
   border-radius: 1px;
 }
 .fm-core-fill {
@@ -719,6 +759,9 @@ body {
 }
 .fm-ws-cpu,
 .fm-ws-mem {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-family: var(--fm-mono);
   text-align: right;
   white-space: nowrap;
@@ -845,6 +888,7 @@ body {
 }
 .fm-offline-text {
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 .fm-offline-text p,
 .fm-message p {
@@ -868,7 +912,8 @@ body {
   border-radius: 6px;
   cursor: pointer;
 }
-.fm-btn[disabled] {
+.fm-btn[disabled],
+.fm-btn[aria-disabled='true'] {
   cursor: default;
   opacity: 0.7;
 }

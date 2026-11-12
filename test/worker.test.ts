@@ -1,5 +1,6 @@
 // The real wiring (src/monitor.ts) under Orca's mountWorker, with a fake CLI and a fake clock, so
 // no real `orca` command runs. The worker's default export is exercised for its shape only.
+import { readFileSync } from 'node:fs'
 import { assert, hostError, mockHost, mountWorker, test } from 'orca/testing'
 import { BEACON_PREFIX, decodeBeacon } from '../src/beacon.ts'
 import type { FleetSnapshot } from '../src/model.ts'
@@ -8,7 +9,7 @@ import * as worker from '../src/worker.ts'
 import type { JsonValue, OrcaWorkerApi } from 'orca/worker'
 import { diagnosticsFor, envelope, FakeCli, FakeTime, flush, localSample, okResult } from './helpers.ts'
 
-function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | null } = {}): MonitorDeps {
+function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | null; platform?: string } = {}): MonitorDeps {
   let reading = 0
   let last: ReturnType<typeof localSample> | null = null
   return {
@@ -33,12 +34,14 @@ function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | n
     localName: () => 'this-desktop',
     runId: () => 'cafe01',
     workerFile: '/home/u/code/orca-fleet-monitor/src/worker.ts',
-    declaredCommands: ['fleet.show']
+    declaredCommands: ['fleet.show'],
+    platform: override.platform ?? 'darwin'
   }
 }
 
-function fakeCli(time: FakeTime): FakeCli {
+function fakeCli(time: FakeTime, options: { failList?: () => boolean } = {}): FakeCli {
   return new FakeCli(time, (args) => {
+    if (args[0] === 'environment' && options.failList?.()) return { ...okResult(''), spawnError: 'spawn EACCES' }
     if (args[0] === 'environment') {
       return okResult(envelope({ environments: [{ id: 'env-a', name: 'Build Box', runtimeId: 'rt-a' }] }, { runtimeId: 'local' }))
     }
@@ -52,9 +55,13 @@ function fakeCli(time: FakeTime): FakeCli {
   })
 }
 
-async function mount(settings: Record<string, JsonValue> = {}, statusBar?: () => unknown) {
+async function mount(
+  settings: Record<string, JsonValue> = {},
+  statusBar?: () => unknown,
+  options: { platform?: string; failList?: () => boolean } = {}
+) {
   const time = new FakeTime()
-  const cli = fakeCli(time)
+  const cli = fakeCli(time, { failList: options.failList })
   let monitor: FleetMonitor | null = null
   let workerOrca: OrcaWorkerApi | null = null
   const host = mockHost(statusBar ? { settings, results: { 'statusBar.update': statusBar } } : { settings })
@@ -62,7 +69,7 @@ async function mount(settings: Record<string, JsonValue> = {}, statusBar?: () =>
     {
       default: async (orca) => {
         workerOrca = orca
-        monitor = await startFleetMonitor(orca, fakeDeps(time, cli))
+        monitor = await startFleetMonitor(orca, fakeDeps(time, cli, { platform: options.platform }))
       },
       deactivate: async () => monitor?.stop()
     },
@@ -251,5 +258,49 @@ test('a status bar unavailable for two minutes stops slow polling, but not the b
   await t.mounted.request('fleet.heartbeat')
   await t.settle()
   assert.ok(t.cli.calls.length > callsAtHeadless, 'an open panel still polls')
+  await t.mounted.deactivate()
+})
+
+test('with background monitoring off, a machine only publishes its beacon until a panel opens', async () => {
+  const t = await mount({ backgroundMonitoring: false })
+  assert.equal(t.monitor().settings().backgroundMonitoring, false)
+  await runFor(t, 300_000)
+  assert.equal(t.cli.calls.length, 0, 'no CLI calls with no panel open')
+  assert.ok(t.mounted.logs.filter((line) => line.startsWith(BEACON_PREFIX)).length >= 59, 'the beacon keeps going')
+  await t.mounted.request('fleet.heartbeat')
+  await t.settle()
+  assert.ok(t.cli.count((a) => a[0] === 'diagnostics' && a.includes('env-a')) >= 1, 'an open panel reads every machine')
+  await runFor(t, 30_000) // the panel closes: fast mode lingers 15 s, then nothing
+  const afterPanel = t.cli.calls.length
+  await runFor(t, 300_000)
+  assert.equal(t.cli.calls.length, afterPanel)
+  const status = t.host.callsOf('statusBar.update') as { text: string; tooltip: string }[]
+  const last = status[status.length - 1]!
+  // (The fake sampler's CPU climbs with every reading, so this computer's own level varies.)
+  assert.ok(!/Build Box/.test(last.text) && !/Build Box/.test(last.tooltip), 'paired machines are not summed up from stale readings')
+  assert.match(last.tooltip, /background monitoring is off/)
+  await t.mounted.deactivate()
+})
+
+test('the manifest declares the background monitoring setting, on by default', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../orca-plugin.json', import.meta.url), 'utf8')) as {
+    contributes: { settings: { key: string; type: string; default: unknown }[] }
+  }
+  const setting = manifest.contributes.settings.find((s) => s.key === 'backgroundMonitoring')
+  assert.deepEqual(setting && [setting.type, setting.default], ['boolean', true])
+})
+
+test('the snapshot says why paired machines cannot be listed, and what the CLI is called here', async () => {
+  let failing = true
+  const t = await mount({}, undefined, { platform: 'linux', failList: () => failing })
+  const snap = (await t.mounted.request('fleet.snapshot')) as FleetSnapshot
+  await t.settle()
+  const again = (await t.mounted.request('fleet.snapshot')) as FleetSnapshot
+  assert.equal(again.cli.runError, 'spawn EACCES')
+  assert.equal(snap.cli.launcher, 'orca-ide')
+  failing = false
+  await runFor(t, 31_000)
+  const later = (await t.mounted.request('fleet.snapshot')) as FleetSnapshot
+  assert.equal(later.cli.runError, null)
   await t.mounted.deactivate()
 })

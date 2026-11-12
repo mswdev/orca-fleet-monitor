@@ -185,10 +185,16 @@ function toMachineView(m, now, thresholds) {
     memHistory.t.push(lastSeenAt)
     memHistory.v.push(m.mem.pct)
   }
-  const cpuLevel = health(m.cpu.pct, thresholds.cpu)
-  const memLevel = health(m.mem.pct, thresholds.memory)
-  const level = rank[cpuLevel] >= rank[memLevel] ? cpuLevel : memLevel
   const basic = m.tier === 'basic'
+  // As the worker judges it: a basic machine's CPU is an estimate, which never sets a level.
+  const cpuLevel = basic ? null : health(m.cpu.pct, thresholds.cpu)
+  const memLevel = health(m.mem.pct, thresholds.memory)
+  const level = cpuLevel !== null && rank[cpuLevel] >= rank[memLevel] ? cpuLevel : memLevel
+  const threshold = (lvl, t) => (lvl === 'critical' ? t.critical : lvl === 'strained' ? t.strained : t.busy)
+  const reasons = level === 'ok' ? [] : [
+    ...(cpuLevel === level ? [`CPU ${Math.round(m.cpu.pct)}% ≥ ${threshold(level, thresholds.cpu)}%`] : []),
+    ...(memLevel === level ? [`memory ${Math.round(m.mem.pct)}% ≥ ${threshold(level, thresholds.memory)}%`] : [])
+  ]
   return {
     id: m.id,
     name: m.name,
@@ -225,7 +231,7 @@ function toMachineView(m, now, thresholds) {
       byMemory: []
     },
     health: m.online
-      ? { level, reasons: [], cpu: cpuLevel, memory: memLevel }
+      ? { level, reasons, cpu: cpuLevel, memory: memLevel }
       : { level: 'unknown', reasons: ['offline'], cpu: null, memory: null },
     beacon: {
       state: local || (!basic && m.online) ? 'fresh' : basic ? 'absent' : 'stale',
@@ -266,7 +272,7 @@ export function sampleSnapshot(state = 'live', now = Date.now(), thresholds = SA
     mode: 'fast',
     intervalMs: 5_000,
     historyWindowMs: 30 * MIN,
-    cli: { path: '/Applications/Orca.app/Contents/Resources/bin/orca', source: 'bundled', error: null },
+    cli: { path: '/Applications/Orca.app/Contents/Resources/bin/orca', source: 'bundled', error: null, runError: null, launcher: 'orca' },
     thresholds,
     historyRev: 0,
     run: 'preview',

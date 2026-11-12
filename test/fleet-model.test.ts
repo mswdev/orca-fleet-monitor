@@ -155,7 +155,62 @@ describe('toFleet', () => {
       })
     )
     assert.deepEqual([m.tier, m.tag, m.cpu.estimated, m.cpu.groups, m.chip, m.uptimeSec], ['basic', 'Basic', true, null, null, null])
-    assert.deepEqual(m.install, { reason: 'absent', command: `orca plugin install ${INSTALL_SOURCE} --environment "Build Box"` })
+    assert.deepEqual(m.install, { reason: 'absent', command: `orca plugin install ${INSTALL_SOURCE} --environment "Build Box"`, launcher: 'orca' })
+  })
+
+  test('an estimate is never coloured by the CPU thresholds, even if a worker sent a CPU level', () => {
+    const m = only(
+      machine({
+        tier: 'basic',
+        cpu: { percent: 99, source: 'load', perCore: null, groups: null },
+        health: { level: 'critical', reasons: [], cpu: 'critical', memory: 'ok' },
+        beacon: { state: 'absent', ageMs: null, seq: null, pluginKey: null, remotePlugin: 'absent' }
+      })
+    )
+    assert.equal(m.cpu.tone, 'ok')
+  })
+
+  test('the install command uses the launcher this computer has, and the id for a name two machines share', () => {
+    const basicMachine = (id: string, name: string) =>
+      machine({ id, name, tier: 'basic', cpu: { percent: 1, source: 'load', perCore: null, groups: null }, beacon: { state: 'absent', ageMs: null, seq: null, pluginKey: null, remotePlugin: 'absent' } })
+    const linux = toFleet(
+      {
+        ...view([machine({ id: 'local', kind: 'local', host: { ...machine().host, platform: 'linux' } }), basicMachine('env-1', 'Twin'), basicMachine('env-2', 'Twin')]),
+        cli: { path: '/x', source: 'bundled', error: null }
+      },
+      NOW
+    )
+    assert.equal(linux.launcher, 'orca-ide', 'from the local platform when the worker does not say')
+    assert.deepEqual(
+      linux.machines.slice(1).map((m) => m.install?.command),
+      [`orca-ide plugin install ${INSTALL_SOURCE} --environment=env-1`, `orca-ide plugin install ${INSTALL_SOURCE} --environment=env-2`]
+    )
+    const said = toFleet({ ...view([basicMachine('env-1', 'Build Box')]), cli: { path: '/x', source: 'bundled', error: null, launcher: 'orca-ide' } }, NOW)
+    assert.equal(said.machines[0]!.install?.command, `orca-ide plugin install ${INSTALL_SOURCE} --environment "Build Box"`)
+    const odd = toFleet({ ...view([basicMachine('env-1', 'Build Box')]), cli: { path: '/x', source: 'bundled', error: null, launcher: 'rm -rf' as 'orca' } }, NOW)
+    assert.match(odd.machines[0]!.install?.command ?? '', /^orca plugin install/, 'only a known launcher name')
+  })
+
+  test('names from the data never reach Object.prototype, and absurd figures are clamped', () => {
+    const odd = only(
+      machine({
+        health: { level: 'toString' as 'ok', reasons: [], cpu: 'valueOf' as 'ok', memory: '__proto__' as 'ok' },
+        cpu: { percent: 1e9, source: 'beacon', perCore: [1, 2], groups: [{ kind: 'constructor' as 'performance', start: 0, count: 2 }] },
+        memory: { total: 1, used: 1, available: 0, percent: -5, source: 'orca', reliable: true },
+        workspaces: { byCpu: [{ id: 'w', name: 'w', repo: '', cpu: 1e299, memory: 1, sessions: 1 }], byMemory: [] }
+      })
+    )
+    // The bogus levels are dropped; the tones then follow the (clamped) figures themselves.
+    assert.deepEqual([odd.health, odd.healthLabel, odd.cpu.tone, odd.mem.tone], ['unknown', 'Waiting', 'critical', 'ok'])
+    assert.deepEqual(odd.cpu.groups?.map((g) => g.label), ['Cores'])
+    assert.deepEqual([odd.cpu.pct, odd.mem.pct, odd.workspaces[0]?.cpuPct], [100, 0, 100])
+    const many = only(machine({ cpu: { percent: 5, source: 'beacon', perCore: new Array(300).fill(5), groups: null } }))
+    assert.equal(many.cpu.groups, null, 'too many cores to draw one by one')
+  })
+
+  test('a CLI error from resolution or from listing machines reaches the model', () => {
+    assert.equal(toFleet({ ...view([]), cli: { path: null, source: null, error: 'not found' } }, NOW).cliError, 'not found')
+    assert.equal(toFleet({ ...view([]), cli: { path: '/x', source: 'bundled', error: null, runError: 'spawn EACCES' } }, NOW).cliError, 'spawn EACCES')
   })
 
   test('the basic row says why when Fleet Monitor is there but silent or off', () => {
@@ -211,18 +266,60 @@ describe('toFleet', () => {
 })
 
 describe('installCommand', () => {
-  test('quotes a plain name, apostrophes included', () => {
-    assert.equal(installCommand({ id: 'env-1', name: "Example's Mac mini" }), `orca plugin install ${INSTALL_SOURCE} --environment "Example's Mac mini"`)
+  const ID = '00000000-1111-4222-8333-444444444444'
+  const withId = `orca plugin install ${INSTALL_SOURCE} --environment=${ID}`
+
+  test('quotes a plain ASCII name, the straight apostrophe included', () => {
+    assert.equal(installCommand({ id: ID, name: "Example's Mac mini" }), `orca plugin install ${INSTALL_SOURCE} --environment "Example's Mac mini"`)
+    assert.equal(installCommand({ id: ID, name: 'build-box_02.lan' }), `orca plugin install ${INSTALL_SOURCE} --environment "build-box_02.lan"`)
   })
 
-  test('falls back to the environment id for a name a shell would read as code', () => {
-    for (const name of ['$(rm -rf ~)', 'a"b', 'back`tick`', 'semi\\colon', 'bang!', 'line\nbreak', '']) {
-      assert.equal(installCommand({ id: 'env-0000-1111', name }), `orca plugin install ${INSTALL_SOURCE} --environment env-0000-1111`, name)
+  test('uses the id, in --environment=<id> form, for any name outside the allowlist', () => {
+    const names = [
+      'Build Box”; Write-Output injected; #', // curly quotes: PowerShell reads them as quote marks
+      'x“; calc; ”y',
+      'Example’s Mac', // a curly apostrophe
+      'a„ b',
+      '--approve ap1-abc', // read as options
+      '-rf',
+      '$(rm -rf ~)',
+      '$HOME',
+      'a"b',
+      'back`tick`',
+      'semi\\colon',
+      'bang!',
+      'pct%PATH%',
+      'caret^',
+      'a;b',
+      'a&b',
+      'a|b',
+      'a>b',
+      'a#b',
+      'é漢字',
+      '\u202eevil',
+      'tab\there',
+      'line\nbreak',
+      ' lead',
+      'trail ',
+      'x'.repeat(65),
+      ''
+    ]
+    for (const name of names) assert.equal(installCommand({ id: ID, name }), withId, JSON.stringify(name))
+  })
+
+  test('uses the id when another paired machine has the same name', () => {
+    assert.equal(installCommand({ id: ID, name: 'Build Box' }, { ambiguous: true }), withId)
+  })
+
+  test('offers no command when neither the name nor the id is safe', () => {
+    for (const id of ['--json', '-e', '', 'x y', 'a"b', '$(id)', '../..']) {
+      assert.equal(installCommand({ id, name: '$bad' }), null, JSON.stringify(id))
     }
   })
 
-  test('never lets an odd id through either', () => {
-    assert.equal(installCommand({ id: 'x;$(y)', name: '$bad' }), `orca plugin install ${INSTALL_SOURCE} --environment "xy"`)
+  test('takes only a known launcher', () => {
+    assert.equal(installCommand({ id: ID, name: 'Box' }, { launcher: 'orca-ide' }), `orca-ide plugin install ${INSTALL_SOURCE} --environment "Box"`)
+    assert.equal(installCommand({ id: ID, name: 'Box' }, { launcher: 'evil; rm' }), `orca plugin install ${INSTALL_SOURCE} --environment "Box"`)
   })
 })
 

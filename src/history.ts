@@ -68,10 +68,25 @@ export class HistoryRing {
     if (drop > 0) this.points.splice(0, drop)
   }
 
-  /** Removes every point at or after `t`. */
-  dropFrom(t: number): void {
-    const index = this.points.findIndex((p) => p.t >= t)
-    if (index !== -1) this.points.splice(index)
+  /**
+   * Adds a point only where the ring has none within `spacingMs` of it, in time order; never
+   * replaces or moves one. For filling gaps (a back-fill from older beacons), which must not
+   * overwrite readings already taken. Returns whether it was added.
+   */
+  insertMissing(point: HistoryPoint, now: number, spacingMs: number): boolean {
+    if (!Number.isFinite(point.t) || point.t < now - this.windowMs || point.t > now + 60_000) {
+      return false
+    }
+    let index = this.points.findIndex((p) => p.t > point.t)
+    if (index === -1) index = this.points.length
+    const before = this.points[index - 1]
+    const after = this.points[index]
+    if ((before && point.t - before.t < spacingMs) || (after && after.t - point.t < spacingMs)) {
+      return false
+    }
+    this.points.splice(index, 0, point)
+    this.trim(now)
+    return true
   }
 
   /** Points newer than `t` (exclusive). */

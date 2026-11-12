@@ -139,3 +139,63 @@ test('parseLocalHostName takes the local host\'s machine name from `orca host li
   assert.equal(parseLocalHostName(answer('nope')), null)
   assert.equal(parseLocalHostName(parseEnvelope(fixtureText('error-unknown-environment.json'))), null)
 })
+
+describe('bounds on what another machine sends', () => {
+  const ok = (result: unknown, meta: Record<string, unknown> = {}) => parseEnvelope(JSON.stringify({ ok: true, result, _meta: meta }))
+
+  test('workspace text, the runtime id and the memory source are cut, and so is the number of workspaces', () => {
+    const huge = 'n'.repeat(250_000)
+    const worktrees = Array.from({ length: 3_000 }, (_, i) => ({ worktreeId: `w${i}`.padEnd(300, 'i'), worktreeName: i < 5 ? huge : 'n'.repeat(300), repoName: 'r'.repeat(300), cpu: 1e308, memory: 1e300 }))
+    const sample = parseDiagnostics(
+      ok({ host: { totalMemory: 1e300, availableMemory: 1, cpuCoreCount: 1e9, loadAverage1m: 1e300, availableMemorySource: 'x'.repeat(5_000) }, worktrees }, { runtimeId: 'z'.repeat(9_000) })
+    )
+    assert.ok(sample)
+    assert.equal(sample.workspaces.length, 1_000)
+    assert.ok(sample.workspaces.every((w) => w.id.length <= 128 && w.name.length <= 128 && w.repo.length <= 128))
+    assert.ok(sample.workspaces.every((w) => w.cpu <= 1_000_000 && w.memory <= 2 ** 52))
+    assert.equal(sample.runtimeId?.length, 128)
+    assert.equal(sample.host.availableMemorySource.length, 64)
+    assert.deepEqual([sample.host.totalMemory, sample.host.cores, sample.host.load1], [2 ** 52, 4_096, 1_000_000])
+  })
+
+  test('CLI error text is cut', () => {
+    const env = parseEnvelope(JSON.stringify({ ok: false, error: { code: 'c'.repeat(1_000), message: 'm'.repeat(100_000) } }))
+    assert.equal(env.ok, false)
+    if (!env.ok) {
+      assert.equal(env.code.length, 64)
+      assert.equal(env.message.length, 500)
+    }
+  })
+
+  test('environments: at most 64, names cut, and only ids that can be passed to --environment', () => {
+    const environments = [
+      { id: '--approve=x', name: 'flag', runtimeId: 'rt-f' },
+      { id: 'has space', name: 'space', runtimeId: 'rt-s' },
+      { id: 'env-ok', name: '  Long '.padEnd(1_000, 'n'), runtimeId: 'r'.repeat(5_000) },
+      ...Array.from({ length: 200 }, (_, i) => ({ id: `env-${i}`, name: `Box ${i}`, runtimeId: `rt-${i}` }))
+    ]
+    const list = parseEnvironments(ok({ environments }))
+    assert.equal(list.length, 64)
+    assert.equal(list[0]?.id, 'env-ok')
+    assert.ok(list[0]!.name.length <= 128 && !list[0]!.name.startsWith(' '))
+    assert.ok(list[0]!.runtimeId!.length <= 128)
+  })
+
+  test('a plugin key must look like one before it can become a CLI argument', () => {
+    const plugins = [
+      '--approve=x.fleet-monitor',
+      '-x.fleet-monitor',
+      'has space.fleet-monitor',
+      'a"b.fleet-monitor',
+      `${'o'.repeat(200)}.fleet-monitor`,
+      '.fleet-monitor',
+      'example-owner.fleet-monitor'
+    ].map((pluginKey) => ({ pluginKey, status: 'running', isDev: false }))
+    assert.deepEqual(findPluginKeys(ok({ plugins }), 'fleet-monitor'), { state: 'running', keys: ['example-owner.fleet-monitor'] })
+  })
+
+  test('a logs answer keeps only its last 400 lines', () => {
+    const logs = parseLogs(ok({ pluginKey: 'k', lines: Array.from({ length: 2_000 }, (_, i) => ({ ts: i, line: `l${i}` })) }))
+    assert.equal(logs?.lines.length, 400)
+  })
+})

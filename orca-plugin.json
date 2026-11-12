@@ -4,11 +4,35 @@
   "execution": "trusted-worker",
   "id": "fleet-monitor",
   "name": "Fleet Monitor",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Live CPU, memory, load and the busiest workspaces for this computer and every paired Orca server, in one sidebar panel.",
   "author": { "name": "mswdev" },
   "repository": "https://github.com/mswdev/orca-fleet-monitor",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "cover": {
+    "path": "media/cover.png",
+    "alt": "Fleet Monitor in the dark theme: five sample machines with health, CPU and memory, beside one machine's charts and per-core load."
+  },
+  "screenshots": [
+    {
+      "path": "media/screenshot-light.png",
+      "alt": "Five sample machines with health, CPU, memory and sparklines, beside one strained machine's charts, per-core load and busiest workspaces.",
+      "caption": "The overview and a machine's detail",
+      "theme": "light"
+    },
+    {
+      "path": "media/screenshot-dark.png",
+      "alt": "The same overview and machine detail in the dark theme.",
+      "caption": "The overview and a machine's detail",
+      "theme": "dark"
+    },
+    {
+      "path": "media/screenshot-basic.png",
+      "alt": "A basic machine with its CPU estimate labelled and the command that installs Fleet Monitor there, beside an offline machine's last readings.",
+      "caption": "A machine with nothing installed, and one that is offline"
+    }
+  ],
   "engines": { "orca": ">=1.4.248" },
   "pluginApi": 1,
   "main": "src/worker.ts",
@@ -50,7 +74,7 @@
       {
         "key": "slowIntervalSeconds",
         "title": "Slow interval (seconds)",
-        "description": "How often machines are read for the status bar while no panel is open.",
+        "description": "How often machines are read for the status bar while no panel is open, when background monitoring is on.",
         "type": "integer",
         "default": 60,
         "minimum": 15,
@@ -117,6 +141,13 @@
         "key": "beacon",
         "title": "Publish this machine's readings",
         "description": "Write a short reading to this plugin's log every 5 seconds, so a paired desktop can show per-core CPU for this machine.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "backgroundMonitoring",
+        "title": "Monitor in the background",
+        "description": "Read machines on the slow interval while no Fleet Monitor panel is open, to keep the status bar current. Turn it off on a machine that is there to publish its readings: it then reads machines only while one of its own panels is open, and keeps publishing.",
         "type": "boolean",
         "default": true
       }

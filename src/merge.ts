@@ -36,9 +36,22 @@ export type MergeInput = {
   topLimit?: number
 }
 
-/** CPU estimated from the 1-minute load average when nothing measures it directly. */
+/** CPU estimated from the 1-minute load average when nothing measures it directly. Load is not
+ *  CPU use (it counts waiting threads too), so this is shown labelled and never judged. */
 export function loadEstimate(load1: number, cores: number): number {
   return clampPercent((load1 / Math.max(1, cores)) * 100)
+}
+
+/**
+ * Whether a machine's diagnostics carry a real load average. Windows has none: Node reports 0 there,
+ * and so does Orca. Orca's diagnostics do not name the platform, but they do say how available
+ * memory was measured, and only Windows (or a Unix host whose own measure failed) reports
+ * `free-memory`. So a load of exactly 0 from such a host, or from a machine whose last beacon said
+ * win32, is "not reported" rather than idle.
+ */
+export function loadReported(host: DiagnosticsSample['host'], platformHint: string | null = null): boolean {
+  if (host.load1 > 0) return true
+  return platformHint !== 'win32' && host.availableMemorySource !== 'free-memory'
 }
 
 export function mergeMachine(input: MergeInput): MachineState {
@@ -58,7 +71,8 @@ export function mergeMachine(input: MergeInput): MachineState {
       groups: fresh.perCore ? fresh.coreGroups : null
     }
   } else if (diag) {
-    cpu = { percent: loadEstimate(diag.host.load1, diag.host.cores), source: 'load', perCore: null, groups: null }
+    const reported = loadReported(diag.host, beacon?.latest?.platform ?? null)
+    cpu = { percent: reported ? loadEstimate(diag.host.load1, diag.host.cores) : null, source: 'load', perCore: null, groups: null }
   }
 
   let memory: MachineState['memory'] = null
@@ -92,9 +106,10 @@ export function mergeMachine(input: MergeInput): MachineState {
 
   let load: MachineState['load'] = null
   const loadSource = local?.load ?? fresh?.load ?? null
-  if (loadSource) {
+  // Windows has no load average; Node reports 0s there, which are not readings.
+  if (loadSource && (local?.platform ?? fresh?.platform) !== 'win32') {
     load = { one: loadSource[0], five: loadSource[1], fifteen: loadSource[2] }
-  } else if (diag) {
+  } else if (diag && loadReported(diag.host, beacon?.latest?.platform ?? null)) {
     load = { one: diag.host.load1, five: null, fifteen: null }
   }
 
@@ -106,7 +121,9 @@ export function mergeMachine(input: MergeInput): MachineState {
     tier: input.kind === 'local' || fresh ? 'full' : 'basic',
     status: input.kind === 'local' ? 'online' : input.status,
     online,
-    lastSeenAt: input.kind === 'local' ? (local?.t ?? input.now) : input.lastSeenAt,
+    // The local machine is always reachable; its readings are as new as its last sample (the
+    // poller passes when it saw that sample, on its own clock).
+    lastSeenAt: input.kind === 'local' ? (input.lastSeenAt ?? input.now) : input.lastSeenAt,
     latencyMs: input.latencyMs,
     error: input.error,
     host: {
@@ -146,13 +163,15 @@ export function historyPointOf(state: MachineState, t: number): HistoryPoint | n
   return { t, cpu: state.cpu.percent, mem }
 }
 
+/** Memory from a beacon itself, when it can be trusted: `os.freemem()` on macOS leaves out
+ *  reclaimable cache, so a Mac's beacon carries none. */
+export function beaconMemoryPercent(r: BeaconRecord): number | null {
+  return r.platform === 'darwin' || r.memTotal <= 0 ? null : clampPercent(((r.memTotal - r.memFree) / r.memTotal) * 100)
+}
+
 /** Older beacons as history points on the local clock (`offsetMs` = remote minus local). */
 export function backfillPoints(records: readonly BeaconRecord[], offsetMs: number): HistoryPoint[] {
   return records
     .filter((r) => r.cpu !== null)
-    .map((r) => ({
-      t: r.t - offsetMs,
-      cpu: r.cpu,
-      mem: r.platform === 'darwin' || r.memTotal <= 0 ? null : clampPercent(((r.memTotal - r.memFree) / r.memTotal) * 100)
-    }))
+    .map((r) => ({ t: r.t - offsetMs, cpu: r.cpu, mem: beaconMemoryPercent(r) }))
 }

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fleet Monitor icon</title>
+    <!-- The plugin icon, drawn at 512×512: a gauge in the panel's four health colours (ok, busy,
+         strained, critical) on its dark card colour. tools/shoot-preview.mjs saves it as
+         media/icon.png. -->
+    <style>
+      html, body { margin: 0; background: transparent; }
+      svg { display: block; width: 512px; height: 512px; }
+    </style>
+  </head>
+  <body>
+    <svg id="icon" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Fleet Monitor">
+      <defs>
+        <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#232838" />
+          <stop offset="1" stop-color="#14161d" />
+        </linearGradient>
+      </defs>
+      <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tile)" />
+      <rect x="16.75" y="16.75" width="478.5" height="478.5" rx="107.25" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1.5" />
+      <g id="arcs" fill="none" stroke-width="46" stroke-linecap="round"></g>
+      <g id="needle"></g>
+    </svg>
+    <script>
+      const cx = 256
+      const cy = 300
+      const r = 150
+      const point = (deg, radius = r) => {
+        const a = (deg * Math.PI) / 180
+        return [cx + radius * Math.cos(a), cy - radius * Math.sin(a)]
+      }
+      // Four segments across 240 degrees, ok to critical, clockwise from lower left.
+      const colours = ['#4ade80', '#facc15', '#fb923c', '#f87171']
+      const span = 240 / 4
+      const gap = 11
+      const arcs = document.getElementById('arcs')
+      colours.forEach((colour, i) => {
+        const from = 210 - i * span - gap / 2
+        const to = 210 - (i + 1) * span + gap / 2
+        const [x0, y0] = point(from)
+        const [x1, y1] = point(to)
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+        path.setAttribute('d', `M${x0.toFixed(2)} ${y0.toFixed(2)} A${r} ${r} 0 0 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`)
+        path.setAttribute('stroke', colour)
+        arcs.append(path)
+      })
+      // The needle points into "busy", the way a fleet usually looks.
+      const [nx, ny] = point(122, 112)
+      const shape = (tag, attrs) => {
+        const node = document.createElementNS('http://www.w3.org/2000/svg', tag)
+        for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v))
+        return node
+      }
+      document.getElementById('needle').append(
+        shape('line', { x1: cx, y1: cy, x2: nx.toFixed(2), y2: ny.toFixed(2), stroke: '#ececf1', 'stroke-width': 22, 'stroke-linecap': 'round' }),
+        shape('circle', { cx, cy, r: 32, fill: '#ececf1' }),
+        shape('circle', { cx, cy, r: 13, fill: '#1b1e28' })
+      )
+      document.documentElement.setAttribute('data-ready', '')
+    </script>
+  </body>
+</html>

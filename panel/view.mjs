@@ -4,7 +4,7 @@
 // ever becomes text nodes or attribute values; see dom.mjs.
 import { seriesPaths } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
-import { toFleet } from './fleet-binding.mjs'
+import { INSTALL_SOURCE, toFleet } from './fleet-binding.mjs'
 import { ago, duration, gb, loads, pct, share, size } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
@@ -62,13 +62,16 @@ const iconScreen = () =>
 
 // --- small pieces ------------------------------------------------------------------------------
 
-/** One to four bars, so health never relies on colour alone. */
-function level(health, label) {
+/** One to four bars, so health never relies on colour alone. The reasons that set the level go
+ *  in its tooltip and, for screen readers, after the label. */
+function level(health, label, reasons = []) {
+  const why = reasons.join('; ')
   return h(
     'span',
-    { class: 'fm-level', data: { health } },
+    { class: 'fm-level', data: { health }, title: why || null },
     h('span', { class: 'fm-pips', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), h('span')),
-    label
+    label,
+    why ? h('span', { class: 'fm-sr' }, `: ${why}`) : null
   )
 }
 
@@ -109,7 +112,7 @@ function lastSeenText(m) {
 function summaryText(fleet) {
   if (fleet.state === 'loading') return 'Connecting to your machines'
   if (fleet.state === 'error') return 'Fleet Monitor is not answering'
-  if (fleet.remotes === 0) return 'Nothing paired yet'
+  if (fleet.remotes === 0) return fleet.cliError ? 'Cannot use the Orca CLI' : 'Nothing paired yet'
   return `${fleet.online} of ${fleet.total} online`
 }
 
@@ -139,10 +142,11 @@ function overviewHeader(fleet, ui) {
   )
 }
 
-function pairHint() {
+/** Always drawn, hidden while closed, so the button's aria-controls names an element. */
+function pairHint(open) {
   return h(
     'div',
-    { class: 'fm-hint', id: 'fm-pair-hint', 'data-key': 'pair-hint' },
+    { class: 'fm-hint', id: 'fm-pair-hint', 'data-key': 'pair-hint', hidden: !open },
     iconInfo(),
     h(
       'p',
@@ -167,9 +171,16 @@ function spark(values, tone) {
 function cardAria(m) {
   if (m.status === 'connecting') return `${m.name}, connecting. Open details.`
   if (!m.online) return `${m.name}, offline.${m.lastSeenAt === null ? '' : ` Last seen ${ago(m.lastSeenAt)}.`} Open details.`
-  const cpu = m.cpu.pct === null ? 'CPU unknown' : `CPU ${m.cpu.estimated ? 'about ' : ''}${pct(m.cpu.pct)}%${m.cpu.estimated ? ' (estimated)' : ''}`
-  const mem = m.mem.pct === null ? 'memory unknown' : `memory ${pct(m.mem.pct)}%`
-  return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}. ${cpu}, ${mem}. Open details.`
+  const cpu = m.cpu.estimated
+    ? m.cpu.pct === null
+      ? 'no CPU estimate'
+      : `CPU about ${pct(m.cpu.pct)}% (estimated, not counted in health)`
+    : m.cpu.pct === null
+      ? 'CPU unknown'
+      : `CPU ${pct(m.cpu.pct)}%`
+  const mem = m.mem.pct === null || !m.mem.reliable ? 'memory unknown' : `memory ${pct(m.mem.pct)}%`
+  const why = m.reasons.length > 0 ? ` (${m.reasons.join('; ')})` : ''
+  return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}${why}. ${cpu}, ${mem}. Open details.`
 }
 
 function metric(label, value, sub, tone, history) {
@@ -218,11 +229,11 @@ function card(m, now) {
   return h(
     'button',
     { ...props, class: 'fm-card' },
-    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), level(m.health, m.healthLabel)),
+    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), level(m.health, m.healthLabel, m.reasons)),
     h(
       'span',
       { class: 'fm-metrics' },
-      metric('CPU', m.cpu.pct, m.cpu.estimated ? 'estimate' : coresText(m), m.cpu.tone, m.cpu.history),
+      metric('CPU', m.cpu.pct, m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : coresText(m), m.cpu.tone, m.cpu.history),
       metric('Memory', m.mem.reliable ? m.mem.pct : null, memText(m, false), m.mem.tone, m.mem.history)
     )
   )
@@ -260,6 +271,22 @@ function emptyBlock() {
   )
 }
 
+/** The Orca CLI cannot be found or run: nothing paired can be found or read, so say why rather
+ *  than "nothing paired". */
+function cliProblemBlock(fleet) {
+  return h(
+    'div',
+    { class: 'fm-section fm-message', role: 'alert', 'data-key': 'cli-problem' },
+    h('h2', {}, 'Fleet Monitor cannot use the Orca CLI'),
+    h('p', { class: 'fm-error-text' }, fleet.cliError),
+    h(
+      'p',
+      {},
+      'Until it can, it cannot find or read paired machines; this computer is still shown. If Orca’s CLI is somewhere unusual, set its path in Fleet Monitor’s settings.'
+    )
+  )
+}
+
 function errorBlock(fleet) {
   return h(
     'div',
@@ -271,8 +298,7 @@ function errorBlock(fleet) {
 }
 
 function overview(fleet, ui, now) {
-  const nodes = [overviewHeader(fleet, ui)]
-  if (ui.pairOpen) nodes.push(pairHint())
+  const nodes = [overviewHeader(fleet, ui), pairHint(ui.pairOpen)]
   if (fleet.state === 'loading') {
     nodes.push(loadingGrid())
     return nodes
@@ -282,9 +308,15 @@ function overview(fleet, ui, now) {
     return nodes
   }
   nodes.push(h('div', { class: 'fm-grid', 'data-key': 'grid' }, fleet.machines.map((m) => card(m, now))))
-  if (fleet.remotes === 0) nodes.push(emptyBlock())
-  if (fleet.cliError && fleet.remotes > 0) {
-    nodes.push(h('p', { class: 'fm-notice', 'data-key': 'cli-error' }, `Paired machines cannot be read: ${fleet.cliError}`))
+  if (fleet.remotes === 0) nodes.push(fleet.cliError ? cliProblemBlock(fleet) : emptyBlock())
+  else if (fleet.cliError) {
+    nodes.push(h('p', { class: 'fm-notice', role: 'status', 'data-key': 'cli-error' }, `Paired machines cannot be listed or read: ${fleet.cliError}`))
+  }
+  if (fleet.omitted > 0) {
+    const n = fleet.omitted
+    nodes.push(
+      h('p', { class: 'fm-notice', 'data-key': 'omitted' }, `${n} paired ${n === 1 ? 'machine is' : 'machines are'} not shown: their readings would not fit in one answer to this panel.`)
+    )
   }
   return nodes
 }
@@ -298,6 +330,8 @@ function detailHeader(m, now) {
     subtitle = m.lastSeenAt === null ? h('p', { class: 'fm-summary' }, 'Not reached yet') : since('p', { class: 'fm-summary' }, 'Last seen {ago}', m.lastSeenAt, now)
   } else if (m.updatedAt === null) subtitle = h('p', { class: 'fm-summary' }, m.tier === 'basic' ? 'Basic stats' : 'Waiting for a reading')
   else subtitle = since('p', { class: 'fm-summary' }, m.tier === 'basic' ? 'Basic stats · updated {ago}' : 'Updated {ago}', m.updatedAt, now)
+  const reasons =
+    m.online && m.reasons.length > 0 ? h('p', { class: 'fm-summary fm-reasons', data: { health: m.health }, title: m.reasons.join('; ') }, `${m.healthLabel}: ${m.reasons.join('; ')}`) : null
   return h(
     'header',
     { class: 'fm-top fm-top--detail', 'data-key': `detail-top:${m.id}` },
@@ -310,7 +344,8 @@ function detailHeader(m, now) {
       'div',
       { class: 'fm-detail-id' },
       h('div', { class: 'fm-detail-name-row' }, dot(m), h('h1', { class: 'fm-detail-name', title: m.name }, m.name), tag(m.tag)),
-      subtitle
+      subtitle,
+      reasons
     ),
     m.online ? level(m.health, m.healthLabel) : h('span', { class: 'fm-state' }, m.status === 'connecting' ? 'Connecting…' : 'Offline')
   )
@@ -348,10 +383,22 @@ function chartLabel(what, value, stats) {
   return `${what} over the last 30 minutes: ${now}${stats ? `, average ${pct(stats.avg)}%, peak ${pct(stats.peak)}%` : ''}`
 }
 
+/** Bars per row: past this, a group's cores wrap onto more rows (a 128-core server is four rows
+ *  of 32), so a narrow panel never has to fit more bars side by side than it has room for. */
+const CORES_PER_ROW = 32
+
+function chunk(values, size) {
+  const rows = []
+  for (let i = 0; i < values.length; i += size) rows.push(values.slice(i, i + size))
+  return rows
+}
+
 function cores(groups) {
   const total = groups.reduce((n, g) => n + g.values.length, 0)
   const note = groups.length > 1 && groups.every((g) => g.short) ? groups.map((g) => `${g.values.length}${g.short}`).join(' + ') : `${total} cores`
   const dense = total > 24
+  // Every group gets the same number of rows, so bars keep one width across groups.
+  const rowCount = Math.max(1, Math.ceil(total / CORES_PER_ROW))
   return h(
     'div',
     { class: 'fm-cores' },
@@ -359,38 +406,55 @@ function cores(groups) {
     h(
       'div',
       { class: 'fm-core-groups' },
-      groups.map((g) =>
-        h(
+      groups.map((g) => {
+        const perRow = Math.max(1, Math.ceil(g.values.length / rowCount))
+        const tones = chunk(g.tones, perRow)
+        return h(
           'div',
-          { class: 'fm-core-group', style: { 'flex-grow': g.values.length } },
+          { class: 'fm-core-group', style: { 'flex-grow': perRow } },
           h(
             'div',
             {
-              class: dense ? 'fm-core-bars fm-core-bars--dense' : 'fm-core-bars',
+              class: rowCount > 1 ? 'fm-core-rows fm-core-rows--multi' : 'fm-core-rows',
               role: 'img',
               'aria-label': `${g.label} load: ${g.values.map((v) => `${Math.round(v)}%`).join(', ')}`
             },
-            g.values.map((v, i) =>
-              h('div', { class: 'fm-core', data: { tone: g.tones[i] } }, h('div', { class: 'fm-core-fill', style: { height: `${Math.max(3, v)}%` } }))
+            chunk(g.values, perRow).map((row, r) =>
+              h(
+                'div',
+                { class: dense ? 'fm-core-bars fm-core-bars--dense' : 'fm-core-bars' },
+                row.map((v, i) =>
+                  h('div', { class: 'fm-core', data: { tone: tones[r][i] } }, h('div', { class: 'fm-core-fill', style: { height: `${Math.max(3, v)}%` } }))
+                )
+              )
             )
           ),
           h('div', { class: 'fm-core-label' }, g.label)
         )
-      )
+      })
     )
   )
 }
 
+function estimateNote(m) {
+  if (!m.cpu.estimated) return null
+  return h(
+    'p',
+    { class: 'fm-note' },
+    m.cpu.pct === null
+      ? 'No estimate: this machine reports no load average (Windows does not have one). Its health is judged on memory.'
+      : 'Estimated from the load average, not measured, so it does not count towards health; this machine is judged on memory.'
+  )
+}
+
 function cpuSection(m) {
-  const sub = [coresText(m), m.cpu.estimated ? 'estimate' : ''].filter(Boolean).join(' · ')
+  const sub = [coresText(m), m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : ''].filter(Boolean).join(' · ')
   return h(
     'section',
     { class: 'fm-section', data: { tone: m.cpu.tone }, 'aria-label': 'CPU', 'data-key': 'cpu' },
     h('div', { class: 'fm-section-head' }, h('h2', {}, 'CPU'), sub ? h('span', { class: 'fm-sub' }, sub) : null),
     h('div', { class: 'fm-reading' }, big(m.cpu.pct, true), h('span', { class: 'fm-sub' }, statsText(m.cpu.stats))),
-    m.cpu.estimated
-      ? h('p', { class: 'fm-note' }, 'Estimated from the load average, not measured.')
-      : null,
+    estimateNote(m),
     chart(m.cpu.history, m.cpu.tone, chartLabel(m.cpu.estimated ? 'CPU estimate' : 'CPU', m.cpu.pct, m.cpu.stats)),
     m.cpu.groups ? cores(m.cpu.groups) : null
   )
@@ -436,24 +500,40 @@ const INSTALL_TEXT = {
   quiet: 'Fleet Monitor runs on this machine, but its readings are not arriving'
 }
 
-function installBody(m, ui) {
+/** The install row's body, drawn closed too (hidden) so the toggle's aria-controls names it. One
+ *  install row is shown at a time, so its id is fixed: a machine id is remote text. */
+const INSTALL_BODY_ID = 'fm-install-body'
+
+function installBody(m, ui, open) {
   const hint = m.install
-  const bodyId = `fm-install-${m.id}`
+  const props = { class: 'fm-install-body', id: INSTALL_BODY_ID, hidden: !open }
   if (hint.reason === 'installed') {
-    return h('div', { class: 'fm-install-body', id: bodyId }, h('p', {}, 'Turn it on in Orca’s plugin settings on that machine. Full detail appears here within about half a minute.'))
+    return h('div', props, h('p', {}, 'Turn it on in Orca’s plugin settings on that machine. Full detail appears here within about half a minute.'))
   }
   if (hint.reason === 'quiet') {
     return h(
       'div',
-      { class: 'fm-install-body', id: bodyId },
+      props,
       h('p', {}, 'Its “Publish this machine’s readings” setting may be off. Turn it on in Fleet Monitor’s settings on that machine.')
+    )
+  }
+  if (!hint.command) {
+    // Neither its name nor its id can go into a command safely: say what to do instead.
+    return h(
+      'div',
+      props,
+      h(
+        'p',
+        {},
+        `This machine’s name cannot be put in a command safely, so none is offered. On this computer, run ${hint.launcher ?? 'orca'} environment list to find its id, then ${hint.launcher ?? 'orca'} plugin install ${INSTALL_SOURCE} --environment=<that id>.`
+      )
     )
   }
   const copied = (ui.copied.get(m.id) ?? 0) > Date.now()
   const failed = ui.copyFailed.has(m.id)
   return h(
     'div',
-    { class: 'fm-install-body', id: bodyId },
+    props,
     h(
       'p',
       {},
@@ -475,7 +555,13 @@ function installBody(m, ui) {
         copied ? 'Copied' : 'Copy'
       )
     ),
-    failed ? h('p', { class: 'fm-note', role: 'status' }, 'Copying did not work here. The command is selected: press ⌘C or Ctrl+C.') : null
+    failed ? h('p', { class: 'fm-note' }, 'Copying did not work here. The command is selected: press ⌘C or Ctrl+C.') : null,
+    // Present before anything is copied, so the change is announced.
+    h(
+      'p',
+      { class: 'fm-sr', role: 'status', 'aria-live': 'polite', 'data-key': 'copy-status' },
+      copied ? 'Command copied' : failed ? 'Copying did not work. The command is selected.' : ''
+    )
   )
 }
 
@@ -492,13 +578,13 @@ function installRow(m, ui) {
         'data-action': 'install',
         'data-id': m.id,
         'aria-expanded': open ? 'true' : 'false',
-        'aria-controls': `fm-install-${m.id}`
+        'aria-controls': INSTALL_BODY_ID
       },
       iconDownload(),
       h('span', { class: 'fm-install-text' }, INSTALL_TEXT[m.install.reason]),
       iconChevron()
     ),
-    open ? installBody(m, ui) : null
+    installBody(m, ui, open)
   )
 }
 
@@ -557,7 +643,8 @@ function offlineSection(m, ui, now) {
     ),
     h(
       'button',
-      { type: 'button', class: 'fm-btn fm-ghost', 'data-action': 'retry', 'data-id': m.id, disabled: retrying, 'aria-disabled': retrying ? 'true' : null },
+      // aria-disabled, not disabled: a disabled button drops keyboard focus to the page.
+      { type: 'button', class: 'fm-btn fm-ghost', 'data-action': 'retry', 'data-id': m.id, 'aria-disabled': retrying ? 'true' : null },
       retrying ? 'Retrying…' : 'Retry connection'
     )
   )
@@ -596,9 +683,12 @@ function detail(m, ui, now) {
 
 /**
  * Draws the panel into `root` and keeps it current. `binding` is createFleetBinding(...).
- * Options are test seams: `now`, `setInterval`, `clearInterval`.
+ * Options are test seams: `now`, `setInterval`, `clearInterval`, `setTimeout`.
  */
-export function mountFleetView(root, { binding, now = () => Date.now(), setInterval: every = setInterval, clearInterval: stop = clearInterval } = {}) {
+export function mountFleetView(
+  root,
+  { binding, now = () => Date.now(), setInterval: every = setInterval, clearInterval: stop = clearInterval, setTimeout: later = setTimeout } = {}
+) {
   const ui = {
     nav: { view: 'overview', id: null },
     pairOpen: false,
@@ -609,10 +699,12 @@ export function mountFleetView(root, { binding, now = () => Date.now(), setInter
     overviewScroll: 0
   }
   let view = binding.current()
-  let fleet = toFleet(view, now())
+  /** This frame's clock moved onto the worker's, which history and "last seen" times use. */
+  const workerNow = () => now() + (Number.isFinite(view?.clockOffsetMs) ? view.clockOffsetMs : 0)
+  let fleet = toFleet(view, workerNow())
 
   function draw() {
-    const t = now()
+    const t = workerNow()
     fleet = toFleet(view, t)
     if (ui.nav.view === 'detail' && fleet.state === 'live' && !fleet.machines.some((m) => m.id === ui.nav.id)) {
       ui.nav = { view: 'overview', id: null }
@@ -652,7 +744,7 @@ export function mountFleetView(root, { binding, now = () => Date.now(), setInter
       ui.copyFailed.delete(id)
       ui.copied.set(id, Date.now() + COPIED_MS)
       draw()
-      setTimeout(draw, COPIED_MS + 50)
+      later(draw, COPIED_MS + 50)
     } else {
       ui.copyFailed.add(id)
       draw()
@@ -666,7 +758,7 @@ export function mountFleetView(root, { binding, now = () => Date.now(), setInter
     ui.retrying.add(id)
     draw()
     void binding.retry(id).finally(() =>
-      setTimeout(() => {
+      later(() => {
         ui.retrying.delete(id)
         draw()
       }, RETRY_SETTLE_MS)
@@ -675,7 +767,7 @@ export function mountFleetView(root, { binding, now = () => Date.now(), setInter
 
   root.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target.closest('[data-action]') : null
-    if (!target || !root.contains(target) || target.hasAttribute('disabled')) return
+    if (!target || !root.contains(target) || target.hasAttribute('disabled') || target.getAttribute('aria-disabled') === 'true') return
     const id = target.getAttribute('data-id') ?? ''
     switch (target.getAttribute('data-action')) {
       case 'open':
@@ -718,7 +810,7 @@ export function mountFleetView(root, { binding, now = () => Date.now(), setInter
   // "Updated 4s ago" and friends move every second without redrawing the rest.
   const ticker = every(() => {
     if (root.ownerDocument.visibilityState === 'hidden') return
-    const t = now()
+    const t = workerNow()
     for (const node of root.querySelectorAll('[data-since]')) {
       const at = Number(node.getAttribute('data-since'))
       const text = (node.getAttribute('data-template') ?? '{ago}').replace('{ago}', ago(at, t))

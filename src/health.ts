@@ -34,7 +34,9 @@ function thresholdOf(level: HealthLevel, t: HealthThresholds): number {
   return level === 'critical' ? t.critical : level === 'strained' ? t.strained : t.busy
 }
 
-/** The worse of the CPU and memory levels, with the reasons that set it. */
+/** The worse of the CPU and memory levels, with the reasons that set it. Only measured CPU is
+ *  judged: an estimate from the load average (`source: 'load'`, the basic tier) never sets a
+ *  level, so a basic machine is judged on its memory alone. */
 export function assessHealth(
   input: {
     online: boolean
@@ -49,13 +51,11 @@ export function assessHealth(
   const parts: { level: HealthLevel; reason: string }[] = []
   let cpu: HealthLevel | null = null
   let memory: HealthLevel | null = null
-  if (input.cpu.percent !== null) {
+  if (input.cpu.percent !== null && isMeasuredCpu(input.cpu.source)) {
     cpu = levelFor(input.cpu.percent, settings.cpu)
-    const label = input.cpu.source === 'load' ? 'CPU load' : 'CPU'
     parts.push({
       level: cpu,
-      reason:
-        cpu === 'ok' ? '' : `${label} ${Math.round(input.cpu.percent)}% ≥ ${thresholdOf(cpu, orderedThresholds(settings.cpu))}%`
+      reason: cpu === 'ok' ? '' : `CPU ${Math.round(input.cpu.percent)}% ≥ ${thresholdOf(cpu, orderedThresholds(settings.cpu))}%`
     })
   }
   if (input.memory && input.memory.reliable) {
@@ -80,7 +80,17 @@ export function assessHealth(
   }
 }
 
-/** The machine that most needs attention: highest level, then highest CPU. */
+/** CPU read by a sampler (here or in a remote's beacon), as opposed to estimated from load. */
+export function isMeasuredCpu(source: string | null): boolean {
+  return source === 'sampler' || source === 'beacon'
+}
+
+/** Measured CPU, or 0 where there is only an estimate (which never ranks a machine). */
+function measuredCpu(machine: MachineState): number {
+  return isMeasuredCpu(machine.cpu.source) ? (machine.cpu.percent ?? 0) : 0
+}
+
+/** The machine that most needs attention: highest level, then highest measured CPU. */
 export function worstMachine(machines: readonly MachineState[]): MachineState | null {
   let worst: MachineState | null = null
   for (const machine of machines) {
@@ -90,8 +100,7 @@ export function worstMachine(machines: readonly MachineState[]): MachineState | 
     if (
       !worst ||
       rank(machine.health.level) > rank(worst.health.level) ||
-      (rank(machine.health.level) === rank(worst.health.level) &&
-        (machine.cpu.percent ?? 0) > (worst.cpu.percent ?? 0))
+      (rank(machine.health.level) === rank(worst.health.level) && measuredCpu(machine) > measuredCpu(worst))
     ) {
       worst = machine
     }

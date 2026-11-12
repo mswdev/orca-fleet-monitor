@@ -84,15 +84,39 @@ describe('remote machine', () => {
     assert.equal(stale.cpu.groups, null)
   })
 
-  test('basic tier: CPU is estimated from load and labelled so', () => {
+  test('basic tier: CPU is estimated from load and labelled so, and health is judged on memory alone', () => {
     const m = mergeMachine(base({ diag }))
     assert.equal(m.tier, 'basic')
     assert.deepEqual(m.cpu, { percent: 75, source: 'load', perCore: null, groups: null })
     assert.deepEqual(m.load, { one: 6, five: null, fifteen: null })
-    assert.equal(m.health.level, 'busy')
-    assert.deepEqual(m.health.reasons, ['CPU load 75% ≥ 70%'])
+    assert.equal(m.health.level, 'ok', 'a 75% estimate is not "busy": memory is 50%')
+    assert.equal(m.health.cpu, null)
+    assert.equal(m.health.memory, 'ok')
+    assert.deepEqual(m.health.reasons, [])
     assert.equal(m.beacon.state, 'absent')
     assert.equal(m.host.cores, 8)
+  })
+
+  test('basic tier: a 100% estimate on a machine with low memory is still ok; high memory is not', () => {
+    const busy = { ...diag, host: { ...diag.host, load1: 40 } }
+    assert.equal(mergeMachine(base({ diag: busy })).health.level, 'ok')
+    const full = { ...diag, host: { ...diag.host, load1: 0.5, memoryPercent: 96 } }
+    const m = mergeMachine(base({ diag: full }))
+    assert.equal(m.health.level, 'critical')
+    assert.deepEqual(m.health.reasons, ['memory 96% ≥ 95%'])
+  })
+
+  test('a machine that reports no load average (Windows) has no estimate rather than 0%', () => {
+    const windows = { ...diag, host: { ...diag.host, load1: 0, availableMemorySource: 'free-memory' } }
+    const m = mergeMachine(base({ diag: windows }))
+    assert.deepEqual(m.cpu, { percent: null, source: 'load', perCore: null, groups: null })
+    assert.equal(m.load, null)
+    const idleMac = { ...diag, host: { ...diag.host, load1: 0, availableMemorySource: 'memory-pressure' } }
+    assert.equal(mergeMachine(base({ diag: idleMac })).cpu.percent, 0, 'an idle Mac or Linux box does report 0')
+    const staleWindowsBeacon = mergeMachine(
+      base({ diag: { ...diag, host: { ...diag.host, load1: 0 } }, beacon: { latest: beaconOf({ platform: 'win32' }), fresh: false, ageMs: 60_000, pluginKey: 'k', remotePlugin: 'running' } })
+    )
+    assert.equal(staleWindowsBeacon.cpu.percent, null, 'its last beacon said win32')
   })
 
   test('a stale beacon keeps the basic tier but still names the machine', () => {

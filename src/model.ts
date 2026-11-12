@@ -130,7 +130,9 @@ export type MachineState = {
     uptimeSec: number | null
   }
   cpu: {
-    /** Whole-machine busy percent: measured (`sampler`, `beacon`) or estimated from load (`load`). */
+    /** Whole-machine busy percent: measured (`sampler`, `beacon`) or estimated from load (`load`).
+     *  An estimate is never used to judge health. With `load` and null, the machine reports no
+     *  load average (Windows), so there is no estimate either. */
     percent: number | null
     source: 'sampler' | 'beacon' | 'load' | null
     perCore: number[] | null
@@ -158,7 +160,17 @@ export type MachineState = {
 
 export type MachineView = MachineState & { history: HistoryColumns }
 
-export type CliInfo = { path: string | null; source: string | null; error: string | null }
+export type CliInfo = {
+  path: string | null
+  source: string | null
+  /** The CLI could not be found, or the path in settings cannot run. */
+  error: string | null
+  /** The CLI was found, but listing paired machines with it failed: why. */
+  runError?: string | null
+  /** The command a person types for Orca's CLI on this computer: `orca-ide` on Linux, where
+   *  `orca` is GNOME's screen reader; `orca` elsewhere. */
+  launcher?: 'orca' | 'orca-ide'
+}
 
 /** The person's thresholds, so a panel can colour each metric and core the way health is judged. */
 export type FleetThresholds = { cpu: HealthThresholds; memory: HealthThresholds }
@@ -177,6 +189,8 @@ export type FleetSnapshot = {
   /** Random id of this worker run; `seq` starts again when it changes. */
   run: string
   machines: MachineView[]
+  /** Machines left out because even without their detail they would not fit Orca's answer cap. */
+  omitted?: number
 }
 
 /** Posted as `fleet.update`: current states without history, plus each machine's most recent

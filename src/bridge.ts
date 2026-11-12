@@ -8,14 +8,74 @@
 // coalesced to at most one per `minPostGapMs` and only sent while a panel is heartbeating.
 // Each post repeats the last `recentWindowMs` of history, so a panel merges points by time and a
 // missed post costs nothing; a gap in `seq` longer than that window means it should re-fetch.
+//
+// Everything that leaves goes through `plainJson` (src/bounds.ts) first, machine by machine, so
+// only plain data can reach a panel whatever a remote sent. The snapshot then always fits its
+// cap: first by thinning history, then by dropping it, then by leaving out each machine's bulky
+// detail, and last by leaving out machines (counted in `omitted`).
+import { clipText, plainJson } from './bounds.ts'
 import { DEFAULT_HEALTH } from './health.ts'
 import { downsample, toColumns, HISTORY_WINDOW_MS } from './history.ts'
-import type { CliInfo, FleetMode, FleetSnapshot, FleetThresholds, FleetUpdate, HistoryColumns } from './model.ts'
+import type {
+  CliInfo,
+  FleetMode,
+  FleetSnapshot,
+  FleetThresholds,
+  FleetUpdate,
+  HistoryColumns,
+  MachineState,
+  MachineView
+} from './model.ts'
 import type { MachineEntry } from './poller.ts'
 
 export const SNAPSHOT_MAX_BYTES = 960 * 1024
 export const POST_MAX_BYTES = 240 * 1024
 const MAX_OBJECTS = 9_000
+const EMPTY_HISTORY: HistoryColumns = { t: [], cpu: [], mem: [] }
+
+/** One machine's state as plain data. Something that is not (a function where a string should
+ *  be, say) cannot survive the copy, and a state that lost its identity becomes a stub. */
+export function plainMachine(state: MachineState): MachineState {
+  const copy = plainJson(state) as unknown as MachineState | undefined
+  if (copy && typeof copy === 'object' && typeof copy.id === 'string' && typeof copy.name === 'string') return copy
+  return stubMachine(state)
+}
+
+/** The least a panel needs to list a machine: who it is, and that its readings did not come. */
+function stubMachine(state: Pick<MachineState, 'id' | 'name' | 'kind'>): MachineState {
+  const id = typeof state.id === 'string' ? clipText(state.id, 128) : 'unknown'
+  return {
+    id,
+    name: typeof state.name === 'string' ? clipText(state.name, 128) : id,
+    kind: state.kind === 'local' ? 'local' : 'remote',
+    tier: 'basic',
+    status: 'offline',
+    online: false,
+    lastSeenAt: null,
+    latencyMs: null,
+    error: 'Its readings could not be sent to this panel',
+    host: { hostname: null, platform: null, arch: null, cpuModel: null, cores: null, uptimeSec: null },
+    cpu: { percent: null, source: null, perCore: null, groups: null },
+    memory: null,
+    load: null,
+    orca: null,
+    workspaces: { byCpu: [], byMemory: [] },
+    health: { level: 'unknown', reasons: [], cpu: null, memory: null },
+    beacon: { state: 'absent', ageMs: null, seq: null, pluginKey: null, remotePlugin: 'unknown' },
+    updatedAt: 0
+  }
+}
+
+/** A machine without its bulky detail: no workspaces, per-core values or reasons, a short error. */
+function leanMachine(state: MachineState): MachineState {
+  return {
+    ...state,
+    error: state.error === null ? null : clipText(state.error, 120),
+    cpu: { ...state.cpu, perCore: null, groups: null },
+    workspaces: { byCpu: [], byMemory: [] },
+    health: { ...state.health, reasons: [] }
+  }
+}
 
 const encoder = new TextEncoder()
 
@@ -88,32 +148,46 @@ export class PanelBridge {
 
   snapshot(): FleetSnapshot {
     const entries = this.deps.source.entries()
-    const histories = new Map<string, HistoryColumns>()
-    for (const entry of entries) histories.set(entry.state.id, toColumns(entry.history.all()))
-    const build = (step: number): FleetSnapshot => ({
-      v: 1,
+    const machines = entries.map((entry) => ({
+      state: plainMachine(entry.state),
+      history: plainJson(toColumns(entry.history.all())) as HistoryColumns
+    }))
+    const header = {
+      v: 1 as const,
       seq: this.seq,
       generatedAt: this.deps.now(),
       mode: this.deps.source.mode(),
       intervalMs: this.deps.source.intervalMs(),
       historyWindowMs: HISTORY_WINDOW_MS,
-      cli: this.deps.cli(),
-      thresholds: this.thresholds(),
+      cli: plainJson(this.deps.cli()) as unknown as CliInfo,
+      thresholds: plainJson(this.thresholds()) as unknown as FleetThresholds,
       historyRev: this.deps.source.historyRevision?.() ?? 0,
-      run: this.deps.run ?? '',
-      machines: entries.map((entry) => ({
-        ...entry.state,
-        history: downsample(histories.get(entry.state.id)!, step)
-      }))
-    })
-    const max = this.deps.snapshotMaxBytes ?? SNAPSHOT_MAX_BYTES
-    let step = 1
-    let snapshot = build(step)
-    while (estimateCloneBytes(snapshot) > max && step < 1_024) {
-      step *= 2
-      snapshot = build(step)
+      run: this.deps.run ?? ''
     }
-    return snapshot
+    const max = this.deps.snapshotMaxBytes ?? SNAPSHOT_MAX_BYTES
+    const fits = (snapshot: FleetSnapshot): boolean => estimateCloneBytes(snapshot) <= max
+    const build = (views: MachineView[], omitted = 0): FleetSnapshot =>
+      omitted > 0 ? { ...header, machines: views, omitted } : { ...header, machines: views }
+    // 1. History thinned by halves until it fits.
+    for (let step = 1; step <= 1_024; step *= 2) {
+      const snapshot = build(machines.map((m) => ({ ...m.state, history: downsample(m.history, step) })))
+      if (fits(snapshot)) return snapshot
+    }
+    // 2. No history, then no bulky detail.
+    const bare = build(machines.map((m) => ({ ...m.state, history: EMPTY_HISTORY })))
+    if (fits(bare)) return bare
+    const lean = machines.map((m) => ({ ...leanMachine(m.state), history: EMPTY_HISTORY }))
+    const leanSnapshot = build(lean)
+    if (fits(leanSnapshot)) return leanSnapshot
+    // 3. As many machines as fit, this computer first; then stubs; never over the cap.
+    const kept: MachineView[] = []
+    for (const view of lean) {
+      if (fits(build([...kept, view], lean.length - kept.length - 1))) kept.push(view)
+      else if (fits(build([...kept, { ...stubMachine(view), history: EMPTY_HISTORY }], lean.length - kept.length - 1)))
+        kept.push({ ...stubMachine(view), history: EMPTY_HISTORY })
+    }
+    const last = build(kept, lean.length - kept.length)
+    return fits(last) ? last : build([], lean.length)
   }
 
   /** Something changed: post soon, at most once per `minPostGapMs`, while a panel is open. */
@@ -143,22 +217,25 @@ export class PanelBridge {
     }
     this.seq += 1
     this.lastPostAt = now
-    let update: FleetUpdate = {
-      v: 1,
+    const states = entries.map((entry) => plainMachine(entry.state))
+    const base = {
+      v: 1 as const,
       seq: this.seq,
       generatedAt: this.lastPostAt,
       mode: this.deps.source.mode(),
       intervalMs: this.deps.source.intervalMs(),
-      cli: this.deps.cli(),
-      thresholds: this.thresholds(),
+      cli: plainJson(this.deps.cli()) as unknown as CliInfo,
+      thresholds: plainJson(this.thresholds()) as unknown as FleetThresholds,
       historyRev: this.deps.source.historyRevision?.() ?? 0,
       run: this.deps.run ?? '',
-      machines: entries.map((entry) => entry.state),
-      recentMs: this.recentWindowMs(),
-      appended
+      recentMs: this.recentWindowMs()
     }
-    if (estimateCloneBytes(update) > (this.deps.postMaxBytes ?? POST_MAX_BYTES)) {
-      update = { ...update, machines: [], appended: {}, resync: true }
+    const cap = this.deps.postMaxBytes ?? POST_MAX_BYTES
+    let update: FleetUpdate = { ...base, machines: states, appended: plainJson(appended) as Record<string, HistoryColumns> }
+    if (estimateCloneBytes(update) > cap) {
+      // Too much detail for one post: the same states without their bulk, then a resync.
+      update = { ...update, machines: states.map(leanMachine) }
+      if (estimateCloneBytes(update) > cap) update = { ...base, machines: [], appended: {}, resync: true }
     }
     this.deps.post(update)
     return update

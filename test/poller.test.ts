@@ -26,7 +26,9 @@ const SKEW = 3_600_000
 function setup(options: {
   envs?: Env[]
   respond?: (args: string[], time: FakeTime, fallback: (args: string[]) => Reply) => Reply
+  /** Left out, the poller uses its production limits. */
   maxConcurrent?: number
+  maxProbes?: number
   idleWhenSlow?: () => boolean
   settings?: Record<string, unknown>
 } = {}) {
@@ -58,7 +60,8 @@ function setup(options: {
     localSample: () => sample,
     localName: () => 'this-desktop',
     pluginId: 'fleet-monitor',
-    maxConcurrent: options.maxConcurrent ?? 2,
+    maxConcurrent: options.maxConcurrent,
+    maxProbes: options.maxProbes,
     idleWhenSlow: options.idleWhenSlow,
     onChange: () => {
       changes.count += 1
@@ -90,17 +93,25 @@ function setup(options: {
 const runningPlugin = (key = 'local.fleet-monitor') => [{ pluginKey: key, status: 'running', isDev: true }]
 
 describe('concurrency', () => {
-  test('one call per machine at a time, and never more than the limit overall', async () => {
+  test('one call per machine at a time, within the production limits of each lane', async () => {
+    // The production limits (DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_PROBES): two in each lane.
+    const lanes = 2 + 2
     const envs = ['a', 'b', 'c', 'd'].map((x) => ({ id: `env-${x}`, name: `Box ${x}`, runtimeId: `rt-${x}` }))
-    const t = setup({ envs, maxConcurrent: 2 })
+    const t = setup({ envs }) // no limits passed: what the worker runs with
     t.cli.hold = true
     t.poller.heartbeat()
-    assert.equal(t.cli.held, 2)
+    assert.equal(t.cli.held, 2, 'this computer: the machine list and its own diagnostics')
     t.poller.tick()
-    t.poller.tick()
-    assert.equal(t.cli.held, 2, 'no more calls start while two are running')
+    assert.equal(t.cli.held, 2, 'no more calls start while both are running')
+    t.cli.release()
+    await flush()
+    // The list is in: four machines connecting, read two at a time in their own lane, while this
+    // computer's lane carries on.
+    const remote = () => t.cli.calls.filter((c) => machineOf(c.args).startsWith('env-')).length
+    assert.equal(remote(), 2)
+    assert.ok(t.cli.held <= lanes)
     await t.drain()
-    assert.ok(t.cli.maxInFlight <= 2)
+    assert.ok(t.cli.maxInFlight <= lanes, `${t.cli.maxInFlight} at once`)
     assert.equal(t.cli.maxPerMachine, 1)
     for (const env of envs) {
       assert.equal(t.cli.count(isDiag(env.id)), 1, `diagnostics for ${env.id}`)
@@ -108,6 +119,15 @@ describe('concurrency', () => {
     }
     assert.equal(t.poller.entries().length, 5)
     assert.equal(t.machine('env-a')?.state.status, 'online')
+  })
+
+  test('the limits can be set lower, and are kept', async () => {
+    const envs = ['a', 'b', 'c'].map((x) => ({ id: `env-${x}`, name: `Box ${x}`, runtimeId: `rt-${x}` }))
+    const t = setup({ envs, maxConcurrent: 1, maxProbes: 1 })
+    t.poller.heartbeat()
+    await t.drain()
+    assert.ok(t.cli.maxInFlight <= 2)
+    assert.equal(t.poller.entries().length, 4)
   })
 
   test('a slow machine does not hold up the others', async () => {
@@ -239,9 +259,24 @@ describe('cadence', () => {
     assert.equal(t.cli.calls.length, 0)
     t.poller.heartbeat()
     await t.drain()
-    assert.ok(t.cli.count(isDiag('env-a')) === 1)
+    assert.equal(t.cli.count(isDiag('env-a')), 1, 'a panel still reads')
+    // The panel closes. Its 15 s linger still reads; after that polling is slow, and idle.
+    const step = async () => {
+      t.time.advance(1_000)
+      t.poller.tick()
+      await t.drain()
+    }
+    for (let s = 0; s < 20; s += 1) await step()
+    assert.equal(t.poller.mode(), 'slow')
+    const afterPanel = t.cli.calls.length
+    for (let s = 0; s < 600; s += 1) await step()
+    assert.equal(t.cli.calls.length, afterPanel, 'ten minutes, no calls')
+    const whileIdle = t.cli.calls.length
     idle = false
-    assert.ok(t.cli.calls.length > 0)
+    t.time.advance(60_000)
+    t.poller.tick()
+    await t.drain()
+    assert.ok(t.cli.count(isDiag('env-a')) > 1 && t.cli.calls.length > whileIdle, 'slow polling resumes once someone can see it')
   })
 
   test('settings change the intervals', async () => {
@@ -274,10 +309,13 @@ describe('tiers and the beacon', () => {
     assert.equal(m.state.beacon.remotePlugin, 'running')
     assert.equal(m.state.memory?.source, 'orca')
     const points = m.history.all()
-    assert.equal(points.length, 10, 'nine backfilled plus the newest')
+    // The reading taken before it was promoted stays (with its memory); the back-fill adds only
+    // where history had nothing.
+    assert.equal(points.length, 11, 'nine back-filled, the basic reading before, and the newest')
     const newest = points[points.length - 1]!
-    assert.ok(Math.abs(newest.t - (t.time.now() - 1_000)) < 1_000, 'history is on the local clock')
-    assert.ok(points.every((p) => p.cpu === 37))
+    assert.ok(Math.abs(newest.t - t.time.now()) <= 1_000, 'history is on the local clock')
+    assert.equal(points.filter((p) => p.cpu === 37).length, 10)
+    assert.equal(points.filter((p) => p.mem !== null).length, 11)
 
     const diagBefore = t.cli.count(isDiag('env-a'))
     const logsBefore = t.cli.count(isLogs('env-a'))
@@ -449,6 +487,25 @@ describe('the local machine name', () => {
       await t.drain()
     }
     assert.equal(t.cli.count((a) => a[0] === 'host'), 2, 'retried after 5 minutes')
+  })
+})
+
+describe('the machine list', () => {
+  test('a failing `environment list` is reported until it works again', async () => {
+    let failing = true
+    const t = setup({
+      envs: [{ id: 'env-a', name: 'A', runtimeId: 'rt-a' }],
+      respond: (args, _time, fallback) => (failing && args[0] === 'environment' ? { ...okResult(''), spawnError: 'spawn EACCES' } : fallback(args))
+    })
+    await t.poller.runOnce()
+    assert.equal(t.poller.environmentError(), 'spawn EACCES')
+    assert.equal(t.poller.entries().length, 1)
+    failing = false
+    t.time.advance(6_000)
+    t.poller.heartbeat()
+    await t.drain()
+    assert.equal(t.poller.environmentError(), null)
+    assert.equal(t.poller.entries().length, 2)
   })
 })
 

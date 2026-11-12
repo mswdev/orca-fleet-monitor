@@ -1,13 +1,21 @@
 // The fleet poller: finds paired Orca servers, reads each one through the Orca CLI, and keeps
 // one merged state and a history ring per machine.
 //
-// Rules: at most one CLI call per machine at a time, at most `maxConcurrent` CLI calls overall,
-// every call has a timeout, and an unreachable machine is retried with growing back-off.
+// Rules:
+// - At most one CLI call per machine at a time, and every call has a timeout.
+// - Calls run in two lanes. This computer's own calls and those to machines that answer share
+//   `maxConcurrent` slots; machines that are connecting, offline or failing get `maxProbes` slots
+//   of their own, so a machine that hangs until the timeout never delays the others.
+// - An unreachable machine is retried with growing back-off, and so is a remote whose plugin
+//   list cannot be read.
+// - Reads keep their own beat: a 5 s interval reads every 5 s, however long each call takes.
+// - `now` is the worker's steady clock (src/worker.ts), which a wall-clock step never moves back.
 import { assessBeacon, emptyTracker, readBeacons, type BeaconTracker } from './beacon.ts'
+import { clipText, isPluginKey, TEXT_LIMITS } from './bounds.ts'
 import type { CommandResult, CommandRunner } from './cli.ts'
 import type { HealthSettings } from './health.ts'
 import { HistoryRing } from './history.ts'
-import { backfillPoints, historyPointOf, mergeMachine } from './merge.ts'
+import { beaconMemoryPercent, historyPointOf, mergeMachine } from './merge.ts'
 import type { BeaconRecord, DiagnosticsSample, FleetMode, LocalSample, MachineState } from './model.ts'
 import {
   findPluginKeys,
@@ -33,6 +41,23 @@ export const LOCAL_NAME_INTERVAL_MS = 30 * 60_000
 const LOCAL_NAME_RETRY_MS = 5 * 60_000
 /** With a fresh beacon, diagnostics (memory, workspaces) are read at most this often while fast. */
 export const FULL_TIER_DIAG_MIN_MS = 15_000
+/** CLI calls at once for this computer and for machines that answer. */
+export const DEFAULT_MAX_CONCURRENT = 2
+/** CLI calls at once for machines that are connecting, offline or failing. */
+export const DEFAULT_MAX_PROBES = 2
+export const DEFAULT_CALL_TIMEOUT_MS = 15_000
+/** With several copies of Fleet Monitor on a machine, this many reads in a row without a fresh
+ *  beacon move on to the next copy. */
+export const QUIET_READS_BEFORE_NEXT_COPY = 3
+/** Longest wait between tries of a `plugin logs` read that keeps failing. */
+const LOG_RETRY_MAX_MS = 60_000
+/** A beacon this close to a point already in history is taken for the same reading. */
+const BEACON_POINT_SPACING_MS = 2_500
+/** Points older than this are outside what each post repeats; adding one needs a re-fetch. */
+const POSTED_WINDOW_MS = 20_000
+/** This computer's diagnostics older than this no longer stand for its memory. They stop when
+ *  nobody is looking and background monitoring is off. */
+const LOCAL_DIAG_MAX_AGE_MS = 5 * 60_000
 
 export type PollerSettings = { fastIntervalMs: number; slowIntervalMs: number; health: HealthSettings }
 
@@ -44,14 +69,17 @@ export type PollerDeps = {
   localName: () => string
   pluginId: string
   maxConcurrent?: number
+  maxProbes?: number
   timeoutMs?: number
-  /** True while nobody can see the results (no status bar, no panel): skip CLI calls when slow. */
+  /** True while slow-mode results would go unused (background monitoring off, or no status bar):
+   *  no CLI calls then until a panel heartbeats. */
   idleWhenSlow?: () => boolean
   onChange?: () => void
   log?: (message: string) => void
 }
 
 type Feed = 'diag' | 'keys' | 'beacon'
+type Lane = 'main' | 'probe'
 
 type Slot = {
   id: string
@@ -66,17 +94,27 @@ type Slot = {
   latencyMs: number | null
   error: string | null
   diag: DiagnosticsSample | null
+  /** When the last good diagnostics arrived. */
+  diagAt: number | null
   /** Remote clock minus local clock, from diagnostics `collectedAt`. */
   offsetMs: number | null
   plugin: RemotePluginInfo | null
-  /** Local clock, when the plugin list was last read; null before the first read. */
+  /** When the plugin list was last read; null before the first read. */
   keysReadAt: number | null
+  /** Plugin list reads in a row that failed, for their back-off. */
+  keyFailures: number
   keyIndex: number
-  emptyReads: number
+  /** Beacon reads in a row without a fresh beacon. */
+  quietReads: number
+  /** `plugin logs` reads in a row that failed or timed out, for their back-off. */
+  logFailures: number
   latest: BeaconRecord | null
   tracker: BeaconTracker
   beaconFresh: boolean
   beaconAge: number | null
+  /** The newest beacon already in history, so the next read records only newer ones. */
+  pointRun: string | null
+  pointSeq: number
   history: HistoryRing
   state: MachineState
   lastLocalT: number | null
@@ -84,13 +122,21 @@ type Slot = {
 
 export type MachineEntry = { state: MachineState; history: HistoryRing }
 
+/** The next read on the schedule's own beat (`dueAt` plus the interval), so neither the call's
+ *  length nor the tick it started on adds up; but never sooner than half an interval after this
+ *  read finished, so a call slower than its interval does not run back to back. */
+function nextDue(dueAt: number, interval: number, done: number): number {
+  return Math.max(dueAt + interval, done + interval / 2)
+}
+
 export class FleetPoller {
   private readonly deps: PollerDeps
   private settings: PollerSettings
   private readonly slots = new Map<string, Slot>()
-  private running = 0
+  private readonly running: Record<Lane, number> = { main: 0, probe: 0 }
   private envBusy = false
   private envDue = 0
+  private envError: string | null = null
   private nameBusy = false
   private nameDue = 0
   private historyRev = 0
@@ -128,7 +174,7 @@ export class FleetPoller {
         slot.due.diag = Math.min(slot.due.diag, now)
         slot.due.beacon = Math.min(slot.due.beacon, now)
         // A panel just opened: has Fleet Monitor been installed on a basic machine meanwhile?
-        if (slot.kind === 'remote' && !slot.beaconFresh) slot.due.keys = Math.min(slot.due.keys, now)
+        if (slot.kind === 'remote' && !slot.beaconFresh && slot.keyFailures === 0) slot.due.keys = Math.min(slot.due.keys, now)
       }
     }
     this.tick()
@@ -177,7 +223,13 @@ export class FleetPoller {
   }
 
   inFlight(): number {
-    return this.running
+    return this.running.main + this.running.probe
+  }
+
+  /** Why the last `orca environment list` failed, or null when it worked (or has not run). With
+   *  it failing, no paired machine can be found, so the panel says so instead of "nothing paired". */
+  environmentError(): string | null {
+    return this.envError
   }
 
   /** Rises each time older history is rewritten (a back-fill), which posts alone cannot carry. */
@@ -192,7 +244,7 @@ export class FleetPoller {
 
   /** Resolves once no CLI call is running and none is due. */
   whenIdle(): Promise<void> {
-    if (this.running === 0) return Promise.resolve()
+    if (this.inFlight() === 0) return Promise.resolve()
     return new Promise((resolve) => this.idleWaiters.push(resolve))
   }
 
@@ -203,20 +255,21 @@ export class FleetPoller {
     for (let i = 0; i < 20; i += 1) {
       await this.whenIdle()
       this.tick()
-      if (this.running === 0) break
+      if (this.inFlight() === 0) break
     }
     return this.entries()
   }
 
-  /** Starts every read that is due, up to the concurrency limit. Called by a timer and after
-   *  each read finishes. */
+  /** Starts every read that is due, up to each lane's limit. Called by a timer and after each read
+   *  finishes. A beacon that has stopped arriving is judged stale here too, on this clock, even
+   *  while its log cannot be read. */
   tick(): void {
     if (this.stopped) return
     const now = this.deps.now()
+    for (const slot of [...this.slots.values()]) this.reassessBeacon(slot, now)
     const fast = this.mode(now) === 'fast'
     if (!fast && this.deps.idleWhenSlow?.()) return
-    const max = this.deps.maxConcurrent ?? 2
-    if (!this.envBusy && now >= this.envDue && this.running < max) {
+    if (!this.envBusy && now >= this.envDue && this.hasRoom('main')) {
       void this.refreshEnvironments()
     }
     const due: { slot: Slot; feed: Feed; at: number }[] = []
@@ -226,17 +279,30 @@ export class FleetPoller {
       if (feed) due.push({ slot, feed, at: this.dueOf(slot, feed, now) })
     }
     due.sort((a, b) => a.at - b.at)
-    for (const { slot, feed } of due) {
-      if (this.running >= max) break
-      void this.startFeed(slot, feed)
+    for (const { slot, feed, at } of due) {
+      const lane = this.laneOf(slot)
+      if (this.hasRoom(lane)) void this.startFeed(slot, feed, at, lane)
     }
     // Readings first; the display name can wait for a free slot.
-    if (!this.nameBusy && now >= this.nameDue && this.running < max) {
+    if (!this.nameBusy && now >= this.nameDue && this.hasRoom('main')) {
       void this.refreshLocalName()
     }
   }
 
   // --- scheduling -----------------------------------------------------------------------------
+
+  /** Machines not known to answer get their own lane, so their timeouts cost the others nothing. */
+  private laneOf(slot: Slot): Lane {
+    return slot.kind === 'remote' && (slot.failures > 0 || slot.status !== 'online') ? 'probe' : 'main'
+  }
+
+  private hasRoom(lane: Lane): boolean {
+    const limit =
+      lane === 'main'
+        ? (this.deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT)
+        : (this.deps.maxProbes ?? DEFAULT_MAX_PROBES)
+    return this.running[lane] < Math.max(1, limit)
+  }
 
   private nextFeed(slot: Slot, now: number): Feed | null {
     const candidates: Feed[] = ['diag']
@@ -253,10 +319,11 @@ export class FleetPoller {
   }
 
   /** When a feed is next due. The plugin list of a machine without a live beacon is re-read
-   *  every `BASIC_PLUGIN_RECHECK_MS` while a panel is open, whatever its slow schedule says. */
+   *  every `BASIC_PLUGIN_RECHECK_MS` while a panel is open, whatever its slow schedule says,
+   *  unless reading it keeps failing. */
   private dueOf(slot: Slot, feed: Feed, now: number): number {
     const at = slot.due[feed]
-    if (feed !== 'keys' || slot.beaconFresh || slot.failures > 0 || slot.keysReadAt === null) return at
+    if (feed !== 'keys' || slot.beaconFresh || slot.failures > 0 || slot.keyFailures > 0 || slot.keysReadAt === null) return at
     if (this.mode(now) !== 'fast') return at
     return Math.min(at, slot.keysReadAt + BASIC_PLUGIN_RECHECK_MS)
   }
@@ -268,15 +335,15 @@ export class FleetPoller {
     return full ? Math.max(3 * interval, FULL_TIER_DIAG_MIN_MS) : interval
   }
 
-  private backoff(slot: Slot, now: number): number {
-    return Math.min(MAX_BACKOFF_MS, this.intervalMs(now) * 2 ** Math.max(0, slot.failures - 1))
+  private backoff(failures: number, now: number): number {
+    return Math.min(MAX_BACKOFF_MS, this.intervalMs(now) * 2 ** Math.max(0, failures - 1))
   }
 
   private async callCli(args: string[]): Promise<{ result: CommandResult; envelope: Envelope }> {
-    const result = await this.deps.run(args, { timeoutMs: this.deps.timeoutMs ?? 15_000 })
+    const result = await this.deps.run(args, { timeoutMs: this.deps.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS })
     let envelope: Envelope
     if (result.spawnError) {
-      envelope = { ok: false, code: 'spawn_failed', message: result.spawnError }
+      envelope = { ok: false, code: 'spawn_failed', message: clipText(result.spawnError, TEXT_LIMITS.message) }
     } else if (result.timedOut) {
       envelope = { ok: false, code: 'timeout', message: `orca ${args[0]} ${args[1] ?? ''} timed out` }
     } else if (result.truncated) {
@@ -289,16 +356,20 @@ export class FleetPoller {
 
   private async refreshEnvironments(): Promise<void> {
     this.envBusy = true
-    this.running += 1
+    this.running.main += 1
     try {
       const { envelope } = await this.callCli(['environment', 'list', '--json'])
       if (this.stopped) return
       const done = this.deps.now()
       if (!envelope.ok) {
         this.deps.log?.(`environment list failed: ${envelope.code}: ${envelope.message}`)
+        const changed = this.envError !== envelope.message
+        this.envError = envelope.message
         this.envDue = done + this.intervalMs(done)
+        if (changed) this.changed()
         return
       }
+      this.envError = null
       const list = parseEnvironments(envelope, this.localRuntimeId)
       const keep = new Set([LOCAL_ID, ...list.map((e) => e.id)])
       for (const id of [...this.slots.keys()]) {
@@ -317,14 +388,14 @@ export class FleetPoller {
       this.changed()
     } finally {
       this.envBusy = false
-      this.finishJob()
+      this.finishJob('main')
     }
   }
 
   /** The name Orca itself shows for this computer; the hostname stays until one arrives. */
   private async refreshLocalName(): Promise<void> {
     this.nameBusy = true
-    this.running += 1
+    this.running.main += 1
     try {
       const { envelope } = await this.callCli(['host', 'list', '--json'])
       if (this.stopped) return
@@ -339,34 +410,34 @@ export class FleetPoller {
       this.nameDue = done + (name ? LOCAL_NAME_INTERVAL_MS : LOCAL_NAME_RETRY_MS)
     } finally {
       this.nameBusy = false
-      this.finishJob()
+      this.finishJob('main')
     }
   }
 
-  private async startFeed(slot: Slot, feed: Feed): Promise<void> {
+  private async startFeed(slot: Slot, feed: Feed, dueAt: number, lane: Lane): Promise<void> {
     slot.busy = true
-    this.running += 1
+    this.running[lane] += 1
     try {
-      if (feed === 'diag') await this.readDiagnostics(slot)
+      if (feed === 'diag') await this.readDiagnostics(slot, dueAt)
       else if (feed === 'keys') await this.readPluginKeys(slot)
-      else await this.readBeacon(slot)
+      else await this.readBeacon(slot, dueAt)
     } catch (error) {
       this.deps.log?.(`poll ${feed} failed: ${error instanceof Error ? error.message : String(error)}`)
       slot.due[feed] = this.deps.now() + this.intervalMs()
     } finally {
       slot.busy = false
-      this.finishJob()
+      this.finishJob(lane)
     }
   }
 
-  private finishJob(): void {
-    this.running -= 1
+  private finishJob(lane: Lane): void {
+    this.running[lane] -= 1
     if (this.stopped) {
       this.resolveIdle()
       return
     }
     this.tick()
-    if (this.running === 0) this.resolveIdle()
+    if (this.inFlight() === 0) this.resolveIdle()
   }
 
   private resolveIdle(): void {
@@ -377,7 +448,7 @@ export class FleetPoller {
 
   // --- reads ----------------------------------------------------------------------------------
 
-  private async readDiagnostics(slot: Slot): Promise<void> {
+  private async readDiagnostics(slot: Slot, dueAt: number): Promise<void> {
     const args = ['diagnostics', 'memory', '--json']
     if (slot.kind === 'remote') args.push('--environment', slot.id)
     const { result, envelope } = await this.callCli(args)
@@ -394,12 +465,12 @@ export class FleetPoller {
           slot.status = 'offline'
           slot.beaconFresh = false
         }
-        const retry = now + this.backoff(slot, now)
+        const retry = now + this.backoff(slot.failures, now)
         slot.due.diag = retry
         slot.due.keys = Math.max(slot.due.keys, retry)
         slot.due.beacon = Math.max(slot.due.beacon, retry)
       } else {
-        slot.due.diag = now + this.backoff(slot, now)
+        slot.due.diag = now + this.backoff(slot.failures, now)
       }
       this.remerge(slot, false)
       this.changed()
@@ -411,6 +482,7 @@ export class FleetPoller {
     slot.status = 'online'
     slot.lastSeenAt = now
     slot.diag = sample
+    slot.diagAt = now
     if (sample.collectedAt > 0) {
       const midpoint = now - result.durationMs / 2
       slot.offsetMs = sample.collectedAt - midpoint
@@ -425,7 +497,7 @@ export class FleetPoller {
       slot.due.keys = Math.min(slot.due.keys, now)
       slot.due.beacon = Math.min(slot.due.beacon, now)
     }
-    slot.due.diag = now + this.diagInterval(slot, now)
+    slot.due.diag = nextDue(dueAt, this.diagInterval(slot, now), now)
     // Without a fresh beacon, diagnostics are the only reading, so they make the history point.
     this.remerge(slot, slot.kind === 'remote' && !slot.beaconFresh)
     this.changed()
@@ -438,14 +510,17 @@ export class FleetPoller {
     slot.keysReadAt = now
     const info = findPluginKeys(envelope, this.deps.pluginId)
     if (!info) {
-      slot.due.keys = now + this.intervalMs(now)
+      // An older Orca, plugins turned off there, or a failing call: ask less and less often.
+      slot.keyFailures += 1
+      slot.due.keys = now + Math.min(PLUGIN_LIST_INTERVAL_MS, this.backoff(slot.keyFailures, now))
       return
     }
+    slot.keyFailures = 0
     const changed = JSON.stringify(info.keys) !== JSON.stringify(slot.plugin?.keys ?? [])
     slot.plugin = info
     if (changed) {
       slot.keyIndex = 0
-      slot.emptyReads = 0
+      slot.quietReads = 0
       slot.due.beacon = Math.min(slot.due.beacon, now)
     }
     if (info.keys.length === 0) {
@@ -458,29 +533,32 @@ export class FleetPoller {
     this.changed()
   }
 
-  private async readBeacon(slot: Slot): Promise<void> {
+  private async readBeacon(slot: Slot, dueAt: number): Promise<void> {
     const keys = slot.plugin?.keys ?? []
-    const key = keys[slot.keyIndex % Math.max(1, keys.length)]
-    if (!key) return
+    if (keys.length === 0) return
+    const index = slot.keyIndex % keys.length
+    const key = keys[index]
+    if (!isPluginKey(key, this.deps.pluginId)) {
+      slot.due.beacon = this.deps.now() + PLUGIN_LIST_INTERVAL_MS
+      return
+    }
     const { result, envelope } = await this.callCli(['plugin', 'logs', key, '--environment', slot.id, '--json'])
     if (this.stopped || !this.slots.has(slot.id)) return
     const now = this.deps.now()
-    slot.due.beacon = now + this.intervalMs(now)
+    slot.due.beacon = nextDue(dueAt, this.intervalMs(now), now)
     const logs = parseLogs(envelope)
-    if (!logs) return
+    if (!logs) {
+      // The log cannot be read just now: the last beacon keeps ageing on this clock, and the next
+      // try waits longer each time, so a log read that hangs leaves room for diagnostics.
+      slot.logFailures += 1
+      slot.due.beacon = now + Math.min(LOG_RETRY_MAX_MS, this.backoff(slot.logFailures, now))
+      this.reassessBeacon(slot, now)
+      return
+    }
+    slot.logFailures = 0
     slot.latencyMs = result.durationMs
     const records = readBeacons(logs.lines)
     const latest = records[records.length - 1] ?? null
-    if (!latest) {
-      slot.emptyReads += 1
-      if (slot.emptyReads >= 3) {
-        slot.emptyReads = 0
-        slot.keyIndex += 1 // try the next copy; the list may also be out of date
-        slot.due.keys = Math.min(slot.due.keys, now)
-      }
-    } else {
-      slot.emptyReads = 0
-    }
     const remoteNow = slot.offsetMs === null ? null : now + slot.offsetMs
     const assessed = assessBeacon(latest, slot.tracker, { localNow: now, remoteNow })
     const wasFresh = slot.beaconFresh
@@ -488,23 +566,72 @@ export class FleetPoller {
     slot.latest = latest
     slot.beaconFresh = assessed.fresh
     slot.beaconAge = assessed.ageMs
+    if (assessed.fresh) {
+      slot.quietReads = 0
+    } else {
+      slot.quietReads += 1
+      if (slot.quietReads >= QUIET_READS_BEFORE_NEXT_COPY && keys.length > 1) {
+        // Several copies (a development folder and an install, say), and this one has nothing
+        // current to say: its beacon may be off or its worker stopped. Try the next one.
+        slot.quietReads = 0
+        slot.keyIndex = (index + 1) % keys.length
+        slot.tracker = emptyTracker()
+      }
+    }
     if (assessed.fresh && !wasFresh) {
       // Promoted: the beacon now carries CPU, so memory and workspaces can be read less often.
       slot.due.diag = Math.max(slot.due.diag, (slot.lastSeenAt ?? now) + this.diagInterval(slot, now))
+    } else if (!assessed.fresh && wasFresh) {
+      this.demote(slot, now)
     }
-    if (latest && assessed.fresh && !wasFresh && slot.offsetMs !== null) {
-      // Newly on the full tier: the older beacons of this worker run (contiguous, unlike earlier
-      // runs) replace the load-based points they overlap. The 200-line log ring holds about 16
-      // minutes of 5 s beacons, less when the remote logs other lines.
-      const sameRun = records.filter((r) => r.run === latest.run).slice(0, -1)
-      const points = backfillPoints(sameRun, slot.offsetMs)
-      if (points.length > 0) {
-        slot.history.dropFrom(points[0]!.t)
-        for (const point of points) slot.history.add(point, now)
-        this.historyRev += 1
+    if (latest && assessed.fresh && slot.offsetMs !== null) this.recordBeacons(slot, records, latest, now)
+    this.remerge(slot, assessed.fresh && assessed.advanced)
+    this.changed()
+  }
+
+  /**
+   * History points for this run's beacons not recorded yet. On the first fresh read that is the
+   * older ones still in the log (about the last 16 minutes): a back-fill. After that it is any
+   * written between two reads, so none is lost to timing. The newest is left to `remerge`. Points
+   * go in only where history has none: a back-fill never replaces a reading already taken.
+   */
+  private recordBeacons(slot: Slot, records: readonly BeaconRecord[], latest: BeaconRecord, now: number): void {
+    const offset = slot.offsetMs ?? 0
+    const after = slot.pointRun === latest.run ? slot.pointSeq : Number.NEGATIVE_INFINITY
+    const diagMemory = slot.state.memory?.reliable ? slot.state.memory.percent : null
+    let rewritten = false
+    for (const r of records) {
+      if (r.run !== latest.run || r.seq <= after || r.seq >= latest.seq || r.cpu === null) continue
+      const t = r.t - offset
+      // Memory: the beacon's own where it can be trusted (not on a Mac); for a beacon just missed
+      // between two reads, the diagnostics reading, which is at most that old; else none.
+      const mem = beaconMemoryPercent(r) ?? (now - t <= FULL_TIER_DIAG_MIN_MS ? diagMemory : null)
+      if (slot.history.insertMissing({ t, cpu: r.cpu, mem }, now, BEACON_POINT_SPACING_MS) && t < now - POSTED_WINDOW_MS) {
+        rewritten = true
       }
     }
-    this.remerge(slot, assessed.fresh && assessed.advanced)
+    slot.pointRun = latest.run
+    slot.pointSeq = latest.seq
+    if (rewritten) this.historyRev += 1
+  }
+
+  /** Back to the basic tier: diagnostics are the reading again, at their own cadence, and they
+   *  make the history points. */
+  private demote(slot: Slot, now: number): void {
+    slot.beaconFresh = false
+    slot.due.diag = Math.min(slot.due.diag, (slot.lastSeenAt ?? now) + this.diagInterval(slot, now))
+  }
+
+  /** Is the beacon the machine is shown with still current? Asked on every tick, so it goes stale
+   *  on time even while its log cannot be read or the read hangs. */
+  private reassessBeacon(slot: Slot, now: number): void {
+    if (slot.kind !== 'remote' || !slot.beaconFresh || !slot.latest) return
+    const remoteNow = slot.offsetMs === null ? null : now + slot.offsetMs
+    const assessed = assessBeacon(slot.latest, slot.tracker, { localNow: now, remoteNow })
+    slot.beaconAge = assessed.ageMs
+    if (assessed.fresh) return
+    this.demote(slot, now)
+    this.remerge(slot, false)
     this.changed()
   }
 
@@ -525,15 +652,20 @@ export class FleetPoller {
       latencyMs: null,
       error: null,
       diag: null,
+      diagAt: null,
       offsetMs: null,
       plugin: null,
       keysReadAt: null,
+      keyFailures: 0,
       keyIndex: 0,
-      emptyReads: 0,
+      quietReads: 0,
+      logFailures: 0,
       latest: null,
       tracker: emptyTracker(),
       beaconFresh: false,
       beaconAge: null,
+      pointRun: null,
+      pointSeq: 0,
       history: new HistoryRing(),
       state: null as unknown as MachineState,
       lastLocalT: null
@@ -545,6 +677,18 @@ export class FleetPoller {
   private remerge(slot: Slot, addPoint: boolean): void {
     const now = this.deps.now()
     const local = slot.kind === 'local' ? this.deps.localSample() : null
+    let pointAt: number | null = null
+    if (slot.kind === 'local') {
+      // A new sample: it was taken now, on this clock (its own `t` is wall time, for the beacon).
+      if (local && local.t !== slot.lastLocalT) {
+        slot.lastLocalT = local.t
+        slot.lastSeenAt = now
+        pointAt = now
+      }
+    } else if (addPoint) {
+      pointAt = slot.beaconFresh && slot.latest && slot.offsetMs !== null ? slot.latest.t - slot.offsetMs : now
+    }
+    const staleLocalDiag = slot.kind === 'local' && slot.diagAt !== null && now - slot.diagAt > LOCAL_DIAG_MAX_AGE_MS
     slot.state = mergeMachine({
       id: slot.id,
       name: slot.name,
@@ -555,7 +699,7 @@ export class FleetPoller {
       latencyMs: slot.latencyMs,
       error: slot.error,
       local,
-      diag: slot.diag,
+      diag: staleLocalDiag ? null : slot.diag,
       beacon:
         slot.kind === 'remote'
           ? {
@@ -568,15 +712,6 @@ export class FleetPoller {
           : null,
       health: this.settings.health
     })
-    let pointAt: number | null = null
-    if (slot.kind === 'local') {
-      if (local && local.t !== slot.lastLocalT) {
-        slot.lastLocalT = local.t
-        pointAt = local.t
-      }
-    } else if (addPoint) {
-      pointAt = slot.beaconFresh && slot.latest && slot.offsetMs !== null ? slot.latest.t - slot.offsetMs : now
-    }
     if (pointAt !== null) {
       const point = historyPointOf(slot.state, pointAt)
       if (point) slot.history.add(point, now, Math.min(1_000, this.settings.fastIntervalMs / 2))

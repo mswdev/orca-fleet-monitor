@@ -1,12 +1,16 @@
-// Saves listing screenshots (1280×800, light and dark) of the panel with invented sample data,
-// using a locally installed Chrome or Chromium in headless mode. Nothing is downloaded.
+// Makes the plugin's listing images from the real panel fed with invented sample data, using a
+// locally installed Chrome, Chromium or Edge in headless mode. Nothing is downloaded.
 //
-//   node tools/shoot-preview.mjs [--out .orca/shots] [--chrome /path/to/chrome]
+//   node tools/shoot-preview.mjs [--out media] [--chrome /path/to/chrome]
 //
-// Writes fleet-monitor-light.png and fleet-monitor-dark.png. .orca/ is ignored by Git and by
-// Orca, so nothing lands in the plugin by accident; copy the ones you want.
+// Writes, into media/ (what orca-plugin.json lists):
+//   icon.png               512×512, the gauge from tools/preview/icon.html
+//   cover.png              1600×1000, tools/preview/cover.html
+//   screenshot-light.png   2560×1600, the overview and a detail, light
+//   screenshot-dark.png    2560×1600, the same, dark
+//   screenshot-basic.png   2560×1600, a basic machine (install row open) and an offline one
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ROOT, startPreviewServer } from './preview-server.mjs'
@@ -47,13 +51,20 @@ if (!chrome) {
   console.error('No Chrome, Chromium or Edge found; pass --chrome /path/to/browser.')
   process.exit(1)
 }
-const out = path.resolve(ROOT, arg('--out', '.orca/shots'))
+const out = path.resolve(ROOT, arg('--out', 'media'))
 mkdirSync(out, { recursive: true })
 const profile = mkdtempSync(path.join(os.tmpdir(), 'fleet-monitor-chrome-'))
 const { server, url } = await startPreviewServer(0)
+const shots = [
+  { file: 'icon.png', page: 'icon.html', size: [512, 512], scale: 1, transparent: true },
+  { file: 'cover.png', page: 'cover.html', size: [1600, 1000], scale: 1 },
+  { file: 'screenshot-light.png', page: 'listing.html?theme=light', size: [1280, 800], scale: 2 },
+  { file: 'screenshot-dark.png', page: 'listing.html?theme=dark', size: [1280, 800], scale: 2 },
+  { file: 'screenshot-basic.png', page: 'listing.html?theme=light&scene=basic', size: [1280, 800], scale: 2 }
+]
 try {
-  for (const theme of ['light', 'dark']) {
-    const file = path.join(out, `fleet-monitor-${theme}.png`)
+  for (const shot of shots) {
+    const file = path.join(out, shot.file)
     await run(chrome, [
       '--headless=new',
       '--disable-gpu',
@@ -61,12 +72,14 @@ try {
       '--no-first-run',
       '--no-default-browser-check',
       `--user-data-dir=${profile}`,
-      '--window-size=1280,800',
-      '--virtual-time-budget=4000',
+      `--window-size=${shot.size[0]},${shot.size[1]}`,
+      `--force-device-scale-factor=${shot.scale}`,
+      ...(shot.transparent ? ['--default-background-color=00000000'] : []),
+      '--virtual-time-budget=5000',
       `--screenshot=${file}`,
-      `${url}/tools/preview/listing.html?theme=${theme}`
+      `${url}/tools/preview/${shot.page}`
     ])
-    console.log(file)
+    console.log(`${file}  ${Math.round(statSync(file).size / 1024)} KB`)
   }
 } finally {
   server.close()

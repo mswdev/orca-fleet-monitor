@@ -8,6 +8,9 @@ export type FleetSettings = {
   health: HealthSettings
   cliPath: string | null
   beacon: boolean
+  /** Read machines on the slow interval while no panel is open (for the status bar). Off, they
+   *  are read only while a Fleet Monitor panel is open here; the beacon is not affected. */
+  backgroundMonitoring: boolean
 }
 
 export const DEFAULT_SETTINGS: FleetSettings = {
@@ -15,7 +18,8 @@ export const DEFAULT_SETTINGS: FleetSettings = {
   slowIntervalMs: 60_000,
   health: DEFAULT_HEALTH,
   cliPath: null,
-  beacon: true
+  beacon: true,
+  backgroundMonitoring: true
 }
 
 const LIMITS = {
@@ -52,6 +56,7 @@ export function readSettings(raw: Record<string, unknown> | null | undefined): F
       })
     },
     cliPath,
-    beacon: r.beacon !== false
+    beacon: r.beacon !== false,
+    backgroundMonitoring: r.backgroundMonitoring !== false
   }
 }

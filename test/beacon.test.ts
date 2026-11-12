@@ -83,6 +83,36 @@ describe('encode and decode', () => {
     assert.equal(decodeBeacon(BEACON_PREFIX + 'x'.repeat(9_000)), null)
   })
 
+  test('bounds what a beacon may claim', () => {
+    // 2,100 per-core values: more than a 4096-character beacon can hold, within Orca's 8192 cut.
+    const raw = { v: 1, r: 'x', q: 1, t: 1, iv: 1e15, n: 1e9, u: 1e300, mt: 1e300, mf: 5, c: 5, pc: new Array(2_100).fill(1), l: [1e300, -4, 2, 9] }
+    const back = decodeBeacon(`${BEACON_PREFIX}${JSON.stringify(raw)}`)
+    assert.ok(back)
+    assert.equal(back.intervalMs, 60_000, 'an interval long enough to stay fresh for hours is cut to a minute')
+    assert.equal(back.cores, 4_096)
+    assert.equal(back.uptimeSec, 100 * 365 * 86_400)
+    assert.equal(back.memTotal, 2 ** 52)
+    assert.equal(back.perCore, null, 'more per-core values than any beacon line can hold')
+    assert.deepEqual(back.load, [1_000_000, 0, 2])
+    assert.equal(decodeBeacon(`${BEACON_PREFIX}${JSON.stringify({ ...raw, q: -1 })}`), null, 'a negative sequence')
+    assert.equal(decodeBeacon(`${BEACON_PREFIX}${JSON.stringify({ ...raw, q: 1.5 })}`), null, 'a fractional sequence')
+    assert.equal(decodeBeacon(`${BEACON_PREFIX}${JSON.stringify({ ...raw, iv: 3_000 })}`)?.intervalMs, 3_000)
+  })
+
+  test('a beacon claiming a huge interval goes stale on the usual clock', () => {
+    const far = decodeBeacon(`${BEACON_PREFIX}${JSON.stringify({ v: 1, r: 'x', q: 1, t: 0, iv: 1e15, n: 1, mt: 1, mf: 1 })}`)!
+    const first = assessBeacon(far, emptyTracker(), { localNow: 0, remoteNow: 0 })
+    assert.equal(assessBeacon(far, first.tracker, { localNow: 86_400_000, remoteNow: 86_400_000 }).fresh, false)
+  })
+
+  test('reads at most the last 400 log lines of an answer', () => {
+    const line = (seq: number) => encodeBeacon(localSample({ t: seq }), { run: 'r', seq, intervalMs: 5_000 })
+    const lines = Array.from({ length: 1_000 }, (_, i) => ({ ts: i, level: 'info', line: line(i + 1) }))
+    const records = readBeacons(lines)
+    assert.equal(records.length, 400)
+    assert.equal(records[0]?.seq, 601)
+  })
+
   test('clamps out-of-range values it does accept', () => {
     const raw = { v: 1, r: 'x', q: 1, t: 1, iv: 5000, n: 2, mt: 100, mf: 500, c: 250, pc: [-5, 300], l: [1] }
     const back = decodeBeacon(`${BEACON_PREFIX}${JSON.stringify(raw)}`)
@@ -137,6 +167,30 @@ describe('core groups (added after the first release)', () => {
     assert.equal(wire([['X', 0, 4]]), null, 'unknown kind')
     assert.equal(wire('P4'), null, 'not a list')
     assert.deepEqual(wire([['P', 0, 4]]), [{ kind: 'performance', start: 0, count: 4 }])
+  })
+
+  test('a beacon written by 85df480 (with cg) still decodes, groups and all', () => {
+    // Written by encodeBeacon at commit 85df480, which paired servers run.
+    const line =
+      'FLEETMON1 {"v":1,"r":"run-b","q":12,"t":1800000000000,"iv":5000,"h":"example-mini","p":"darwin","a":"arm64","rl":"25.0.0","m":"Example Chip","n":6,"u":3600,"c":33.3,"pc":[10,20,30,40,50,60],"cg":[["P",2,4],["E",0,2]],"mt":17179869184,"mf":4294967296,"l":[1.5,1.25,1]}'
+    const back = decodeBeacon(line)
+    assert.ok(back)
+    assert.deepEqual([back.run, back.seq, back.intervalMs, back.cores, back.uptimeSec, back.cpu], ['run-b', 12, 5_000, 6, 3_600, 33.3])
+    assert.deepEqual(back.coreGroups, [
+      { kind: 'performance', start: 2, count: 4 },
+      { kind: 'efficiency', start: 0, count: 2 }
+    ])
+    assert.equal(assessBeacon(back, emptyTracker(), { localNow: 0, remoteNow: 1_800_000_002_000 }).fresh, true)
+  })
+
+  test('only the literal kinds P and E: nothing from Object.prototype gets through', () => {
+    const wire = (kind: unknown) =>
+      decodeBeacon(`${BEACON_PREFIX}${JSON.stringify({ v: 1, r: 'r', q: 1, t: 1, iv: 5_000, n: 4, mt: 1, mf: 1, c: 5, pc: [1, 2, 3, 4], cg: [[kind, 0, 4]] })}`)
+    for (const kind of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf', 'isPrototypeOf', 'p', 'e', 1, null]) {
+      const back = wire(kind)
+      assert.ok(back, String(kind))
+      assert.equal(back.coreGroups, null, String(kind))
+    }
   })
 
   test('groups without per-core values are not written', () => {

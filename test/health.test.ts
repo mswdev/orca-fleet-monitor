@@ -25,9 +25,16 @@ test('the worse of CPU and memory wins, with its reason', () => {
   const h = assessHealth({ online: true, cpu: { percent: 72, source: 'sampler' }, memory: memory(96) }, DEFAULT_HEALTH)
   assert.equal(h.level, 'critical')
   assert.deepEqual(h.reasons, ['memory 96% ≥ 95%'])
-  const both = assessHealth({ online: true, cpu: { percent: 90, source: 'load' }, memory: memory(90) }, DEFAULT_HEALTH)
+  const both = assessHealth({ online: true, cpu: { percent: 90, source: 'beacon' }, memory: memory(90) }, DEFAULT_HEALTH)
   assert.equal(both.level, 'strained')
-  assert.deepEqual(both.reasons, ['CPU load 90% ≥ 85%', 'memory 90% ≥ 88%'])
+  assert.deepEqual(both.reasons, ['CPU 90% ≥ 85%', 'memory 90% ≥ 88%'])
+})
+
+test('a CPU estimate from the load average never sets a level', () => {
+  const estimate = assessHealth({ online: true, cpu: { percent: 100, source: 'load' }, memory: memory(10) }, DEFAULT_HEALTH)
+  assert.deepEqual([estimate.level, estimate.cpu, estimate.memory, estimate.reasons], ['ok', null, 'ok', []])
+  const alone = assessHealth({ online: true, cpu: { percent: 100, source: 'load' }, memory: null }, DEFAULT_HEALTH)
+  assert.equal(alone.level, 'unknown', 'with nothing else measured there is no level')
 })
 
 test('each metric keeps its own level, judged on its own thresholds', () => {
@@ -78,4 +85,47 @@ test('worstMachine picks the highest level, then the busiest CPU, and skips offl
   const machines = [make('a', 20), make('b', 88), make('c', 99, 'offline'), make('d', 86)]
   assert.equal(worstMachine(machines)?.id, 'b')
   assert.equal(worstMachine([make('x', 1, 'offline')]), null)
+})
+
+test('worstMachine never ranks a machine by an estimate', () => {
+  const memoryOnly = (id: string, load1: number) =>
+    mergeMachine({
+      id,
+      name: id,
+      kind: 'remote',
+      now: 0,
+      status: 'online',
+      lastSeenAt: 0,
+      latencyMs: 1,
+      error: null,
+      diag: {
+        collectedAt: 1,
+        runtimeId: null,
+        host: { totalMemory: 100, availableMemory: 50, usedMemory: 50, memoryPercent: 50, availableMemorySource: 'proc-meminfo', cores: 4, load1 },
+        app: { cpu: 0, memory: 0 },
+        totalCpu: 0,
+        totalMemory: 0,
+        workspaces: []
+      },
+      health: DEFAULT_HEALTH
+    })
+  const measured = mergeMachine({
+    id: 'measured',
+    name: 'measured',
+    kind: 'remote',
+    now: 0,
+    status: 'online',
+    lastSeenAt: 0,
+    latencyMs: 1,
+    error: null,
+    beacon: {
+      latest: { ...localSample(), run: 'r', seq: 1, intervalMs: 5000, cpu: 30, perCore: null, coreGroups: null, memTotal: 10, memFree: 9, loggedAt: 0 },
+      fresh: true,
+      ageMs: 0,
+      pluginKey: 'local.fleet-monitor',
+      remotePlugin: 'running'
+    },
+    health: DEFAULT_HEALTH
+  })
+  assert.equal(worstMachine([memoryOnly('estimated', 16), measured])?.id, 'measured', 'a 100% estimate does not outrank 30% measured')
 })

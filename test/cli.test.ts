@@ -43,6 +43,15 @@ describe('cliCandidates', () => {
     assert.ok(list.some((c) => c.path === '/usr/local/bin/orca-ide'))
   })
 
+  test('Linux: never a plain `orca` from PATH, which is usually GNOME\'s screen reader', () => {
+    const list = cliCandidates({ platform: 'linux', home: '/home/tester', pathEnv: '/usr/bin:/usr/local/bin' })
+    assert.ok(!list.some((c) => c.source === 'PATH' && c.path.endsWith('/orca')), JSON.stringify(list))
+    assert.deepEqual(list.filter((c) => c.source === 'PATH').map((c) => c.path), ['/usr/bin/orca-ide', '/usr/local/bin/orca-ide'])
+    const r = resolveCli({ platform: 'linux', pathEnv: '/usr/bin' }, (file) => file === '/usr/bin/orca')
+    assert.equal(r.path, null, 'the screen reader is not taken for Orca')
+  })
+
+
   test('Windows: orca.exe only, never orca.cmd, with Windows paths', () => {
     const list = cliCandidates({
       platform: 'win32',
@@ -114,6 +123,72 @@ describe('createProcessRunner (spawns the Node running these tests)', () => {
     assert.ok(r.spawnError)
     const none = await createProcessRunner(() => null).run(['--version'])
     assert.equal(none.spawnError, 'Orca CLI not found')
+  })
+
+  // A launcher that starts the real work as its own child and waits for it, as Windows' orca.exe
+  // does. The grandchild inherits the pipes, so they stay open until it ends.
+  const LAUNCHER = [
+    "const { spawn } = require('node:child_process')",
+    "const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 6000)'], { stdio: 'inherit' })",
+    "process.stdout.write('grandchild ' + c.pid + '\\n')",
+    'c.on("exit", (code) => process.exit(code ?? 1))'
+  ].join('\n')
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const gone = async (pid: number): Promise<boolean> => {
+    for (let i = 0; i < 40 && alive(pid); i += 1) await new Promise((resolve) => setTimeout(resolve, 25))
+    return !alive(pid)
+  }
+
+  test('a timeout kills the whole tree and settles at once, not when the grandchild lets go', async () => {
+    const { run } = createProcessRunner(() => node)
+    const started = Date.now()
+    const r = await run(['-e', LAUNCHER], { timeoutMs: 700 })
+    const took = Date.now() - started
+    assert.equal(r.timedOut, true)
+    assert.ok(took < 3_000, `settled after ${took} ms`)
+    const pid = Number(/grandchild (\d+)/.exec(r.stdout)?.[1])
+    assert.ok(pid > 0, `the launcher said ${JSON.stringify(r.stdout)}`)
+    assert.ok(await gone(pid), 'the grandchild was killed too')
+  })
+
+  test('a call settles at its timeout even when a grandchild escaped the process group', async () => {
+    // This grandchild starts its own process group, so a group kill misses it, and it keeps the
+    // pipes open: only settling at the timeout, without waiting for them, ends the call.
+    const escaping = LAUNCHER.replace("{ stdio: 'inherit' }", "{ stdio: 'inherit', detached: true }")
+    const { run } = createProcessRunner(() => node)
+    const started = Date.now()
+    const r = await run(['-e', escaping], { timeoutMs: 700 })
+    const took = Date.now() - started
+    const pid = Number(/grandchild (\d+)/.exec(r.stdout)?.[1])
+    if (pid > 0) {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        // already gone
+      }
+    }
+    assert.equal(r.timedOut, true)
+    assert.ok(took < 3_000, `settled after ${took} ms`)
+  })
+
+  test('stop() kills whole trees and settles their calls', async () => {
+    const runner = createProcessRunner(() => node)
+    const pending = runner.run(['-e', LAUNCHER], { timeoutMs: 30_000 })
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const stoppedAt = Date.now()
+    runner.stop()
+    const r = await pending
+    assert.ok(Date.now() - stoppedAt < 1_500, 'settled right after stop()')
+    assert.equal(runner.running(), 0)
+    const pid = Number(/grandchild (\d+)/.exec(r.stdout)?.[1])
+    if (pid > 0) assert.ok(await gone(pid), 'the grandchild was killed too')
   })
 
   test('stop() kills what is still running', async () => {

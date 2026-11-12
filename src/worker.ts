@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { performance } from 'node:perf_hooks'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { createProcessRunner, resolveCli, workerCliEnvironment } from './cli.ts'
 import { readCoreGroups } from './core-groups.ts'
@@ -18,6 +19,35 @@ export function localMachineName(hostname = os.hostname()): string {
   return trimmed.split('.')[0] || 'This machine'
 }
 
+/** How far the wall clock may run ahead of the monotonic one between two readings before it is
+ *  taken for a real jump (the machine slept, or the clock was set forward) and followed. */
+const WALL_JUMP_MS = 1_000
+
+/**
+ * The worker's clock: wall time when it starts, then moved on by the monotonic clock, so it never
+ * goes back. Polling is scheduled on it and history is stamped with it, so a wall clock set back
+ * (by NTP or by hand) neither stops polling until the old time comes round again nor folds new
+ * readings in among old ones. When the wall clock runs ahead of the monotonic one by more than a
+ * second (sleep pauses the monotonic clock; or the clock was set forward) it follows, so readings
+ * from before a sleep age out of the 30 minutes as they should. Panels work out its offset from
+ * their own clock from each answer's `generatedAt`.
+ */
+export function steadyClock(wall: () => number = Date.now, mono: () => number = () => performance.now()): () => number {
+  let lastWall = wall()
+  let lastMono = mono()
+  let current = lastWall
+  return () => {
+    const w = wall()
+    const m = mono()
+    const dWall = w - lastWall
+    const dMono = Math.max(0, m - lastMono)
+    lastWall = w
+    lastMono = m
+    current += dWall - dMono > WALL_JUMP_MS ? dWall : dMono
+    return Math.floor(current)
+  }
+}
+
 /** The real clock, timers, sampler and CLI. Timers are unref'd so they never hold Node open. */
 export function realDeps(): MonitorDeps {
   const unref = (handle: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> => {
@@ -28,7 +58,7 @@ export function realDeps(): MonitorDeps {
   // Once per worker start; until it answers (and wherever there is no split) cores are one group.
   void readCoreGroups(os.platform(), os.cpus().length).then((groups) => sampler.setCoreGroups(groups))
   return {
-    now: () => Date.now(),
+    now: steadyClock(),
     setInterval: (fn, ms) => unref(setInterval(fn, ms)),
     clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
     setTimeout: (fn, ms) => unref(setTimeout(fn, ms)),

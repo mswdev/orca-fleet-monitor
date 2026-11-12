@@ -8,6 +8,7 @@ export const HISTORY_SLOTS: number
 export const SLOT_MS: number
 export const TOP_WORKSPACES: number
 export const INSTALL_SOURCE: string
+export const LAUNCHERS: readonly ['orca', 'orca-ide']
 export const DEFAULT_THRESHOLDS: FleetThresholds
 export const LEVEL_LABELS: Readonly<Record<HealthLevel | 'unknown', string>>
 
@@ -21,6 +22,10 @@ export type FleetReadyView = {
   historyWindowMs: number
   cli: CliInfo | null
   thresholds: FleetThresholds
+  /** Machines the worker left out to fit its answer cap. */
+  omitted?: number
+  /** The worker's clock minus this frame's, from the newest answer or post. */
+  clockOffsetMs?: number
   machines: MachineView[]
 }
 export type FleetView = { ready: false; error: string | null; machines: [] } | FleetReadyView
@@ -43,6 +48,8 @@ export type FleetBindingOptions = {
   clearInterval?: (handle: unknown) => void
   isVisible?: () => boolean
   onVisibilityChange?: (handler: () => void) => () => void
+  /** This frame's clock; Date.now when not given. */
+  now?: () => number
 }
 
 export type FleetOrca = {
@@ -55,7 +62,8 @@ export type FleetOrca = {
 export type Level = HealthLevel
 export type CoreGroupModel = { label: string; short: 'P' | 'E' | null; values: number[]; tones: Level[] }
 export type WorkspaceModel = { id: string; name: string; repo: string; cpuPct: number; memBytes: number }
-export type InstallHint = { reason: 'absent' | 'installed' | 'quiet'; command: string | null }
+/** `command` is null when neither the machine's name nor its id can go into a command safely. */
+export type InstallHint = { reason: 'absent' | 'installed' | 'quiet'; command: string | null; launcher?: 'orca' | 'orca-ide' }
 export type Stats = { avg: number; peak: number }
 
 export type MachineModel = {
@@ -81,8 +89,9 @@ export type MachineModel = {
   uptimeSec: number | null
   load: { one: number; five: number | null; fifteen: number | null } | null
   cpu: {
+    /** With `estimated`, null means the machine reports no load average, so no estimate. */
     pct: number | null
-    /** Basic tier: estimated from the 1-minute load average, not measured. */
+    /** Basic tier: estimated from the 1-minute load average, not measured, never judged. */
     estimated: boolean
     tone: Level
     /** HISTORY_SLOTS one-minute points, oldest first; null where there was no reading. */
@@ -109,7 +118,11 @@ export type FleetModel = {
   state: 'loading' | 'error' | 'live'
   error: string | null
   thresholds: FleetThresholds
+  /** The CLI cannot be found or run, or listing paired machines with it failed. */
   cliError: string | null
+  /** What a person types for Orca's CLI here. */
+  launcher: 'orca' | 'orca-ide'
+  omitted: number
   online: number
   total: number
   remotes: number
@@ -139,5 +152,9 @@ export function windowStats(
   windowMs?: number
 ): Stats | null
 export function newestReading(columns: HistoryColumns | null | undefined, key: 'cpu' | 'mem'): { value: number; t: number } | null
-export function installCommand(machine: { id: string; name: string }): string
+export function safeMachineName(name: unknown): boolean
+export function installCommand(
+  machine: { id: string; name: string },
+  options?: { launcher?: string; ambiguous?: boolean }
+): string | null
 export function toFleet(view: FleetView | null | undefined, now?: number): FleetModel

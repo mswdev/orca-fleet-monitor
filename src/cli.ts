@@ -6,7 +6,7 @@
 //   macOS    <resources>/bin/orca       (a bash wrapper)
 //   Linux    <resources>/bin/orca-ide   (Linux avoids `orca`, which GNOME's screen reader owns)
 //   Windows  <resources>\bin\orca.exe   (orca.cmd needs a shell, so it is never used here)
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { accessSync, constants, statSync } from 'node:fs'
 import path from 'node:path'
 
@@ -23,10 +23,26 @@ export type CliEnvironment = {
   override?: string | null
 }
 
-function launcherNames(platform: string): string[] {
+/** Launcher names inside Orca's own folders (its resources), where `orca` can only be Orca's. */
+function bundledNames(platform: string): string[] {
   if (platform === 'win32') return ['orca.exe']
   if (platform === 'linux') return ['orca-ide', 'orca']
   return ['orca']
+}
+
+/** Launcher names looked for on PATH. Not a plain `orca` on Linux: there it is usually GNOME's
+ *  screen reader, which is why Orca's desktop install names its launcher `orca-ide`. */
+function pathNames(platform: string): string[] {
+  if (platform === 'win32') return ['orca.exe']
+  if (platform === 'linux') return ['orca-ide']
+  return ['orca']
+}
+
+/** What a person types to run Orca's CLI on a machine of this platform (as Orca's own
+ *  getOrcaCliCommandNameForPlatform names it): `orca-ide` on Linux desktops, `orca` elsewhere
+ *  (on Windows, PATHEXT finds `orca.cmd`). */
+export function cliLauncherName(platform: string): 'orca' | 'orca-ide' {
+  return platform === 'linux' ? 'orca-ide' : 'orca'
 }
 
 function resourcesFromExecPath(platform: string, execPath: string, p: typeof path.posix): string | null {
@@ -69,7 +85,7 @@ export function cliCandidates(env: CliEnvironment): CliCandidate[] {
     if (dir) resourceDirs.push({ dir, source: 'bundled (exec path)' })
   }
   for (const { dir, source } of resourceDirs) {
-    for (const name of launcherNames(env.platform)) add(p.join(dir, 'bin', name), source)
+    for (const name of bundledNames(env.platform)) add(p.join(dir, 'bin', name), source)
   }
 
   // A headless Orca server (orcad) writes its launcher under its data folder; workers never see
@@ -79,7 +95,7 @@ export function cliCandidates(env: CliEnvironment): CliCandidate[] {
   const delimiter = env.platform === 'win32' ? ';' : ':'
   for (const dir of (env.pathEnv ?? '').split(delimiter)) {
     if (!dir || !p.isAbsolute(dir)) continue // a relative PATH entry would run from the cwd
-    for (const name of launcherNames(env.platform)) add(p.join(dir, name), 'PATH')
+    for (const name of pathNames(env.platform)) add(p.join(dir, name), 'PATH')
   }
 
   if (env.platform === 'darwin') {
@@ -159,14 +175,80 @@ export const DEFAULT_TIMEOUT_MS = 15_000
 /** A full 200-line log ring at 8 KiB a line is about 1.6 MiB of JSON. */
 export const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 
-/** Runs `file args...` without a shell. `stop()` kills everything still running. */
+export type Spawner = (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess
+
+/**
+ * Ends a child and everything it started. A launcher may start the real CLI as its own child and
+ * wait for it (Windows' `orca.exe` does), so killing the launcher alone leaves the CLI running,
+ * still holding the output pipes. POSIX: the child leads its own process group (see `detached`
+ * below), so the whole group is killed. Windows: `taskkill /T /F` ends the tree, run from the
+ * system folder by its full path so nothing on PATH can stand in for it.
+ */
+export function killTree(
+  child: Pick<ChildProcess, 'pid' | 'kill'>,
+  platform: string = process.platform,
+  deps: { spawn?: Spawner; kill?: (pid: number, signal: NodeJS.Signals) => void; systemRoot?: string | null } = {}
+): void {
+  const pid = child.pid
+  if (pid === undefined) return
+  if (platform === 'win32') {
+    // taskkill walks the tree from the launcher, so the launcher must still be there: kill it
+    // directly only if taskkill cannot run or fails.
+    const fallback = (): void => {
+      try {
+        child.kill()
+      } catch {
+        // already gone
+      }
+    }
+    const root = deps.systemRoot ?? process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows'
+    const taskkill = path.win32.join(root, 'System32', 'taskkill.exe')
+    try {
+      const killer = (deps.spawn ?? spawn)(taskkill, ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+        shell: false
+      })
+      killer.on('error', fallback)
+      killer.on('exit', (code) => {
+        if (code !== 0) fallback()
+      })
+    } catch {
+      fallback()
+    }
+    return
+  }
+  try {
+    ;(deps.kill ?? process.kill)(-pid, 'SIGKILL')
+  } catch {
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/** Runs `file args...` without a shell. A call that times out, overflows the output cap or is
+ *  stopped has its whole process tree killed and settles at once, without waiting for the
+ *  processes to close their pipes. `stop()` does that to everything still running. */
 export function createProcessRunner(
   file: () => string | null,
-  options: { maxOutputBytes?: number; env?: NodeJS.ProcessEnv; now?: () => number } = {}
+  options: {
+    maxOutputBytes?: number
+    env?: NodeJS.ProcessEnv
+    now?: () => number
+    platform?: string
+    spawn?: Spawner
+    killTree?: (child: ChildProcess) => void
+  } = {}
 ): { run: CommandRunner; stop: () => void; running: () => number } {
-  const children = new Set<ChildProcess>()
+  const running = new Map<ChildProcess, () => void>()
   const maxBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
   const now = options.now ?? Date.now
+  const platform = options.platform ?? process.platform
+  const spawnChild = options.spawn ?? spawn
+  const kill = options.killTree ?? ((child: ChildProcess) => killTree(child, platform))
   const run: CommandRunner = (args, runOptions = {}) =>
     new Promise<CommandResult>((resolve) => {
       const started = now()
@@ -192,41 +274,29 @@ export function createProcessRunner(
       }
       let child: ChildProcess
       try {
-        child = spawn(target, [...args], {
+        child = spawnChild(target, [...args], {
           env: options.env ?? process.env,
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
-          shell: false
+          shell: false,
+          // Its own process group on POSIX, so the whole tree can be killed at once. (On Windows
+          // this would open a console window instead; taskkill /T finds the tree there.)
+          detached: platform !== 'win32'
         })
       } catch (error) {
         done({ spawnError: error instanceof Error ? error.message : String(error) })
         return
       }
-      children.add(child)
       const out: Buffer[] = []
       const err: Buffer[] = []
       let bytes = 0
       let truncated = false
       let timedOut = false
       let spawnError: string | null = null
-      const collect = (sink: Buffer[]) => (chunk: Buffer) => {
-        if (bytes + chunk.length > maxBytes) {
-          truncated = true
-          child.kill('SIGKILL')
-          return
-        }
-        bytes += chunk.length
-        sink.push(chunk)
-      }
-      child.stdout?.on('data', collect(out))
-      child.stderr?.on('data', collect(err))
-      const timer = setTimeout(() => {
-        timedOut = true
-        child.kill('SIGKILL')
-      }, runOptions.timeoutMs ?? DEFAULT_TIMEOUT_MS)
       const finish = (code: number | null): void => {
+        if (settled) return
         clearTimeout(timer)
-        children.delete(child)
+        running.delete(child)
         done({
           code,
           stdout: Buffer.concat(out).toString('utf8'),
@@ -236,6 +306,34 @@ export function createProcessRunner(
           spawnError
         })
       }
+      /** Kills the tree and settles now: a grandchild may keep the pipes open long after. */
+      const abandon = (): void => {
+        if (settled) return
+        kill(child)
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+        finish(null)
+      }
+      running.set(child, abandon)
+      const collect = (sink: Buffer[]) => (chunk: Buffer) => {
+        if (settled) return
+        if (bytes + chunk.length > maxBytes) {
+          truncated = true
+          abandon()
+          return
+        }
+        bytes += chunk.length
+        sink.push(chunk)
+      }
+      child.stdout?.on('data', collect(out))
+      child.stderr?.on('data', collect(err))
+      // A destroyed pipe may report an error; the result is already settled by then.
+      child.stdout?.on('error', () => {})
+      child.stderr?.on('error', () => {})
+      const timer = setTimeout(() => {
+        timedOut = true
+        abandon()
+      }, runOptions.timeoutMs ?? DEFAULT_TIMEOUT_MS)
       child.on('error', (error) => {
         spawnError = error.message
         // A process that never started may not emit 'close'.
@@ -246,9 +344,9 @@ export function createProcessRunner(
   return {
     run,
     stop: () => {
-      for (const child of children) child.kill('SIGKILL')
-      children.clear()
+      for (const abandon of [...running.values()]) abandon()
+      running.clear()
     },
-    running: () => children.size
+    running: () => running.size
   }
 }

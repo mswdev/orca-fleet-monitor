@@ -50,3 +50,21 @@ test('downsample keeps the newest point', () => {
   assert.deepEqual(downsample(cols, 4).t, [1, 5])
   assert.deepEqual(downsample(cols, 1), cols)
 })
+
+test('insertMissing fills gaps only: it never replaces or crowds a point already there', () => {
+  const ring = new HistoryRing(60_000)
+  ring.add(p(10_000, 10, 50), 30_000)
+  ring.add(p(20_000, 20, 60), 30_000)
+  assert.equal(ring.insertMissing(p(20_000, 99, null), 30_000, 2_500), false, 'same time')
+  assert.equal(ring.insertMissing(p(21_000, 99, null), 30_000, 2_500), false, 'too close to the newest: not replaced')
+  assert.equal(ring.insertMissing(p(9_000, 99, null), 30_000, 2_500), false, 'too close to the oldest')
+  assert.equal(ring.insertMissing(p(15_000, 15, null), 30_000, 2_500), true)
+  assert.equal(ring.insertMissing(p(25_000, 25, null), 30_000, 2_500), true, 'after the newest, as a new point')
+  assert.equal(ring.insertMissing(p(-40_000), 30_000, 2_500), false, 'outside the window')
+  assert.deepEqual(ring.all().map((x) => [x.t, x.cpu, x.mem]), [
+    [10_000, 10, 50],
+    [15_000, 15, null],
+    [20_000, 20, 60],
+    [25_000, 25, null]
+  ])
+})

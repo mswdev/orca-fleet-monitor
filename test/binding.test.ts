@@ -77,10 +77,11 @@ const update = (seq: number, generatedAt: number, appended: Record<string, Colum
   ...extra
 })
 
-function bind(fake: ReturnType<typeof fakeOrca>, visible = { value: true }) {
+function bind(fake: ReturnType<typeof fakeOrca>, visible = { value: true }, now?: () => number) {
   const timers: { fn: () => void; ms: number }[] = []
   let visibilityHandler: () => void = () => {}
   const binding = createFleetBinding(fake.orca, {
+    now,
     setInterval: (fn: () => void, ms: number) => {
       timers.push({ fn, ms })
       return timers.length
@@ -212,6 +213,52 @@ describe('createFleetBinding', () => {
     changeVisibility()
     await flush()
     assert.equal(fake.snapshotCount(), 2)
+  })
+
+  test('a hidden panel never asks for a snapshot (which would keep fast polling on); it catches up when shown', async () => {
+    const visible = { value: true }
+    const fake = fakeOrca({ snapshots: [snapshot(3, 10_000), snapshot(9, 100_000)] })
+    const { binding, changeVisibility, timers } = bind(fake, visible)
+    await binding.ready
+    visible.value = false
+    changeVisibility()
+    // Another panel keeps the worker fast, so this one still hears posts.
+    fake.post(update(4, 11_000, {}, { resync: true, machines: [] }))
+    fake.post(update(5, 12_000, {}, { run: 'run-2' }))
+    fake.post(update(8, 90_000))
+    fake.post(update(9, 91_000, {}, { historyRev: 4 }))
+    timers[0]!.fn()
+    await flush()
+    assert.equal(fake.snapshotCount(), 1, 'nothing while hidden')
+    assert.equal(fake.requests.filter((r) => r === 'fleet.heartbeat').length, 0)
+    visible.value = true
+    changeVisibility()
+    await flush()
+    assert.equal(fake.snapshotCount(), 2, 'one re-fetch as it comes back')
+  })
+
+  test('a panel created hidden waits until it is shown', async () => {
+    const visible = { value: false }
+    const fake = fakeOrca({ snapshots: [snapshot(3, 10_000)] })
+    const { binding, changeVisibility } = bind(fake, visible)
+    await binding.ready
+    assert.equal(fake.snapshotCount(), 0)
+    visible.value = true
+    changeVisibility()
+    await flush()
+    assert.equal(fake.snapshotCount(), 1)
+    assert.equal(readyView(binding.current()).seq, 3)
+  })
+
+  test('works out the worker clock from each answer and post', async () => {
+    let frame = 50_000
+    const fake = fakeOrca({ snapshots: [snapshot(3, 3_650_000)] })
+    const { binding } = bind(fake, { value: true }, () => frame)
+    await binding.ready
+    assert.equal(readyView(binding.current()).clockOffsetMs, 3_600_000, 'the worker runs an hour ahead of this frame')
+    frame = 60_000
+    fake.post(update(4, 3_660_500))
+    assert.equal(readyView(binding.current()).clockOffsetMs, 3_600_500)
   })
 
   test('reports a worker it cannot reach, and keeps asking on each heartbeat', async () => {

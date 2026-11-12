@@ -4,6 +4,7 @@
 // Compatibility: the version stays 1 for as long as fields are only added. A reader ignores keys
 // it does not know, and every key added after the first release (`cg`) is optional, so an older
 // Fleet Monitor on either side keeps working.
+import { COUNT_LIMITS, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
 import type { BeaconRecord, CoreGroup, LocalSample } from './model.ts'
 
@@ -39,7 +40,26 @@ type Wire = {
 }
 
 const WIRE_KIND: Record<CoreGroup['kind'], string> = { performance: 'P', efficiency: 'E' }
-const KIND_OF_WIRE: Record<string, CoreGroup['kind']> = { P: 'performance', E: 'efficiency' }
+
+/** Only the two literal wire kinds. A lookup in a plain object would also find `constructor`,
+ *  `toString` and the rest of Object.prototype, and put a function into the model. */
+function kindOfWire(value: unknown): CoreGroup['kind'] | null {
+  if (value === 'P') return 'performance'
+  if (value === 'E') return 'efficiency'
+  return null
+}
+
+/** Bounds on what a beacon may claim. Every value Fleet Monitor itself writes is inside them. */
+const MAX_CORES = 4_096
+/** A 4096-character line holds at most about 2,000 per-core values ("0,0,..."). */
+const MAX_PER_CORE = 2_048
+const MAX_UPTIME_SEC = 100 * 365 * 86_400
+const MAX_MEMORY_BYTES = 2 ** 52
+const MAX_LOAD = 1_000_000
+/** Freshness is judged in intervals, so a beacon cannot claim one long enough to stay fresh for
+ *  hours. Fleet Monitor writes every 5 s. */
+const MIN_INTERVAL_MS = 1_000
+const MAX_INTERVAL_MS = 60_000
 
 function encodeGroups(groups: readonly CoreGroup[] | null | undefined, cores: number): [string, number, number][] | undefined {
   if (!groups || !groupsFit(groups, cores)) return undefined
@@ -51,7 +71,7 @@ function decodeGroups(raw: unknown, cores: number): CoreGroup[] | null {
   const groups: CoreGroup[] = []
   for (const entry of raw) {
     if (!Array.isArray(entry) || entry.length !== 3) return null
-    const kind = typeof entry[0] === 'string' ? KIND_OF_WIRE[entry[0]] : undefined
+    const kind = kindOfWire(entry[0])
     const start = entry[1]
     const count = entry[2]
     if (!kind || typeof start !== 'number' || typeof count !== 'number') return null
@@ -140,6 +160,8 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
   const run = str(w.r, 16)
   if (
     seq === null ||
+    !Number.isSafeInteger(seq) ||
+    seq < 0 ||
     t === null ||
     iv === null ||
     iv <= 0 ||
@@ -151,28 +173,30 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
   ) {
     return null
   }
-  const load = Array.isArray(w.l) ? w.l.map((value) => num(value) ?? 0) : []
+  const clamp = (value: number, max: number): number => Math.min(max, Math.max(0, value))
+  const load = Array.isArray(w.l) ? w.l.slice(0, 3).map((value) => clamp(num(value) ?? 0, MAX_LOAD)) : []
   const cpu = w.c === null ? null : num(w.c)
   const perCore =
-    Array.isArray(w.pc) && w.pc.every((value) => num(value) !== null)
+    Array.isArray(w.pc) && w.pc.length <= MAX_PER_CORE && w.pc.every((value) => num(value) !== null)
       ? (w.pc as number[]).map((value) => Math.min(100, Math.max(0, value)))
       : null
+  const total = clamp(memTotal, MAX_MEMORY_BYTES)
   return {
     run,
     seq,
     t,
-    intervalMs: iv,
+    intervalMs: Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, iv)),
     hostname: str(w.h) ?? '',
     platform: str(w.p, 32) ?? '',
     arch: str(w.a, 32) ?? '',
     release: str(w.rl, 64) ?? '',
     cpuModel: str(w.m, 128) ?? '',
-    cores,
-    uptimeSec: num(w.u) ?? 0,
+    cores: Math.min(MAX_CORES, Math.round(cores)),
+    uptimeSec: Math.round(clamp(num(w.u) ?? 0, MAX_UPTIME_SEC)),
     cpu: cpu === null ? null : Math.min(100, Math.max(0, cpu)),
     perCore,
-    memTotal: Math.max(0, memTotal),
-    memFree: Math.min(Math.max(0, memTotal), Math.max(0, memFree)),
+    memTotal: total,
+    memFree: Math.min(total, Math.max(0, memFree)),
     load: [load[0] ?? 0, load[1] ?? 0, load[2] ?? 0],
     coreGroups: perCore ? decodeGroups(w.cg, perCore.length) : null,
     loggedAt: loggedAt ?? t
@@ -183,7 +207,7 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
  *  ordering is by the remote's log time, then by sequence. */
 export function readBeacons(lines: readonly unknown[]): BeaconRecord[] {
   const records: BeaconRecord[] = []
-  for (const entry of lines) {
+  for (const entry of lastEntries(lines, COUNT_LIMITS.logLines)) {
     if (!entry || typeof entry !== 'object') {
       continue
     }

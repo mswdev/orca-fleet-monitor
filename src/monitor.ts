@@ -3,7 +3,7 @@
 import type { OrcaWorkerApi } from 'orca/worker'
 import { BEACON_INTERVAL_MS, encodeBeacon } from './beacon.ts'
 import { PanelBridge } from './bridge.ts'
-import type { CliResolution, CommandRunner } from './cli.ts'
+import { cliLauncherName, type CliResolution, type CommandRunner } from './cli.ts'
 import type { CliInfo, LocalSample } from './model.ts'
 import { openOwnPanel, SHOW_COMMAND_ID } from './open-panel.ts'
 import { FleetPoller } from './poller.ts'
@@ -40,6 +40,8 @@ export type MonitorDeps = {
   workerFile?: string | null
   /** Worker commands the manifest declares; only those are registered. */
   declaredCommands?: readonly string[]
+  /** This computer's platform; process.platform when not given. */
+  platform?: string
 }
 
 export type FleetMonitor = {
@@ -50,6 +52,8 @@ export type FleetMonitor = {
   statusBar: () => StatusBarView | null
   /** True once the status bar has been unavailable for a while: slow polling then stops. */
   headless: () => boolean
+  /** True while slow-mode polling is off: background monitoring turned off, or no status bar. */
+  idleWhenSlow: () => boolean
   /** Runs the sampler and beacon once, as the 5 s timer does. */
   sampleNow: () => void
   stop: () => Promise<void>
@@ -67,7 +71,15 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
   let settings = readSettings(await orca.settings.get().catch(() => ({})))
   let cli = deps.resolveCli(settings.cliPath)
   if (cli.error) logOnce('cli', cli.error)
-  const cliInfo = (): CliInfo => ({ path: cli.path, source: cli.source, error: cli.error })
+  const launcher = cliLauncherName(deps.platform ?? process.platform)
+  let poller: FleetPoller | null = null
+  const cliInfo = (): CliInfo => ({
+    path: cli.path,
+    source: cli.source,
+    error: cli.error,
+    runError: poller?.environmentError() ?? null,
+    launcher
+  })
   const runner = deps.createRunner(() => cli.path)
 
   // Status bar: debounced, skipped when unchanged, and given up on where there is none.
@@ -76,10 +88,14 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
   let unavailableSince: number | null = null
   let nextStatusRetryAt = 0
   const headless = (): boolean => unavailableSince !== null && deps.now() - unavailableSince >= HEADLESS_AFTER_MS
+  // Slow-mode reads only feed the status bar. With background monitoring off (a server that is
+  // there to publish its beacon, say) or no status bar, they would go unused.
+  const idleWhenSlow = (): boolean => !settings.backgroundMonitoring || headless()
   const pushStatus = async (): Promise<void> => {
     statusTimer = null
-    if (headless() && deps.now() < nextStatusRetryAt) return
-    const view = statusBarView(poller.entries().map((e) => e.state))
+    if (!poller || (headless() && deps.now() < nextStatusRetryAt)) return
+    const remotesPaused = !settings.backgroundMonitoring && poller.mode() === 'slow'
+    const view = statusBarView(poller.entries().map((e) => e.state), { remotesPaused })
     if (lastStatus && JSON.stringify(lastStatus) === JSON.stringify(view)) return
     try {
       await orca.host.call('statusBar.update', { id: STATUS_BAR_ID, ...view })
@@ -102,15 +118,14 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
   // One id per worker run: the beacon carries it, and so do the panel posts.
   const runId = deps.runId()
   let bridge: PanelBridge | null = null
-  const poller = new FleetPoller(
+  const activePoller = new FleetPoller(
     {
       run: runner.run,
       now: deps.now,
       localSample: () => deps.sampler.latest(),
       localName: deps.localName,
       pluginId: PLUGIN_ID,
-      // Nobody sees slow-mode results on a server without a status bar; only the beacon runs.
-      idleWhenSlow: headless,
+      idleWhenSlow,
       onChange: () => {
         bridge?.notify()
         scheduleStatus()
@@ -119,8 +134,9 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     },
     settings
   )
+  poller = activePoller
   bridge = new PanelBridge({
-    source: poller,
+    source: activePoller,
     post: (payload) => orca.panels.post('fleet.update', payload),
     now: deps.now,
     cli: cliInfo,
@@ -134,18 +150,18 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
   const disposables: { dispose(): void }[] = []
   disposables.push(
     orca.panels.handle('fleet.snapshot', () => {
-      poller.heartbeat()
+      activePoller.heartbeat()
       return activeBridge.snapshot()
     }),
     orca.panels.handle('fleet.heartbeat', () => {
-      poller.heartbeat()
-      return { ok: true as const, mode: poller.mode(), seq: activeBridge.currentSeq }
+      activePoller.heartbeat()
+      return { ok: true as const, mode: activePoller.mode(), seq: activeBridge.currentSeq }
     }),
     orca.panels.handle('fleet.retry', (input) => {
       const id = input && typeof input === 'object' && typeof input.id === 'string' ? input.id : null
       if (!id) throw Object.assign(new Error('fleet.retry needs { id }'), { code: 'invalid_params' })
-      poller.heartbeat()
-      return { ok: poller.retry(id) }
+      activePoller.heartbeat()
+      return { ok: activePoller.retry(id) }
     })
   )
 
@@ -156,7 +172,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       if (cli.error) logOnce('cli', cli.error)
     }
     settings = next
-    poller.updateSettings(next)
+    activePoller.updateSettings(next)
   }
   disposables.push(orca.settings.onDidChange(() => void reloadSettings()))
   // "Show Fleet Monitor", run by the status bar item. Orca stops a worker that registers a command
@@ -179,26 +195,27 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       const line = encodeBeacon(sample, { run: runId, seq, intervalMs: BEACON_INTERVAL_MS })
       if (line) orca.log(line)
     }
-    poller.onLocalSample()
+    activePoller.onLocalSample()
   }
   const sampleTimer = deps.setInterval(sampleNow, BEACON_INTERVAL_MS)
-  const tickTimer = deps.setInterval(() => poller.tick(), TICK_MS)
-  poller.tick()
+  const tickTimer = deps.setInterval(() => activePoller.tick(), TICK_MS)
+  activePoller.tick()
   scheduleStatus()
 
   return {
-    poller,
+    poller: activePoller,
     bridge: activeBridge,
     settings: () => settings,
     statusBar: () => lastStatus,
     headless,
+    idleWhenSlow,
     sampleNow,
     stop: async () => {
       deps.clearInterval(sampleTimer)
       deps.clearInterval(tickTimer)
       if (statusTimer !== null) deps.clearTimeout(statusTimer)
       activeBridge.dispose()
-      poller.stop()
+      activePoller.stop()
       runner.stop()
       for (const d of disposables) d.dispose()
     }
