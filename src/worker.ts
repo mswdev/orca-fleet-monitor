@@ -77,7 +77,7 @@ export function realDeps(): MonitorDeps {
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     sampler,
     resolveCli: (override) => resolveCli(workerCliEnvironment(override)),
-    createRunner: (cliPath) => createProcessRunner(cliPath),
+    createRunner: (cliPath) => createProcessRunner(cliPath, { pluginFile: workerFile() }),
     localName: () => localMachineName(),
     runId: () => randomBytes(4).toString('hex'),
     workerFile: workerFile(),

@@ -433,6 +433,6 @@ describe('readSettings (1.1)', () => {
     assert.deepEqual(setting('ramUsedBusyPercent') && [setting('ramUsedBusyPercent')!.type, setting('ramUsedBusyPercent')!.default, setting('ramUsedBusyPercent')!.minimum, setting('ramUsedBusyPercent')!.maximum], ['integer', 90, 1, 100])
     assert.deepEqual(setting('memoryAlerts') && [setting('memoryAlerts')!.type, setting('memoryAlerts')!.default], ['boolean', true])
     assert.deepEqual(manifest.capabilities.map((c) => c.kind), ['settings:own', 'notifications:show'])
-    assert.equal(manifest.version, '1.2.0')
+    assert.equal(manifest.version, '1.2.1')
   })
 })

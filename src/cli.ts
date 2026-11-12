@@ -72,7 +72,10 @@ export function cliCandidates(env: CliEnvironment): CliCandidate[] {
     if (file && !out.some((c) => c.path === file)) out.push({ path: file, source })
   }
   const override = env.override?.trim()
-  if (override) add(override, 'setting')
+  // A setting that names Windows' `orca.cmd` means the `orca.exe` beside it: a .cmd cannot be run
+  // without a shell (spawn EINVAL), and it only passes its arguments on to that .exe anyway.
+  const cmdShim = env.platform === 'win32' && override ? /^(.*[\\/])orca\.cmd$/i.exec(override) : null
+  if (override) add(cmdShim ? `${cmdShim[1]}orca.exe` : override, 'setting')
 
   const resourceDirs: { dir: string; source: string }[] = []
   if (env.resourcesPath) resourceDirs.push({ dir: env.resourcesPath, source: 'bundled' })
@@ -158,6 +161,42 @@ export function workerCliEnvironment(override: string | null): CliEnvironment {
   }
 }
 
+/**
+ * The environment the CLI runs in. Orca starts a worker with a short list of variables, and on
+ * Windows that list has no APPDATA, which Orca's CLI needs to find the running app (it stops with
+ * "APPDATA is not set" otherwise). So on Windows a missing APPDATA is filled in with its default
+ * place under the user's profile. Everything else, and every other platform, passes through.
+ */
+export function cliProcessEnv(env: NodeJS.ProcessEnv, platform: string, pluginFile: string | null = null): NodeJS.ProcessEnv {
+  if (platform !== 'win32') return env
+  // Windows variable names ignore case, but a copied environment is a plain object that does not.
+  const read = (name: string): string | undefined => {
+    const key = Object.keys(env).find((k) => k.toUpperCase() === name)
+    return key === undefined ? undefined : env[key]
+  }
+  if (read('APPDATA')) return env
+  const profile = read('USERPROFILE')
+  const appData = appDataFromPluginFile(pluginFile) ?? (profile ? path.win32.join(profile, 'AppData', 'Roaming') : null)
+  return appData ? { ...env, APPDATA: appData } : env
+}
+
+/**
+ * The folder APPDATA names, read from where this plugin is installed. Orca keeps installed plugins
+ * in `<APPDATA>\orca\plugins\<plugin>`, so a file in there says where APPDATA really is, even when
+ * the Roaming folder has been moved. Null for a plugin run from anywhere else (a dev folder).
+ */
+export function appDataFromPluginFile(file: string | null): string | null {
+  if (!file) return null
+  const parts = file.split(/[\\/]/)
+  for (let i = parts.length - 2; i >= 2; i--) {
+    if (parts[i]?.toLowerCase() === 'plugins' && parts[i - 1]?.toLowerCase() === 'orca') {
+      const dir = parts.slice(0, i - 1).join('\\')
+      return path.win32.isAbsolute(dir) ? dir : null
+    }
+  }
+  return null
+}
+
 export type CommandResult = {
   code: number | null
   stdout: string
@@ -237,6 +276,8 @@ export function createProcessRunner(
   options: {
     maxOutputBytes?: number
     env?: NodeJS.ProcessEnv
+    /** A file of this plugin's own, which on Windows says where APPDATA is (see `cliProcessEnv`). */
+    pluginFile?: string | null
     now?: () => number
     platform?: string
     spawn?: Spawner
@@ -275,7 +316,7 @@ export function createProcessRunner(
       let child: ChildProcess
       try {
         child = spawnChild(target, [...args], {
-          env: options.env ?? process.env,
+          env: cliProcessEnv(options.env ?? process.env, platform, options.pluginFile ?? null),
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
           shell: false,

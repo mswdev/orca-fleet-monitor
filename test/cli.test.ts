@@ -1,5 +1,5 @@
 import { assert, describe, test } from 'orca/testing'
-import { cliCandidates, createProcessRunner, resolveCli } from '../src/cli.ts'
+import { appDataFromPluginFile, cliCandidates, cliProcessEnv, createProcessRunner, resolveCli } from '../src/cli.ts'
 
 // Invented install locations; nothing here is read from this machine.
 describe('cliCandidates', () => {
@@ -65,6 +65,14 @@ describe('cliCandidates', () => {
     assert.ok(list.some((c) => c.path === 'C:\\Tools\\orca.exe'))
     assert.ok(list.some((c) => c.path === 'C:\\Users\\tester\\AppData\\Local\\Programs\\Orca\\resources\\bin\\orca.exe'))
   })
+
+  test('Windows: a setting that names orca.cmd means the orca.exe beside it', () => {
+    const first = (override: string, platform = 'win32') => cliCandidates({ platform, override })[0]
+    assert.deepEqual(first('C:\\Programs\\Orca\\resources\\bin\\ORCA.CMD'), { path: 'C:\\Programs\\Orca\\resources\\bin\\orca.exe', source: 'setting' })
+    assert.equal(first('C:/Programs/Orca/resources/bin/orca.cmd')?.path, 'C:/Programs/Orca/resources/bin/orca.exe')
+    assert.equal(first('C:\\Tools\\other.cmd')?.path, 'C:\\Tools\\other.cmd')
+    assert.equal(first('/opt/bin/orca.cmd', 'linux')?.path, '/opt/bin/orca.cmd')
+  })
 })
 
 describe('resolveCli', () => {
@@ -88,6 +96,63 @@ describe('resolveCli', () => {
     const r = resolveCli({ platform: 'linux' }, () => false)
     assert.equal(r.path, null)
     assert.match(r.error ?? '', /set its path/)
+  })
+})
+
+// Orca's worker environment on Windows has USERPROFILE but no APPDATA, and Orca's CLI stops with
+// "APPDATA is not set" without it.
+describe('cliProcessEnv', () => {
+  const worker = { PATH: 'C:\\Windows', USERPROFILE: 'C:\\Users\\tester', SystemRoot: 'C:\\Windows', ELECTRON_RUN_AS_NODE: '1' }
+
+  test('Windows: fills in a missing APPDATA from the user profile and keeps the rest', () => {
+    assert.deepEqual(cliProcessEnv(worker, 'win32'), { ...worker, APPDATA: 'C:\\Users\\tester\\AppData\\Roaming' })
+    assert.equal('APPDATA' in worker, false) // the worker's own environment is left alone
+  })
+
+  test('Windows: an APPDATA that is already set wins, whatever its case', () => {
+    const set = { ...worker, AppData: 'D:\\Redirected\\Roaming' }
+    assert.equal(cliProcessEnv(set, 'win32'), set)
+  })
+
+  test('Windows: reads the profile whatever its case, and adds nothing without one', () => {
+    assert.equal(cliProcessEnv({ UserProfile: 'C:\\Users\\tester' }, 'win32').APPDATA, 'C:\\Users\\tester\\AppData\\Roaming')
+    const bare = { PATH: 'C:\\Windows' }
+    assert.equal(cliProcessEnv(bare, 'win32'), bare)
+  })
+
+  test('macOS and Linux: untouched', () => {
+    assert.equal(cliProcessEnv(worker, 'darwin'), worker)
+    assert.equal(cliProcessEnv(worker, 'linux'), worker)
+  })
+
+  test('Windows: where the plugin is installed says where APPDATA is, ahead of the default', () => {
+    const installed = 'D:\\Redirected\\Roaming\\orca\\plugins\\mswdev.fleet-monitor\\src\\worker.ts'
+    assert.equal(appDataFromPluginFile(installed), 'D:\\Redirected\\Roaming')
+    assert.equal(cliProcessEnv(worker, 'win32', installed).APPDATA, 'D:\\Redirected\\Roaming')
+    assert.equal(appDataFromPluginFile('C:/Users/tester/AppData/Roaming/Orca/Plugins/x/src/worker.ts'), 'C:\\Users\\tester\\AppData\\Roaming')
+  })
+
+  test('Windows: a plugin run from a dev folder falls back to the default', () => {
+    const dev = 'C:\\Code\\orca-fleet-monitor\\src\\worker.ts'
+    assert.equal(appDataFromPluginFile(dev), null)
+    assert.equal(appDataFromPluginFile('orca\\plugins\\x\\worker.ts'), null) // nothing above `orca`
+    assert.equal(appDataFromPluginFile(null), null)
+    assert.equal(cliProcessEnv(worker, 'win32', dev).APPDATA, 'C:\\Users\\tester\\AppData\\Roaming')
+  })
+
+  test('the runner hands that environment to the CLI on Windows', async () => {
+    let seen: NodeJS.ProcessEnv | undefined
+    const { run } = createProcessRunner(() => 'C:\\Programs\\Orca\\resources\\bin\\orca.exe', {
+      platform: 'win32',
+      env: worker,
+      spawn: (_file, _args, options) => {
+        seen = options.env
+        throw new Error('stop here')
+      }
+    })
+    const result = await run(['environment', 'list', '--json'])
+    assert.equal(result.spawnError, 'stop here')
+    assert.equal(seen?.APPDATA, 'C:\\Users\\tester\\AppData\\Roaming')
   })
 })
 
