@@ -11,6 +11,8 @@ Live CPU, memory, per-core load and the busiest workspaces for this computer and
 
 <p>
 <a href="https://github.com/mswdev/orca-fleet-monitor/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/mswdev/orca-fleet-monitor?style=flat-square&label=release&color=3b82f6"></a>
+<a href="https://github.com/mswdev/orca-fleet-monitor/actions/workflows/ci.yml?query=branch%3Amain"><img alt="Tests on main" src="https://img.shields.io/github/actions/workflow/status/mswdev/orca-fleet-monitor/ci.yml?branch=main&style=flat-square&label=tests"></a>
+<a href="https://github.com/mswdev/orca-fleet-monitor/actions/workflows/ci.yml?query=branch%3Amain"><img alt="Line coverage of src and panel" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmswdev%2Forca-fleet-monitor%2Fbadges%2Fcoverage-summary.json&query=%24.total.lines.pct&suffix=%25&label=coverage&color=2ea043&style=flat-square"></a>
 <img alt="Requires Orca 1.4.248 or later" src="https://img.shields.io/badge/Orca-1.4.248%2B-3b82f6?style=flat-square">
 <img alt="macOS is the only tested and supported platform" src="https://img.shields.io/badge/macOS-supported-2ea043?style=flat-square">
 <img alt="Linux and Windows are implemented but untested" src="https://img.shields.io/badge/Linux%20and%20Windows-untested-b7791f?style=flat-square">
