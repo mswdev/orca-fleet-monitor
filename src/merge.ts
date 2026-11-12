@@ -34,6 +34,9 @@ export type MergeInput = {
   } | null
   health: HealthSettings
   topLimit?: number
+  /** This computer's platform, which is known before its first sample (only for the local
+   *  machine), so it is tagged "This Mac" or "This PC" from the first answer on. */
+  platform?: string | null
 }
 
 /** CPU estimated from the 1-minute load average when nothing measures it directly. Load is not
@@ -128,7 +131,7 @@ export function mergeMachine(input: MergeInput): MachineState {
     error: input.error,
     host: {
       hostname: known?.hostname || null,
-      platform: known?.platform || null,
+      platform: known?.platform || (input.kind === 'local' ? input.platform || null : null),
       arch: known?.arch || null,
       cpuModel: known?.cpuModel || null,
       cores: known?.cores ?? diag?.host.cores ?? null,

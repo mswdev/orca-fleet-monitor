@@ -36,7 +36,7 @@ export function parseEnvelope(stdout: string, stderr = ''): Envelope {
       }
     }
   }
-  const hint = (stderr || stdout).trim().split('\n')[0]?.slice(0, 200) ?? ''
+  const hint = clipText((stderr || stdout).trim().split('\n')[0] ?? '', 200)
   return { ok: false, code: 'bad_output', message: hint || 'The Orca CLI printed no JSON' }
 }
 

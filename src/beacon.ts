@@ -4,7 +4,7 @@
 // Compatibility: the version stays 1 for as long as fields are only added. A reader ignores keys
 // it does not know, and every key added after the first release (`cg`) is optional, so an older
 // Fleet Monitor on either side keeps working.
-import { COUNT_LIMITS, lastEntries } from './bounds.ts'
+import { clipText, COUNT_LIMITS, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
 import type { BeaconRecord, CoreGroup, LocalSample } from './model.ts'
 
@@ -129,8 +129,9 @@ function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
+/** Text from another machine's beacon: bounded, with bidirectional controls neutralized. */
 function str(value: unknown, max = 255): string | null {
-  return typeof value === 'string' ? clip(value, max) : null
+  return typeof value === 'string' ? clipText(value, max) : null
 }
 
 /** A beacon from one log line, or null for anything that is not a whole, valid beacon. */
@@ -203,10 +204,21 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
   }
 }
 
-/** Every beacon in a `plugin logs` answer, oldest first. Lines from older worker runs are kept;
- *  ordering is by the remote's log time, then by sequence. */
-export function readBeacons(lines: readonly unknown[]): BeaconRecord[] {
-  const records: BeaconRecord[] = []
+export type BeaconLog = {
+  /** Every beacon, oldest first by the remote's log time, then by sequence. */
+  records: BeaconRecord[]
+  /** The newest beacon: the highest sequence of the run that wrote the last beacon line. */
+  latest: BeaconRecord | null
+}
+
+/**
+ * The beacons in a `plugin logs` answer. Orca appends a plugin's log lines in order and returns
+ * them as they are, so the last beacon line is the newest whatever the remote's clock says; within
+ * its run the sequence decides. A remote clock set back therefore never makes an older beacon
+ * look like the newest, as sorting by the remote's own times would.
+ */
+export function readBeaconLog(lines: readonly unknown[]): BeaconLog {
+  const inLogOrder: BeaconRecord[] = []
   for (const entry of lastEntries(lines, COUNT_LIMITS.logLines)) {
     if (!entry || typeof entry !== 'object') {
       continue
@@ -214,10 +226,21 @@ export function readBeacons(lines: readonly unknown[]): BeaconRecord[] {
     const { line, ts } = entry as { line?: unknown; ts?: unknown }
     const record = decodeBeacon(line, num(ts))
     if (record) {
-      records.push(record)
+      inLogOrder.push(record)
     }
   }
-  return records.sort((a, b) => a.loggedAt - b.loggedAt || a.t - b.t || a.seq - b.seq)
+  let latest = inLogOrder[inLogOrder.length - 1] ?? null
+  for (const record of inLogOrder) {
+    if (latest && record.run === latest.run && record.seq > latest.seq) latest = record
+  }
+  const records = [...inLogOrder].sort((a, b) => a.loggedAt - b.loggedAt || a.t - b.t || a.seq - b.seq)
+  return { records, latest }
+}
+
+/** Every beacon in a `plugin logs` answer, oldest first. Lines from older worker runs are kept;
+ *  ordering is by the remote's log time, then by sequence. */
+export function readBeacons(lines: readonly unknown[]): BeaconRecord[] {
+  return readBeaconLog(lines).records
 }
 
 export type BeaconTracker = {
@@ -232,6 +255,8 @@ export type BeaconAssessment = {
   ageMs: number | null
   restarted: boolean
   advanced: boolean
+  /** The remote's clock says the beacon is older than the limit. */
+  clockStale: boolean
   tracker: BeaconTracker
 }
 
@@ -239,17 +264,23 @@ export type BeaconAssessment = {
  * Is the newest beacon current? Judged on the remote's own clock when `remoteNow` is known (from
  * the remote's diagnostics `collectedAt`), and otherwise by whether its sequence keeps moving on
  * the local clock. Either test failing makes it stale.
+ *
+ * The limit is `staleIntervals` beacon intervals, plus `allowanceMs`: how long the reader has, by
+ * its own schedule, not asked for a newer beacon since it last read one (0 when judging a read
+ * just made). A new run id, or a sequence lower than the last one seen, is a restart.
  */
 export function assessBeacon(
   latest: BeaconRecord | null,
   tracker: BeaconTracker,
-  context: { localNow: number; remoteNow: number | null; staleIntervals?: number }
+  context: { localNow: number; remoteNow: number | null; staleIntervals?: number; allowanceMs?: number }
 ): BeaconAssessment {
   if (!latest) {
-    return { fresh: false, ageMs: null, restarted: false, advanced: false, tracker }
+    return { fresh: false, ageMs: null, restarted: false, advanced: false, clockStale: false, tracker }
   }
-  const limit = Math.max(latest.intervalMs, 1_000) * (context.staleIntervals ?? BEACON_STALE_INTERVALS)
-  const restarted = tracker.run !== null && tracker.run !== latest.run
+  const allowance = Number.isFinite(context.allowanceMs) ? Math.max(0, context.allowanceMs ?? 0) : 0
+  const limit = Math.max(latest.intervalMs, 1_000) * (context.staleIntervals ?? BEACON_STALE_INTERVALS) + allowance
+  const restarted =
+    tracker.run !== null && (tracker.run !== latest.run || (tracker.seq !== null && latest.seq < tracker.seq))
   const advanced = restarted || tracker.seq === null || latest.seq > tracker.seq
   const next: BeaconTracker = advanced
     ? { run: latest.run, seq: latest.seq, advancedAt: context.localNow }
@@ -261,7 +292,7 @@ export function assessBeacon(
   const freshByMovement = stalledFor <= limit
   const firstSighting = tracker.seq === null
   const fresh = ageMs === null && firstSighting ? false : freshByClock && freshByMovement
-  return { fresh, ageMs, restarted, advanced, tracker: next }
+  return { fresh, ageMs, restarted, advanced, clockStale: !freshByClock, tracker: next }
 }
 
 export function emptyTracker(): BeaconTracker {

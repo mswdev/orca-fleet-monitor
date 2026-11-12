@@ -71,7 +71,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
   let settings = readSettings(await orca.settings.get().catch(() => ({})))
   let cli = deps.resolveCli(settings.cliPath)
   if (cli.error) logOnce('cli', cli.error)
-  const launcher = cliLauncherName(deps.platform ?? process.platform)
+  const platform = deps.platform ?? process.platform
+  const launcher = cliLauncherName(platform)
   let poller: FleetPoller | null = null
   const cliInfo = (): CliInfo => ({
     path: cli.path,
@@ -124,6 +125,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       now: deps.now,
       localSample: () => deps.sampler.latest(),
       localName: deps.localName,
+      localPlatform: platform,
       pluginId: PLUGIN_ID,
       idleWhenSlow,
       onChange: () => {

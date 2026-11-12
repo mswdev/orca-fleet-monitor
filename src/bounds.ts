@@ -26,12 +26,24 @@ export const COUNT_LIMITS = {
   logLines: 400
 } as const
 
-/** `value` when it is a string, cut to `max` characters without splitting a surrogate pair. */
+/** Unicode's bidirectional controls: embeddings, overrides, isolates and the three marks. */
+const BIDI_CONTROLS = /[؜‎‏‪-‮⁦-⁩]/g
+
+/** Text with every bidirectional control replaced by U+FFFD. One in another machine's text could
+ *  reorder how the panel or status bar draws it (a name that reads backwards, say). The stand-in
+ *  stays visible, and a name holding one is no longer plain enough to go into a command. */
+export function neutralizeBidi(text: string): string {
+  return text.replace(BIDI_CONTROLS, '�')
+}
+
+/** `value` when it is a string, with bidirectional controls neutralized, cut to `max` characters
+ *  without splitting a surrogate pair. */
 export function clipText(value: unknown, max: number, fallback = ''): string {
   if (typeof value !== 'string') return fallback
-  if (value.length <= max) return value
-  const code = value.charCodeAt(max - 1)
-  return value.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max)
+  const text = neutralizeBidi(value)
+  if (text.length <= max) return text
+  const code = text.charCodeAt(max - 1)
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max)
 }
 
 /** A finite number within [min, max], or `fallback` for anything else. */

@@ -259,6 +259,15 @@ describe('assessBeacon', () => {
     assert.deepEqual(after.tracker, { run: 'run-b', seq: 1, advancedAt: 20_000 })
   })
 
+  test('a sequence lower than the last one seen is a restart too, not a beacon that stopped', () => {
+    const before = assessBeacon(at(500, 0), emptyTracker(), { localNow: 0, remoteNow: 0 })
+    const after = assessBeacon(at(3, 20_000), before.tracker, { localNow: 20_000, remoteNow: 21_000 })
+    assert.equal(after.restarted, true)
+    assert.equal(after.advanced, true)
+    assert.equal(after.fresh, true)
+    assert.deepEqual(after.tracker, { run: 'run-a', seq: 3, advancedAt: 20_000 })
+  })
+
   test('nothing to assess is not fresh', () => {
     assert.equal(assessBeacon(null, emptyTracker(), { localNow: 0, remoteNow: 0 }).fresh, false)
   })

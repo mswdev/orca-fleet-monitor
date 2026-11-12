@@ -14,6 +14,8 @@
 
 export const HEARTBEAT_MS = 5_000
 const REQUEST_TIMEOUT_MS = 10_000
+/** Older history rewritten (a back-fill) re-fetches the fleet at most this often. */
+export const REWRITE_REFRESH_MS = 15_000
 
 /** Merges `extra` history columns into `base` by time (same time: extra wins), oldest first,
  *  keeping only points within `windowMs` of the newest. */
@@ -36,6 +38,24 @@ export function mergeColumns(base, extra, windowMs) {
 }
 
 const emptyColumns = () => ({ t: [], cpu: [], mem: [] })
+
+/**
+ * A machine state as the panel keeps it. One the worker sent lean (marked `lean`: without per-core
+ * values and workspaces, to fit Orca's size caps) gets the detail this panel already holds for it
+ * where that still applies: per-core values while its CPU is read the same way on the same tier,
+ * workspaces while it stays online. A machine that dropped a tier or went offline loses them.
+ * Any other state is taken as it is.
+ */
+export function keepDetail(state, previous) {
+  if (!state || state.lean !== true || !previous || state.online !== true || previous.online !== true) return state
+  const sameCpu =
+    state.tier === previous.tier && state.cpu?.source === previous.cpu?.source && state.cpu?.perCore == null
+  return {
+    ...state,
+    cpu: sameCpu ? { ...state.cpu, perCore: previous.cpu?.perCore ?? null, groups: previous.cpu?.groups ?? null } : state.cpu,
+    workspaces: previous.workspaces ?? state.workspaces
+  }
+}
 
 /**
  * @param {{ plugin: { request: Function, on: Function } }} orca  the frame's window.orca
@@ -64,6 +84,8 @@ export function createFleetBinding(orca, options = {}) {
   let buffered = []
   let wasVisible = isVisible()
   let disposed = false
+  /** When older history being rewritten last made this panel re-fetch (this frame's clock). */
+  let rewriteRefreshAt = Number.NEGATIVE_INFINITY
   /** The worker's clock minus this frame's, from the newest answer or post (see src/worker.ts:
    *  the worker keeps its own steady clock, which a wall-clock step does not move). */
   let clockOffsetMs = 0
@@ -100,10 +122,11 @@ export function createFleetBinding(orca, options = {}) {
     }
   }
 
-  function fromSnapshot(snapshot) {
+  function fromSnapshot(snapshot, previous) {
     const machines = new Map()
     for (const machine of snapshot.machines ?? []) {
-      machines.set(machine.id, { ...machine, history: machine.history ?? emptyColumns() })
+      const state = keepDetail(machine, previous?.machines.get(machine.id))
+      machines.set(machine.id, { ...state, history: machine.history ?? emptyColumns() })
     }
     return {
       seq: snapshot.seq,
@@ -126,7 +149,7 @@ export function createFleetBinding(orca, options = {}) {
     for (const state of update.machines ?? []) {
       const previous = model.machines.get(state.id)
       const history = mergeColumns(previous?.history ?? emptyColumns(), update.appended?.[state.id], model.historyWindowMs)
-      machines.set(state.id, { ...state, history })
+      machines.set(state.id, { ...keepDetail(state, previous), history })
     }
     model = {
       ...model,
@@ -164,7 +187,13 @@ export function createFleetBinding(orca, options = {}) {
       typeof update.historyRev === 'number' && model.historyRev !== null && update.historyRev !== model.historyRev
     apply(update)
     emit()
-    if (missed || rewritten) refresh()
+    if (missed) refresh()
+    else if (rewritten && now() - rewriteRefreshAt >= REWRITE_REFRESH_MS) {
+      // A long round of reads can back-fill a little with nearly every read; one re-fetch per
+      // REWRITE_REFRESH_MS catches all of it without fetching the whole fleet every second.
+      rewriteRefreshAt = now()
+      refresh()
+    }
   }
 
   /**
@@ -182,7 +211,7 @@ export function createFleetBinding(orca, options = {}) {
       .request('fleet.snapshot', undefined, { timeoutMs: REQUEST_TIMEOUT_MS })
       .then((snapshot) => {
         noteClock(snapshot?.generatedAt)
-        model = fromSnapshot(snapshot)
+        model = fromSnapshot(snapshot, model)
         error = null
         for (const update of buffered) {
           const sameRun = (update.run ?? null) === model.run && (update.historyRev ?? null) === model.historyRev
@@ -381,22 +410,56 @@ export function safeMachineName(name) {
   return typeof name === 'string' && SAFE_NAME.test(name) && !name.startsWith('-') && name.trim() === name
 }
 
+/** A server name as Orca's CLI compares what is typed after `--environment` (its
+ *  normalizeTypedName): trimmed, one pair of wrapping straight quotes dropped, trimmed again,
+ *  case ignored. */
+export function typedName(name) {
+  if (typeof name !== 'string') return ''
+  let value = name.trim()
+  const quote = value[0]
+  if (value.length >= 2 && (quote === "'" || quote === '"') && value[value.length - 1] === quote) value = value.slice(1, -1)
+  return value.trim().toLowerCase()
+}
+
+/** `--environment local`, in any case and quoted or not, is this computer to Orca's CLI. */
+const LOCAL_SELECTOR = 'local'
+
 /**
  * The command that installs Fleet Monitor on a paired machine, run on this computer, or null when
  * none can be written safely. The machine name comes from that machine, so it is untrusted text
- * a person will paste into a shell: it is used only when `safeMachineName` allows it (and no other
- * paired machine shares it), and otherwise the environment id, which Orca also accepts, in the
- * `--environment=<id>` form. With neither, there is no command, only words.
+ * a person will paste into a shell: it is used only when `safeMachineName` allows it, when the CLI
+ * would not read it as `local` (this computer), and when no other paired machine answers to it
+ * (`ambiguous`, worked out by toFleet); otherwise the environment id, which Orca also accepts, in
+ * the `--environment=<id>` form. With neither, there is no command, only words.
  */
 export function installCommand(machine, options = {}) {
   const name = typeof machine?.name === 'string' ? machine.name : ''
   const id = typeof machine?.id === 'string' ? machine.id : ''
   const launcher = LAUNCHERS.includes(options.launcher) ? options.launcher : 'orca'
   const head = `${launcher} plugin install ${INSTALL_SOURCE}`
-  if (safeMachineName(name) && !options.ambiguous) return `${head} --environment "${name}"`
+  if (safeMachineName(name) && !options.ambiguous && typedName(name) !== LOCAL_SELECTOR) return `${head} --environment "${name}"`
   if (SAFE_ID.test(id)) return `${head} --environment=${id}`
   return null
 }
+
+/** Ids of the paired machines whose name does not pick out only them in `--environment <name>`:
+ *  Orca takes an exact id first, then a name compared as `typedName` does, so a name another
+ *  machine also answers to (or that is another machine's id) is ambiguous. */
+function ambiguousNames(remotes) {
+  const counts = new Map()
+  for (const m of remotes) counts.set(typedName(m.name), (counts.get(typedName(m.name)) ?? 0) + 1)
+  const ids = new Set(remotes.map((m) => m.id))
+  const out = new Set()
+  for (const m of remotes) {
+    if (counts.get(typedName(m.name)) > 1 || (ids.has(m.name) && m.name !== m.id)) out.add(m.id)
+  }
+  return out
+}
+
+/** Unicode's bidirectional controls, which could reorder how remote text is drawn. The worker
+ *  already replaces them (src/bounds.ts); this is the panel's own check. */
+const BIDI_CONTROLS = /[؜‎‏‪-‮⁦-⁩]/g
+const plainText = (value) => String(value).replace(BIDI_CONTROLS, '�')
 
 function localTag(platform) {
   if (platform === 'darwin') return 'This Mac'
@@ -450,8 +513,8 @@ function workspacesOf(lists, cores) {
     if (!key || seen.has(key)) continue
     seen.set(key, {
       id: key,
-      name: String(w.name || w.id || ''),
-      repo: typeof w.repo === 'string' ? w.repo : '',
+      name: plainText(w.name || w.id || ''),
+      repo: typeof w.repo === 'string' ? plainText(w.repo) : '',
       cpuPct: Math.min(100, Math.max(0, finite(w.cpu) ? w.cpu : 0) / Math.max(1, cores ?? 1)),
       memBytes: Math.max(0, finite(w.memory) ? w.memory : 0)
     })
@@ -465,7 +528,7 @@ function installHintOf(machine, context) {
     case 'absent':
       return {
         reason: 'absent',
-        command: installCommand(machine, { launcher: context.launcher, ambiguous: context.sharedNames.has(machine.name) }),
+        command: installCommand(machine, { launcher: context.launcher, ambiguous: context.ambiguous.has(machine.id) }),
         launcher: context.launcher
       }
     case 'installed':
@@ -495,9 +558,10 @@ function toMachine(m, thresholds, now, context) {
   const newestMem = newestReading(history, 'mem')
   const seen = [m.lastSeenAt, newestCpu?.t, newestMem?.t].filter(finite)
   const health = online ? (levelOrNull(m.health?.level) ?? 'unknown') : 'unknown'
+  const perCoreCount = Array.isArray(m.cpu?.perCore) ? m.cpu.perCore.length : 0
   return {
     id: String(m.id),
-    name: String(m.name || m.id),
+    name: plainText(m.name || m.id),
     kind: local ? 'local' : 'remote',
     local,
     status,
@@ -509,9 +573,9 @@ function toMachine(m, thresholds, now, context) {
     reasons: online && Array.isArray(m.health?.reasons) ? m.health.reasons.filter((r) => typeof r === 'string' && r !== 'offline').slice(0, 4) : [],
     updatedAt: seen.length > 0 ? Math.max(...seen) : null,
     lastSeenAt: finite(m.lastSeenAt) ? m.lastSeenAt : null,
-    error: typeof m.error === 'string' && m.error ? m.error : null,
+    error: typeof m.error === 'string' && m.error ? plainText(m.error) : null,
     platform,
-    chip: typeof m.host?.cpuModel === 'string' && m.host.cpuModel ? m.host.cpuModel : null,
+    chip: typeof m.host?.cpuModel === 'string' && m.host.cpuModel ? plainText(m.host.cpuModel) : null,
     cores,
     uptimeSec: online && finite(m.host?.uptimeSec) ? m.host.uptimeSec : null,
     load: m.load && finite(m.load.one) ? { one: m.load.one, five: finite(m.load.five) ? m.load.five : null, fifteen: finite(m.load.fifteen) ? m.load.fifteen : null } : null,
@@ -521,7 +585,9 @@ function toMachine(m, thresholds, now, context) {
       tone: estimated ? 'ok' : (levelOrNull(m.health?.cpu) ?? (cpuPct === null ? 'ok' : levelFor(cpuPct, thresholds.cpu))),
       history: bucketHistory(history, 'cpu', now),
       stats: windowStats(history, 'cpu', now),
-      groups: online ? coreGroupsOf(m.cpu, thresholds) : null
+      groups: online ? coreGroupsOf(m.cpu, thresholds) : null,
+      // Too many to draw one by one: the view says so rather than leave the section out unsaid.
+      coresHidden: online && perCoreCount > MAX_CORES_DRAWN ? perCoreCount : 0
     },
     mem: {
       pct: memPct,
@@ -563,15 +629,9 @@ export function toFleet(view, now = Date.now()) {
   const raw = (view.machines ?? []).filter((m) => m && m.id)
   const localPlatform = raw.find((m) => m.kind === 'local')?.host?.platform ?? null
   const launcher = LAUNCHERS.includes(view.cli?.launcher) ? view.cli.launcher : localPlatform === 'linux' ? 'orca-ide' : 'orca'
-  const seen = new Set()
-  const sharedNames = new Set()
-  for (const m of raw) {
-    if (m.kind === 'local' || typeof m.name !== 'string') continue
-    if (seen.has(m.name)) sharedNames.add(m.name)
-    seen.add(m.name)
-  }
-  const machines = raw.map((m) => toMachine(m, thresholds, now, { launcher, sharedNames }))
-  const cliError = [view.cli?.error, view.cli?.runError].find((e) => typeof e === 'string' && e) ?? null
+  const ambiguous = ambiguousNames(raw.filter((m) => m.kind !== 'local'))
+  const machines = raw.map((m) => toMachine(m, thresholds, now, { launcher, ambiguous }))
+  const cliError = [view.cli?.error, view.cli?.runError].map((e) => (typeof e === 'string' && e ? plainText(e) : null)).find(Boolean) ?? null
   return {
     state: 'live',
     error: view.error ?? null,

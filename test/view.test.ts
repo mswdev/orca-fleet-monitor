@@ -230,6 +230,38 @@ describe('a machine', () => {
     assert.equal(v.root.querySelectorAll('.fm-core').length, 128)
   })
 
+  test('with one reading so far, neither the sparklines nor the detail charts draw a lone dot', () => {
+    const history = { t: [NOW - 1_000], cpu: [40], mem: [25] }
+    const v = mount(viewOf([local({ history }), machine({ history })]))
+    const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
+    const sparks = card.querySelectorAll('.fm-spark .fm-line').map((p) => p.getAttribute('d'))
+    assert.deepEqual(sparks, ['M0 0', 'M0 0'])
+    assert.deepEqual(card.querySelectorAll('.fm-spark .fm-area').map((p) => p.getAttribute('d')), ['M0 0', 'M0 0'])
+    v.handle.show('env-a')
+    const charts = v.root.querySelectorAll('.fm-plot .fm-line').map((p) => p.getAttribute('d'))
+    assert.deepEqual(charts, ['M0 0', 'M0 0'])
+    assert.equal($(v.root, '[data-key="cpu"] .fm-big')?.textContent, '40%', 'the reading itself is still shown')
+  })
+
+  test('more than 256 cores: one quiet line says per-core load is not drawn', () => {
+    const perCore = Array.from({ length: 300 }, () => 40)
+    const v = mount(viewOf([local(), machine({ host: { ...machine().host, cores: 300 }, cpu: { percent: 40, source: 'beacon', perCore, groups: null } })]))
+    v.handle.show('env-a')
+    assert.equal(v.root.querySelectorAll('.fm-core').length, 0)
+    assert.equal($(v.root, '[data-key="cores-hidden"]')?.textContent, 'Per-core load is not drawn above 256 cores.')
+    assert.match($(v.root, '[data-key="cpu"] .fm-section-head')?.textContent ?? '', /300 cores/)
+  })
+
+  test("an offline card's label says when it was last seen on the worker clock, as its text does", () => {
+    // The worker's clock runs an hour ahead of this frame's; it last saw the machine 61 minutes ago.
+    const ahead = 3_600_000
+    const offline = machine({ online: false, status: 'offline', lastSeenAt: NOW + ahead - 61 * 60_000, health: { level: 'unknown', reasons: ['offline'], cpu: null, memory: null } })
+    const v = mount(viewOf([local(), offline], { clockOffsetMs: ahead }))
+    const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
+    assert.equal($(card, '.fm-card-note')?.textContent, 'Last seen 1h 1m ago')
+    assert.match(card.getAttribute('aria-label') ?? '', /Last seen 1h 1m ago\./)
+  })
+
   test('history on the worker clock is drawn against the worker clock', () => {
     // The worker's clock runs an hour ahead of this frame's (its wall clock was set back).
     const ahead = 3_600_000

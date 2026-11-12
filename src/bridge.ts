@@ -66,15 +66,37 @@ function stubMachine(state: Pick<MachineState, 'id' | 'name' | 'kind'>): Machine
   }
 }
 
-/** A machine without its bulky detail: no workspaces, per-core values or reasons, a short error. */
-function leanMachine(state: MachineState): MachineState {
+/** A machine without its bulky detail: no workspaces or per-core values, a short error. Its health
+ *  reasons stay (a few short lines Fleet Monitor writes itself). It is marked `lean`, so a panel
+ *  keeps the detail it already holds for it instead of dropping it. */
+function leanMachine<T extends MachineState>(state: T): T {
   return {
     ...state,
     error: state.error === null ? null : clipText(state.error, 120),
     cpu: { ...state.cpu, perCore: null, groups: null },
     workspaces: { byCpu: [], byMemory: [] },
-    health: { ...state.health, reasons: [] }
+    lean: true
   }
+}
+
+/**
+ * Leaves the detail out of the bulkiest machines first, one at a time, until `size` (the clone
+ * size of everything they travel in) is within `cap`, so a few huge machines (or a hostile one)
+ * cost the others nothing. Sizes add up element by element as `estimateCloneBytes` counts them.
+ */
+function shedDetail<T extends MachineState>(machines: readonly T[], size: number, cap: number): { machines: T[]; leaned: boolean } {
+  const out = [...machines]
+  const order = machines
+    .map((machine, i) => ({ i, saving: estimateCloneBytes(machine) - estimateCloneBytes(leanMachine(machine)) }))
+    .sort((a, b) => b.saving - a.saving)
+  let leaned = false
+  for (const { i, saving } of order) {
+    if (size <= cap) break
+    out[i] = leanMachine(machines[i]!)
+    size -= saving
+    leaned = true
+  }
+  return { machines: out, leaned }
 }
 
 const encoder = new TextEncoder()
@@ -166,28 +188,34 @@ export class PanelBridge {
     }
     const max = this.deps.snapshotMaxBytes ?? SNAPSHOT_MAX_BYTES
     const fits = (snapshot: FleetSnapshot): boolean => estimateCloneBytes(snapshot) <= max
-    const build = (views: MachineView[], omitted = 0): FleetSnapshot =>
-      omitted > 0 ? { ...header, machines: views, omitted } : { ...header, machines: views }
+    const build = (views: MachineView[], omitted = 0, lean = false): FleetSnapshot => ({
+      ...header,
+      machines: views,
+      ...(omitted > 0 ? { omitted } : {}),
+      ...(lean ? { lean: true as const } : {})
+    })
     // 1. History thinned by halves until it fits.
     for (let step = 1; step <= 1_024; step *= 2) {
       const snapshot = build(machines.map((m) => ({ ...m.state, history: downsample(m.history, step) })))
       if (fits(snapshot)) return snapshot
     }
-    // 2. No history, then no bulky detail.
-    const bare = build(machines.map((m) => ({ ...m.state, history: EMPTY_HISTORY })))
+    // 2. No history, then no bulky detail, from the bulkiest machines first.
+    const bareViews = machines.map((m) => ({ ...m.state, history: EMPTY_HISTORY }))
+    const bare = build(bareViews)
     if (fits(bare)) return bare
+    const shed = shedDetail(bareViews, estimateCloneBytes(bare), max)
+    const shedSnapshot = build(shed.machines, 0, shed.leaned)
+    if (fits(shedSnapshot)) return shedSnapshot
     const lean = machines.map((m) => ({ ...leanMachine(m.state), history: EMPTY_HISTORY }))
-    const leanSnapshot = build(lean)
-    if (fits(leanSnapshot)) return leanSnapshot
     // 3. As many machines as fit, this computer first; then stubs; never over the cap.
     const kept: MachineView[] = []
     for (const view of lean) {
-      if (fits(build([...kept, view], lean.length - kept.length - 1))) kept.push(view)
-      else if (fits(build([...kept, { ...stubMachine(view), history: EMPTY_HISTORY }], lean.length - kept.length - 1)))
+      if (fits(build([...kept, view], lean.length - kept.length - 1, true))) kept.push(view)
+      else if (fits(build([...kept, { ...stubMachine(view), history: EMPTY_HISTORY }], lean.length - kept.length - 1, true)))
         kept.push({ ...stubMachine(view), history: EMPTY_HISTORY })
     }
-    const last = build(kept, lean.length - kept.length)
-    return fits(last) ? last : build([], lean.length)
+    const last = build(kept, lean.length - kept.length, true)
+    return fits(last) ? last : build([], lean.length, true)
   }
 
   /** Something changed: post soon, at most once per `minPostGapMs`, while a panel is open. */
@@ -231,10 +259,13 @@ export class PanelBridge {
       recentMs: this.recentWindowMs()
     }
     const cap = this.deps.postMaxBytes ?? POST_MAX_BYTES
-    let update: FleetUpdate = { ...base, machines: states, appended: plainJson(appended) as Record<string, HistoryColumns> }
-    if (estimateCloneBytes(update) > cap) {
-      // Too much detail for one post: the same states without their bulk, then a resync.
-      update = { ...update, machines: states.map(leanMachine) }
+    const recent = plainJson(appended) as Record<string, HistoryColumns>
+    let update: FleetUpdate = { ...base, machines: states, appended: recent }
+    const size = estimateCloneBytes(update)
+    if (size > cap) {
+      // Too much detail for one post: the bulkiest machines go without theirs (the panel keeps
+      // what it has for them), the rest keep it; failing that, a resync.
+      update = { ...base, machines: shedDetail(states, size, cap).machines, appended: recent, lean: true }
       if (estimateCloneBytes(update) > cap) update = { ...base, machines: [], appended: {}, resync: true }
     }
     this.deps.post(update)

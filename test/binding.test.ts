@@ -133,6 +133,42 @@ describe('createFleetBinding', () => {
     assert.deepEqual(fake.requests, ['fleet.snapshot'])
   })
 
+  test('a lean update (sent without detail to fit the cap) keeps the per-core values and workspaces the panel holds', async () => {
+    const ws = { id: 'w1', name: 'alpha', repo: 'demo', cpu: 50, memory: 1, sessions: 1 }
+    const detailed = {
+      ...machineState('env-a', 5),
+      tier: 'full',
+      cpu: { percent: 5, source: 'beacon', perCore: [4, 6], groups: null },
+      workspaces: { byCpu: [ws], byMemory: [ws] },
+      history: { t: [1_000], cpu: [5], mem: [10] }
+    }
+    const fake = fakeOrca({ snapshots: [{ ...snapshot(3, 10_000), machines: [detailed] }] })
+    const { binding } = bind(fake)
+    await binding.ready
+    // What the worker posts when the update would pass Orca's post cap with this machine's detail.
+    const lean = (seq: number, over: Record<string, unknown> = {}) =>
+      update(seq, 10_000 + seq * 1_000, {}, {
+        lean: true,
+        machines: [
+          { ...machineState('env-a', 7), lean: true, tier: 'full', cpu: { percent: 7, source: 'beacon', perCore: null, groups: null }, workspaces: { byCpu: [], byMemory: [] }, ...over }
+        ]
+      })
+    fake.post(lean(4))
+    let m = readyView(binding.current()).machines[0]!
+    assert.equal(m.cpu.percent, 7, 'the new reading')
+    assert.deepEqual(m.cpu.perCore, [4, 6], 'per-core values kept')
+    assert.deepEqual(m.workspaces.byCpu.map((w) => w.name), ['alpha'], 'workspaces kept')
+    fake.post(lean(5))
+    assert.deepEqual(readyView(binding.current()).machines[0]!.cpu.perCore, [4, 6], 'and kept across lean updates')
+    // Demoted to the basic tier meanwhile: its old per-core values no longer apply.
+    fake.post(lean(6, { tier: 'basic', cpu: { percent: 30, source: 'load', perCore: null, groups: null } }))
+    m = readyView(binding.current()).machines[0]!
+    assert.equal(m.cpu.perCore, null)
+    // A full update replaces everything, as before.
+    fake.post(update(7, 17_000))
+    assert.equal(readyView(binding.current()).machines[0]!.cpu.perCore, undefined)
+  })
+
   test('a short gap is absorbed; a gap longer than the repeated window re-fetches', async () => {
     const fake = fakeOrca({ snapshots: [snapshot(3, 10_000), snapshot(9, 100_000)] })
     const { binding } = bind(fake)
@@ -184,6 +220,23 @@ describe('createFleetBinding', () => {
     fake.post(update(6, 13_000, {}, { historyRev: 1 }))
     await flush()
     assert.equal(fake.snapshotCount(), 2, 'the same revision does not re-fetch again')
+  })
+
+  test('history rewritten with nearly every post (a long round of reads) re-fetches at most every 15 s', async () => {
+    let clock = 10_000
+    const snapshots = [snapshot(3, 10_000)]
+    const fake = fakeOrca({ snapshots })
+    const { binding } = bind(fake, { value: true }, () => clock)
+    await binding.ready
+    // Each post carries a newer history revision than any snapshot the panel could hold.
+    for (let s = 1; s <= 60; s += 1) {
+      clock += 1_000
+      snapshots[0] = snapshot(2 + s, clock - 500, undefined, { historyRev: s - 1 })
+      fake.post(update(3 + s, clock, {}, { historyRev: s }))
+      await flush()
+    }
+    const fetched = fake.snapshotCount() - 1
+    assert.ok(fetched >= 3 && fetched <= 5, `${fetched} re-fetches in a minute of rewrites`)
   })
 
   test('retry asks the worker and says whether it took the request', async () => {

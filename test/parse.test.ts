@@ -8,7 +8,9 @@ import {
   parseLogs,
   topWorkspaces
 } from '../src/parse.ts'
-import { fixtureText } from './helpers.ts'
+import { decodeBeacon, encodeBeacon } from '../src/beacon.ts'
+import { clipText } from '../src/bounds.ts'
+import { fixtureText, localSample } from './helpers.ts'
 
 describe('parseEnvelope', () => {
   test('reads an ok answer and its _meta', () => {
@@ -192,6 +194,26 @@ describe('bounds on what another machine sends', () => {
       'example-owner.fleet-monitor'
     ].map((pluginKey) => ({ pluginKey, status: 'running', isDev: false }))
     assert.deepEqual(findPluginKeys(ok({ plugins }), 'fleet-monitor'), { state: 'running', keys: ['example-owner.fleet-monitor'] })
+  })
+
+  test('bidirectional controls in names, workspaces, messages and beacons become U+FFFD', () => {
+    const controls = ['‮', '‪', '‫', '‬', '‭', '⁦', '⁧', '⁨', '⁩', '‎', '‏', '؜']
+    const bidi = /[؜‎‏‪-‮⁦-⁩]/
+    const tainted = (base: string) => controls.map((c) => `${c}${base}`).join('')
+    const [env] = parseEnvironments(ok({ environments: [{ id: 'env-a', name: `‮Build Box`, runtimeId: 'rt-a' }] }))
+    assert.equal(env?.name, '�Build Box')
+    const sample = parseDiagnostics(ok({ host: { totalMemory: 1 }, worktrees: [{ worktreeId: 'w1', worktreeName: tainted('ws'), repoName: tainted('repo') }] }))
+    assert.ok(sample && !bidi.test(sample.workspaces[0]!.name) && !bidi.test(sample.workspaces[0]!.repo))
+    const error = parseEnvelope(JSON.stringify({ ok: false, error: { code: tainted('c'), message: tainted('m') } }))
+    assert.ok(!error.ok && !bidi.test(error.message) && !bidi.test(error.code))
+    const hint = parseEnvelope('', `‮orca: not found\n`)
+    assert.ok(!hint.ok && hint.message === '�orca: not found')
+    const name = parseLocalHostName(ok({ hosts: [{ kind: 'local', machineName: '⁧Desk' }] }))
+    assert.equal(name, '�Desk')
+    const beacon = decodeBeacon(encodeBeacon(localSample({ hostname: tainted('host'), cpuModel: tainted('chip'), platform: '‮linux', release: '‏1' }), { run: 'r', seq: 1, intervalMs: 5_000 }))
+    assert.ok(beacon)
+    for (const text of [beacon.hostname, beacon.cpuModel, beacon.platform, beacon.release]) assert.ok(!bidi.test(text), JSON.stringify(text))
+    assert.equal(clipText('a‮b', 128), 'a�b')
   })
 
   test('a logs answer keeps only its last 400 lines', () => {

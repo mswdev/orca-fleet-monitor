@@ -1,6 +1,8 @@
 // Invented sample data for previews and listing screenshots, after the design's own `FLEET`
 // sample. Nothing here is a real machine, person or project. It is turned into the worker's
-// snapshot shape (src/model.ts) so the preview goes through the real binding and view.
+// snapshot shape (src/model.ts) so the preview goes through the real binding and view, and judged
+// on the thresholds Fleet Monitor ships with, so the images show what a new install shows.
+import { DEFAULT_THRESHOLDS } from '../../panel/fleet-binding.mjs'
 
 const MIN = 60_000
 const GIB = 2 ** 30
@@ -77,13 +79,13 @@ export const FLEET = {
       tier: 'full',
       chip: 'Apple M4 Pro',
       uptimeSec: 41 * 86_400 + 11 * 3_600,
-      load: [8.42, 7.95, 7.1],
+      load: [10.36, 9.81, 8.94],
       cpu: {
-        pct: 64,
-        history: [58, 62, 67, 71, 64, 55, 49, 53, 60, 66, 72, 69, 61, 54, 50, 57, 63, 68, 73, 70, 62, 56, 52, 58, 65, 70, 74, 68, 61, 64],
+        pct: 74,
+        history: [68, 72, 77, 81, 74, 65, 59, 63, 70, 76, 82, 79, 71, 64, 60, 67, 73, 78, 83, 80, 72, 66, 62, 68, 75, 80, 84, 78, 71, 74],
         cores: [
-          { kind: 'performance', load: [88, 84, 79, 75, 71, 68, 64, 61, 57, 52] },
-          { kind: 'efficiency', load: [58, 52, 47, 41] }
+          { kind: 'performance', load: [98, 94, 89, 85, 81, 78, 74, 71, 67, 62] },
+          { kind: 'efficiency', load: [68, 62, 57, 51] }
         ]
       },
       mem: {
@@ -157,10 +159,12 @@ function readings(perMinute, now, endAt = now) {
 const health = (pct, t) => (pct >= t.critical ? 'critical' : pct >= t.strained ? 'strained' : pct >= t.busy ? 'busy' : 'ok')
 const rank = { ok: 0, busy: 1, strained: 2, critical: 3 }
 
-/** Thresholds for the sample: the design's single set, used for both CPU and memory. */
+/** Thresholds for the sample: the defaults (CPU 70/85/95, memory 75/88/95), as a person who has
+ *  changed nothing sees them. Under them the sample is ok, strained, busy, busy (a basic machine,
+ *  on its memory) and offline. */
 export const SAMPLE_THRESHOLDS = {
-  cpu: { busy: 60, strained: 80, critical: 92 },
-  memory: { busy: 60, strained: 80, critical: 92 }
+  cpu: { ...DEFAULT_THRESHOLDS.cpu },
+  memory: { ...DEFAULT_THRESHOLDS.memory }
 }
 
 function toMachineView(m, now, thresholds) {

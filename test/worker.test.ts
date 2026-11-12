@@ -2,6 +2,7 @@
 // no real `orca` command runs. The worker's default export is exercised for its shape only.
 import { readFileSync } from 'node:fs'
 import { assert, hostError, mockHost, mountWorker, test } from 'orca/testing'
+import { toFleet } from '../panel/fleet-binding.mjs'
 import { BEACON_PREFIX, decodeBeacon } from '../src/beacon.ts'
 import type { FleetSnapshot } from '../src/model.ts'
 import { startFleetMonitor, type FleetMonitor, type MonitorDeps } from '../src/monitor.ts'
@@ -109,6 +110,18 @@ test('answers fleet.snapshot and fleet.heartbeat, and a heartbeat turns on fast 
   assert.deepEqual(machines, ['local', 'env-a'])
   assert.deepEqual(t.mounted.refusals, [])
   await t.mounted.deactivate()
+})
+
+test('this computer is tagged by its platform from the first answer, before the sampler has read it', async () => {
+  for (const [platform, tag] of [['darwin', 'This Mac'], ['win32', 'This PC'], ['linux', 'This machine']] as const) {
+    const t = await mount({}, undefined, { platform })
+    const snap = (await t.mounted.request('fleet.snapshot')) as FleetSnapshot
+    assert.equal(t.monitor().poller.entries()[0]?.state.host.hostname, null, 'no sample yet')
+    assert.equal(snap.machines[0]?.host.platform, platform)
+    const local = toFleet({ ready: true, error: null, ...snap }, t.time.now()).machines[0]!
+    assert.equal(local.tag, tag)
+    await t.mounted.deactivate()
+  }
 })
 
 test('writes a beacon line every 5 s that decodes back', async () => {

@@ -1,6 +1,8 @@
 // SVG paths for the history charts: points 0..100 spread evenly across a w by h box, as in the
 // design. A null is a gap: the line and its fill stop and start again around it, and a lone
-// reading between gaps is drawn as a dot (a zero-length segment with round caps).
+// reading between gaps is drawn as a dot (a zero-length segment with round caps). A series with
+// fewer than two readings in all (a machine just reached, a worker just started) draws nothing:
+// one dot alone reads as a glitch, and the big figure beside it already shows that reading.
 
 const clamp = (value) => Math.min(100, Math.max(0, value))
 const fmt = (n) => (Math.round(n * 10) / 10).toString()
@@ -18,6 +20,8 @@ export function seriesPaths(values, w, h, pad = 0) {
     run.push([(i / last) * w, pad + (h - pad * 2) * (1 - clamp(value) / 100)])
   })
   if (run.length > 0) runs.push(run)
+  const total = runs.reduce((n, r) => n + r.length, 0)
+  if (total < 2) return { line: '', area: '', points: total }
   let line = ''
   let area = ''
   for (const points of runs) {
@@ -29,5 +33,5 @@ export function seriesPaths(values, w, h, pad = 0) {
       area += `M${body} L${fmt(xn)} ${h} L${fmt(x0)} ${h} Z `
     }
   }
-  return { line: line.trim(), area: area.trim(), points: runs.reduce((n, r) => n + r.length, 0) }
+  return { line: line.trim(), area: area.trim(), points: total }
 }

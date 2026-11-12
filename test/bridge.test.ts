@@ -225,6 +225,37 @@ describe('only plain data, never over the cap', () => {
     assert.equal(posts[0]?.resync, undefined)
     assert.equal(posts[0]?.machines.length, 30)
     assert.equal(posts[0]?.machines[0]?.cpu.perCore, null)
+    assert.equal(posts[0]?.lean, true, 'marked, so a panel keeps the detail it has')
+  })
+
+  test('detail is left out of the bulkiest machines first: a small machine keeps its per-core values', () => {
+    const small = { ...machine('env-small'), cpu: { ...machine('env-small').cpu, perCore: [10, 20, 30, 40] } }
+    const bulky = (id: string): MachineState => ({ ...machine(id), cpu: { ...machine(id).cpu, perCore: Array.from({ length: 2_048 }, () => 99) } })
+    const entries = [small, ...Array.from({ length: 12 }, (_, i) => bulky(`env-big-${i}`))].map((state) => ({ state, history: new HistoryRing() }))
+    const { bridge, posts } = bridgeOf(entries)
+    bridge.flush()
+    const post = posts[0]!
+    assert.ok(estimateCloneBytes(post) <= 240 * 1024)
+    assert.equal(post.lean, true)
+    const sent = post.machines.find((m) => m.id === 'env-small')!
+    assert.deepEqual(sent.cpu.perCore, [10, 20, 30, 40], 'the small machine keeps live per-core values')
+    assert.equal(sent.lean, undefined)
+    const leaned = post.machines.filter((m) => m.lean === true)
+    assert.ok(leaned.length > 0 && leaned.every((m) => m.id.startsWith('env-big-') && m.cpu.perCore === null))
+    const snap = bridgeOf(entries, { snapshotMaxBytes: 200_000 }).bridge.snapshot()
+    assert.deepEqual(snap.machines.find((m) => m.id === 'env-small')?.cpu.perCore, [10, 20, 30, 40], 'and so does the snapshot')
+  })
+
+  test('only a post or snapshot that left detail out is marked lean', () => {
+    const { bridge, posts } = bridgeOf([{ state: machine('local'), history: new HistoryRing() }, { state: machine('env-a'), history: new HistoryRing() }])
+    bridge.flush()
+    assert.equal(posts[0]?.lean, undefined)
+    assert.equal(bridge.snapshot().lean, undefined)
+    const big = (id: string): MachineState => ({ ...machine(id), cpu: { ...machine(id).cpu, perCore: Array.from({ length: 2_000 }, () => 1) } })
+    const crowded = bridgeOf(Array.from({ length: 40 }, (_, i) => ({ state: big(`env-${i}`), history: new HistoryRing() })), { snapshotMaxBytes: 200_000 })
+    const snap = crowded.bridge.snapshot()
+    assert.equal(snap.machines[0]?.cpu.perCore, null)
+    assert.equal(snap.lean, true)
   })
 })
 

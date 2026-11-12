@@ -156,6 +156,9 @@ export type MachineState = {
   health: Health
   beacon: BeaconState
   updatedAt: number
+  /** Set by the panel bridge on a machine it sent without its per-core values and workspaces, to
+   *  fit Orca's size caps; a panel keeps the ones it already holds for it. */
+  lean?: true
 }
 
 export type MachineView = MachineState & { history: HistoryColumns }
@@ -191,6 +194,9 @@ export type FleetSnapshot = {
   machines: MachineView[]
   /** Machines left out because even without their detail they would not fit Orca's answer cap. */
   omitted?: number
+  /** Set when some machines came without their per-core values and workspaces, to fit the cap
+   *  (each is marked `lean`); a panel keeps the ones it already holds (fleet-binding.mjs). */
+  lean?: true
 }
 
 /** Posted as `fleet.update`: current states without history, plus each machine's most recent
@@ -213,4 +219,7 @@ export type FleetUpdate = {
   appended: Record<string, HistoryColumns>
   /** Set when a full update would be too large to post; the panel should re-fetch. */
   resync?: true
+  /** Set when some states came without their per-core values and workspaces, to fit the cap
+   *  (each is marked `lean`); a panel keeps the ones it already holds rather than drop them. */
+  lean?: true
 }

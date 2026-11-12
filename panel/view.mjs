@@ -4,7 +4,7 @@
 // ever becomes text nodes or attribute values; see dom.mjs.
 import { seriesPaths } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
-import { INSTALL_SOURCE, toFleet } from './fleet-binding.mjs'
+import { INSTALL_SOURCE, MAX_CORES_DRAWN, toFleet } from './fleet-binding.mjs'
 import { ago, duration, gb, loads, pct, share, size } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
@@ -168,9 +168,10 @@ function spark(values, tone) {
   )
 }
 
-function cardAria(m) {
+/** `now` is the worker's clock, as the card's own "Last seen" text uses. */
+function cardAria(m, now) {
   if (m.status === 'connecting') return `${m.name}, connecting. Open details.`
-  if (!m.online) return `${m.name}, offline.${m.lastSeenAt === null ? '' : ` Last seen ${ago(m.lastSeenAt)}.`} Open details.`
+  if (!m.online) return `${m.name}, offline.${m.lastSeenAt === null ? '' : ` Last seen ${ago(m.lastSeenAt, now)}.`} Open details.`
   const cpu = m.cpu.estimated
     ? m.cpu.pct === null
       ? 'no CPU estimate'
@@ -206,7 +207,7 @@ function skeletonMetrics() {
 }
 
 function card(m, now) {
-  const props = { type: 'button', 'data-key': `card:${m.id}`, 'data-action': 'open', 'data-id': m.id, 'aria-label': cardAria(m) }
+  const props = { type: 'button', 'data-key': `card:${m.id}`, 'data-action': 'open', 'data-id': m.id, 'aria-label': cardAria(m, now) }
   if (m.status === 'connecting') {
     return h(
       'button',
@@ -456,7 +457,11 @@ function cpuSection(m) {
     h('div', { class: 'fm-reading' }, big(m.cpu.pct, true), h('span', { class: 'fm-sub' }, statsText(m.cpu.stats))),
     estimateNote(m),
     chart(m.cpu.history, m.cpu.tone, chartLabel(m.cpu.estimated ? 'CPU estimate' : 'CPU', m.cpu.pct, m.cpu.stats)),
-    m.cpu.groups ? cores(m.cpu.groups) : null
+    m.cpu.groups
+      ? cores(m.cpu.groups)
+      : m.cpu.coresHidden > 0
+        ? h('p', { class: 'fm-note', 'data-key': 'cores-hidden' }, `Per-core load is not drawn above ${MAX_CORES_DRAWN} cores.`)
+        : null
   )
 }
 

@@ -11,6 +11,7 @@ export const INSTALL_SOURCE: string
 export const LAUNCHERS: readonly ['orca', 'orca-ide']
 export const DEFAULT_THRESHOLDS: FleetThresholds
 export const LEVEL_LABELS: Readonly<Record<HealthLevel | 'unknown', string>>
+export const MAX_CORES_DRAWN: number
 
 export type FleetReadyView = {
   ready: true
@@ -98,6 +99,8 @@ export type MachineModel = {
     history: (number | null)[]
     stats: Stats | null
     groups: CoreGroupModel[] | null
+    /** How many cores there are when more than MAX_CORES_DRAWN (then `groups` is null); else 0. */
+    coresHidden: number
   }
   mem: {
     pct: number | null
@@ -153,6 +156,10 @@ export function windowStats(
 ): Stats | null
 export function newestReading(columns: HistoryColumns | null | undefined, key: 'cpu' | 'mem'): { value: number; t: number } | null
 export function safeMachineName(name: unknown): boolean
+/** A server name as Orca's CLI compares it: trimmed, unquoted, case ignored. */
+export function typedName(name: unknown): string
+/** A lean machine state with the per-core values and workspaces the panel already holds. */
+export function keepDetail<T extends Partial<MachineView>>(state: T, previous: Partial<MachineView> | undefined): T
 export function installCommand(
   machine: { id: string; name: string },
   options?: { launcher?: string; ambiguous?: boolean }

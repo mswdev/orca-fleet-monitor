@@ -15,6 +15,8 @@ import {
 import { ago, duration, gb, loads, pct, share, size } from '../panel/format.mjs'
 import { DEFAULT_HEALTH } from '../src/health.ts'
 import type { MachineView } from '../src/model.ts'
+import { SAMPLE_THRESHOLDS, sampleSnapshot } from '../tools/preview/sample-fleet.mjs'
+import { readFileSync } from 'node:fs'
 
 const NOW = 1_800_000_000_000
 const MIN = 60_000
@@ -191,6 +193,56 @@ describe('toFleet', () => {
     assert.match(odd.machines[0]!.install?.command ?? '', /^orca plugin install/, 'only a known launcher name')
   })
 
+  test('a name the CLI reads as this computer, or that another server answers to under Orca\'s comparison, gets the id', () => {
+    const basicMachine = (id: string, name: string) =>
+      machine({ id, name, tier: 'basic', cpu: { percent: 1, source: 'load', perCore: null, groups: null }, beacon: { state: 'absent', ageMs: null, seq: null, pluginKey: null, remotePlugin: 'absent' } })
+    const commands = (...remotes: MachineView[]) =>
+      toFleet(view([machine({ id: 'local', kind: 'local', name: 'Desk' }), ...remotes]), NOW).machines.slice(1).map((m) => m.install?.command)
+    const byName = (name: string) => `orca plugin install ${INSTALL_SOURCE} --environment "${name}"`
+    const byId = (id: string) => `orca plugin install ${INSTALL_SOURCE} --environment=${id}`
+    // `--environment local` is this computer, whatever the case, and quoted too.
+    for (const name of ['local', 'LOCAL', 'Local', "'local'", "'Local'"]) {
+      assert.deepEqual(commands(basicMachine('env-1', name)), [byId('env-1')], name)
+      assert.equal(installCommand({ id: 'env-1', name }), byId('env-1'), name)
+    }
+    // Orca matches names trimmed, unquoted and ignoring case: these pairs are one name to it.
+    assert.deepEqual(commands(basicMachine('env-1', 'Build Box'), basicMachine('env-2', 'build box')), [byId('env-1'), byId('env-2')])
+    assert.deepEqual(commands(basicMachine('env-1', 'Build Box'), basicMachine('env-2', "'Build Box'")), [byId('env-1'), byId('env-2')])
+    assert.deepEqual(commands(basicMachine('env-1', 'Build Box'), basicMachine('env-2', 'BUILD BOX ')), [byId('env-1'), byId('env-2')])
+    // Orca takes an exact id before any name: a name that is another server's id is not its own.
+    assert.deepEqual(commands(basicMachine('env-1', 'env-2'), basicMachine('env-2', 'Other')), [byId('env-1'), byName('Other')])
+    // Different names, and a name like this computer's (not a selector), stay names.
+    assert.deepEqual(commands(basicMachine('env-1', 'Build Box'), basicMachine('env-2', 'Build Box 2'), basicMachine('env-3', 'Desk')), [
+      byName('Build Box'),
+      byName('Build Box 2'),
+      byName('Desk')
+    ])
+  })
+
+  test('more cores than are drawn one by one are counted, not left out unsaid', () => {
+    const many = only(machine({ host: { ...machine().host, cores: 300 }, cpu: { percent: 40, source: 'beacon', perCore: Array.from({ length: 300 }, () => 40), groups: null } }))
+    assert.equal(many.cpu.groups, null)
+    assert.equal(many.cpu.coresHidden, 300)
+    const drawn = only(machine({ cpu: { percent: 40, source: 'beacon', perCore: Array.from({ length: 256 }, () => 40), groups: null } }))
+    assert.equal(drawn.cpu.coresHidden, 0)
+    assert.equal(drawn.cpu.groups?.[0]?.values.length, 256)
+  })
+
+  test('bidirectional controls in remote text are neutralized here too', () => {
+    const rlo = '‮'
+    const m = only(
+      machine({
+        name: `${rlo}evil`,
+        error: `bad${rlo}thing`,
+        host: { ...machine().host, cpuModel: `chip⁦x` },
+        workspaces: { byCpu: [{ id: 'w1', name: `ws‏name`, repo: `re؜po`, cpu: 50, memory: 1, sessions: 1 }], byMemory: [] }
+      })
+    )
+    const shown = [m.name, m.error, m.chip, m.workspaces[0]!.name, m.workspaces[0]!.repo].join(' ')
+    assert.ok(!/[؜‎‏‪-‮⁦-⁩]/.test(shown), JSON.stringify(shown))
+    assert.equal(m.name, '�evil')
+  })
+
   test('names from the data never reach Object.prototype, and absurd figures are clamped', () => {
     const odd = only(
       machine({
@@ -323,6 +375,30 @@ describe('installCommand', () => {
   })
 })
 
+test('the preview and the listing images are judged on the thresholds Fleet Monitor ships with', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../orca-plugin.json', import.meta.url), 'utf8')) as {
+    contributes: { settings: { key: string; default: unknown }[] }
+  }
+  const setting = (key: string) => manifest.contributes.settings.find((s) => s.key === key)?.default
+  const shipped = {
+    cpu: { busy: setting('cpuBusyPercent'), strained: setting('cpuStrainedPercent'), critical: setting('cpuCriticalPercent') },
+    memory: { busy: setting('memoryBusyPercent'), strained: setting('memoryStrainedPercent'), critical: setting('memoryCriticalPercent') }
+  }
+  assert.deepEqual(DEFAULT_HEALTH, shipped)
+  assert.deepEqual(SAMPLE_THRESHOLDS, shipped)
+  const snapshot = sampleSnapshot('live', NOW)
+  assert.deepEqual(snapshot.thresholds, shipped)
+  const fleet = toFleet({ ready: true, error: null, ...snapshot }, NOW)
+  const levels = Object.fromEntries(fleet.machines.map((m) => [m.name, m.health]))
+  // Still a spread of health levels to show, each as the worker would judge it.
+  assert.deepEqual(levels, { 'MacBook Pro': 'ok', 'Mac Studio': 'strained', 'Mac mini': 'busy', 'ci-runner-02': 'busy', 'MacBook Air': 'unknown' })
+  for (const m of fleet.machines.filter((x) => x.online && !x.cpu.estimated)) {
+    const worst = [levelFor(m.cpu.pct, shipped.cpu as typeof DEFAULT_HEALTH.cpu), levelFor(m.mem.pct, shipped.memory as typeof DEFAULT_HEALTH.memory)]
+    const rank = ['ok', 'busy', 'strained', 'critical']
+    assert.equal(m.health, worst.sort((a, b) => rank.indexOf(b) - rank.indexOf(a))[0], m.name)
+  }
+})
+
 describe('chart paths', () => {
   test('spread points evenly and keep gaps open', () => {
     const p = seriesPaths([null, 0, 100, null, 50], 100, 10, 0)
@@ -333,6 +409,13 @@ describe('chart paths', () => {
 
   test('nothing to draw is empty', () => {
     assert.deepEqual(seriesPaths(new Array(30).fill(null), 300, 72), { line: '', area: '', points: 0 })
+  })
+
+  test('a single reading in all (a worker just started) draws no lone dot', () => {
+    const one = [...new Array(29).fill(null), 42]
+    assert.deepEqual(seriesPaths(one, 100, 28, 2), { line: '', area: '', points: 1 })
+    assert.deepEqual(seriesPaths([42], 300, 72), { line: '', area: '', points: 1 })
+    assert.equal(seriesPaths([...new Array(28).fill(null), 40, 42], 100, 28, 2).line, 'M96.6 16.4 L100 15.9', 'two readings are a line')
   })
 })
 

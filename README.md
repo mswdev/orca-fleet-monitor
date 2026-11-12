@@ -29,7 +29,9 @@ A machine's health is the worse of its CPU level and its memory level, each judg
   - That adds measured CPU, per-core CPU (with the P-core/E-core split on Apple silicon), 5- and 15-minute load, uptime and the chip.
   - When a machine reaches the full tier, the readings still in its log (about the last 16 minutes) fill the gaps in its history. They are only added where there is no reading yet; none taken before is replaced.
   - A Mac's own readings carry no trustworthy memory figure (macOS counts reclaimable cache as used), so **memory history is not back-filled for Mac servers**. Their memory chart starts when Fleet Monitor first reads them.
-  - If a machine's readings stop arriving (its log cannot be read, or its worker stopped), it goes back to the basic tier within about 20 seconds, and its diagnostics drive its readings and history again.
+  - A full-tier machine's readings count as current while they are at most three beacon intervals (15 seconds) older than when this computer last asked for them. So it stays at the full tier between reads as far apart as the fast or slow interval sets them (once a minute with no panel open, by default), and while a read runs up to a minute late because a round of reads is slowed by many machines.
+  - If its readings stop arriving (its log cannot be read or times out, or its worker stopped), it goes back to the basic tier: within about 20 seconds while a panel is open (at the default 5-second fast interval), and at the next read otherwise. Its diagnostics then drive its readings and history again.
+  - Its newest reading is the last one its log holds, whatever its clock says. A remote clock set back or forward is measured again at once, so it costs the full tier a second or so at most.
 
 This computer is always read directly (Node's `os` module plus Orca's diagnostics), so it is always full.
 
@@ -51,7 +53,7 @@ On a paired Orca server, for the full tier, run this **on this computer** with t
 orca plugin install mswdev/orca-fleet-monitor --environment "Build Box"
 ```
 
-A basic machine's detail screen offers this command, filled in, with a Copy button. Because the server's name comes from that server, the command uses it only when it is plain text: ASCII letters, digits, spaces, `.`, `_`, `-` and `'`, not starting with `-`, and not shared with another paired server. Otherwise it uses the server's id instead (`--environment=<id>`), and if even that is not plain, it offers no command, only directions.
+A basic machine's detail screen offers this command, filled in, with a Copy button. Because the server's name comes from that server, the command uses it only when it is plain text (ASCII letters, digits, spaces, `.`, `_`, `-` and `'`, not starting with `-`) and names that server alone to the CLI: not `local` in any case or quotes, which the CLI reads as this computer, and not a name another paired server also answers to. The CLI matches names ignoring case, surrounding spaces and quotes, and takes a server's id before any name. Otherwise the command uses the server's id instead (`--environment=<id>`), and if even that is not plain, it offers no command, only directions.
 
 Fleet Monitor never installs anything by itself. Because it runs code, the first `install` stops with `approval_required`, lists what the plugin would be allowed to do, and prints the exact command (with `--approve <fingerprint>`) that installs it.
 
@@ -82,15 +84,16 @@ Anyone who can read that machine's plugin logs can read these lines: someone on 
 A paired server, the CLI answers about it and its log lines are treated as untrusted: a broken or hostile server must not break the panel for the others.
 
 - Every name, error message and list from another machine is cut to a fixed length and count as it comes in. Plugin keys and environment ids must look like one before they go into a CLI argument.
+- Unicode bidirectional controls in its text become U+FFFD (`�`), so they cannot reorder what the panel or status bar draws.
 - Beacon values are bounded too (cores, uptime, memory, the beacon interval).
-- Only plain data reaches the panel, and the panel's snapshot always fits Orca's 1 MiB limit: history is thinned first, then detail is dropped, then machines are left out (and counted).
+- Only plain data reaches the panel, and the panel's snapshot always fits Orca's 1 MiB limit: history is thinned first, then detail is dropped, then machines are left out (and counted). An update that would pass Orca's 256 KiB post limit is sent without per-core load and workspaces, and the panel keeps the ones it already shows.
 - The panel puts remote text into the page only as text, never as markup.
 
 ## Cost and access
 
 Each CLI call starts a short-lived process (about 0.3 s, mostly start-up). Machines are polled quickly (every 5 s by default) only while a Fleet Monitor panel is open, and slowly (every 60 s, or not at all with background monitoring off) otherwise. On the full tier, memory and workspaces are read every 15 s rather than every 5 s.
 
-At most two CLI calls run at once for this computer and the machines that answer. Machines that are connecting, offline or failing get two slots of their own, so one that hangs until the 15-second timeout never delays the others. An unreachable machine is retried with growing back-off, and so are a plugin list or a plugin log that cannot be read.
+At most two CLI calls run at once for this computer and the machines that answer. A machine moves to two slots of its own as soon as a call to it fails or times out, and stays there while it is connecting, offline or failing; a plugin list or plugin log that keeps failing is retried there too. So a machine that stops answering can hold up the others for one call, until the 15-second timeout, and not after; while their reads wait (up to a minute), their readings still count as current. An unreachable machine is retried with growing back-off, and so are a plugin list or a plugin log that cannot be read.
 
 It is a full-access (`trusted-worker`) plugin: its worker runs as a Node process on your machine.
 
@@ -120,7 +123,7 @@ npm run typecheck             # orca plugin types ., then TypeScript with --noEm
 
 ### Previewing the panel with sample data
 
-`tools/preview/` runs the real panel code against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`, after the design's own sample): every state (overview, detail, basic, offline, loading, nothing paired, a machine connecting, an unreachable worker), in light and dark and with three invented host themes, at 220, 360 and 700 px. No real machine names appear, so its images are safe for listings.
+`tools/preview/` runs the real panel code against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`, after the design's own sample, judged on the default thresholds): every state (overview, detail, basic, offline, loading, nothing paired, a machine connecting, an unreachable worker), in light and dark and with three invented host themes, at 220, 360 and 700 px. No real machine names appear, so its images are safe for listings.
 
 ```sh
 node tools/preview-server.mjs           # then open http://127.0.0.1:4173/tools/preview/
