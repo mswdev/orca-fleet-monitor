@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # The Orca release whose CLI runs the tests and writes the typings. Bump both lines together:
+  # the hash is the .deb's sha512 from that release's latest-linux.yml.
+  ORCA_VERSION: "1.4.257"
+  ORCA_DEB_SHA512: "SIhUxsvRvUbiAcxUXJTx5UBNT5LOd7/hyVl+0lFFFbaxkq1+FcqVwenIRzyItmZ3nEzwAAHUmM8cCnWJEMaOJQ=="
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Cache the Orca package
+        id: orca-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/orca-deb
+          key: orca-deb-${{ env.ORCA_VERSION }}-linux-x64
+      - name: Download Orca
+        if: steps.orca-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/orca-deb"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/orca-deb/orca.deb" \
+            "https://github.com/stablyai/orca/releases/download/v${ORCA_VERSION}/orca-ide_${ORCA_VERSION}_amd64.deb"
+      # `orca plugin test` and `orca plugin types` need the desktop app's CLI: the server-only
+      # tarball ships neither the typings nor the orca/testing modules. Nothing is installed or
+      # started; the CLI runs in Electron's Node mode, like the `orca` command on a Mac.
+      - name: Put the Orca CLI on PATH
+        run: |
+          deb="$RUNNER_TEMP/orca-deb/orca.deb"
+          actual="$(openssl dgst -sha512 -binary "$deb" | base64 -w0)"
+          if [ "$actual" != "$ORCA_DEB_SHA512" ]; then
+            echo "::error::orca-ide_${ORCA_VERSION}_amd64.deb does not match ORCA_DEB_SHA512."
+            exit 1
+          fi
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/orca"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/orca/opt/Orca/resources/bin/orca-ide" "$RUNNER_TEMP/bin/orca"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: orca --version
+
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run validate
+      - run: npm test
