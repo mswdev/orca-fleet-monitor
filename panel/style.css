@@ -1,117 +1,905 @@
-/* Placeholder styles. Colours come only from Orca's frame variables (--orca-*). */
+/* Fleet Monitor panel, after the visual design (Main.dc.html).
+ *
+ * Colours: Orca bakes the user's theme into every frame as --orca-* variables (a style element on
+ * :root, ahead of this file) and puts a `light` or `dark` class on <html>. This file never sets an
+ * --orca-* variable, so the host's values always win; it reads them into --fm-* tokens with the
+ * design's colours only as fallbacks, for a frame that has no host (the preview). The four health
+ * colours are Fleet Monitor's own, with a light and a dark variant chosen by Orca's class. */
+
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+  --fm-bg: var(--orca-background, #f6f6f7);
+  --fm-fg: var(--orca-foreground, #1a1b1f);
+  --fm-card: var(--orca-card, #ffffff);
+  --fm-card-fg: var(--orca-card-foreground, #1a1b1f);
+  --fm-muted: var(--orca-muted, #eeeef1);
+  --fm-muted-fg: var(--orca-muted-foreground, #5f6370);
+  --fm-accent: var(--orca-accent, #e8e9ee);
+  --fm-primary: var(--orca-primary, #2a62e0);
+  --fm-on-primary: var(--orca-primary-foreground, #ffffff);
+  --fm-border: var(--orca-border, #dfe0e6);
+  --fm-ring: var(--orca-ring, var(--fm-primary));
+  --fm-radius: var(--orca-radius, 8px);
+  --fm-health-ok: #15803d;
+  --fm-health-busy: #a16207;
+  --fm-health-strained: #c2410c;
+  --fm-health-critical: #b91c1c;
+  --fm-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+/* Dark: Orca's `dark` class, or the system setting when nothing says otherwise (the preview). */
+html.dark {
+  color-scheme: dark;
+  --fm-bg: var(--orca-background, #131316);
+  --fm-fg: var(--orca-foreground, #ececf1);
+  --fm-card: var(--orca-card, #1b1c20);
+  --fm-card-fg: var(--orca-card-foreground, #ececf1);
+  --fm-muted: var(--orca-muted, #26272d);
+  --fm-muted-fg: var(--orca-muted-foreground, #a0a3ad);
+  --fm-accent: var(--orca-accent, #2d2e36);
+  --fm-primary: var(--orca-primary, #7aa2ff);
+  --fm-on-primary: var(--orca-primary-foreground, #0d1326);
+  --fm-border: var(--orca-border, #2f3038);
+  --fm-health-ok: #4ade80;
+  --fm-health-busy: #facc15;
+  --fm-health-strained: #fb923c;
+  --fm-health-critical: #f87171;
+}
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) {
+    color-scheme: dark;
+    --fm-bg: var(--orca-background, #131316);
+    --fm-fg: var(--orca-foreground, #ececf1);
+    --fm-card: var(--orca-card, #1b1c20);
+    --fm-card-fg: var(--orca-card-foreground, #ececf1);
+    --fm-muted: var(--orca-muted, #26272d);
+    --fm-muted-fg: var(--orca-muted-foreground, #a0a3ad);
+    --fm-accent: var(--orca-accent, #2d2e36);
+    --fm-primary: var(--orca-primary, #7aa2ff);
+    --fm-on-primary: var(--orca-primary-foreground, #0d1326);
+    --fm-border: var(--orca-border, #2f3038);
+    --fm-health-ok: #4ade80;
+    --fm-health-busy: #facc15;
+    --fm-health-strained: #fb923c;
+    --fm-health-critical: #f87171;
+  }
+}
+
+/* Stronger health colours, used only when the theme's surfaces would leave the design's ones
+ * under 4.5:1 (set by contrast.mjs after measuring the live theme). */
+html[data-fm-contrast='more'] {
+  --fm-health-ok: #166534;
+  --fm-health-busy: #854d0e;
+  --fm-health-strained: #9a3412;
+  --fm-health-critical: #991b1b;
+}
+html.dark[data-fm-contrast='more'] {
+  --fm-health-ok: #86efac;
+  --fm-health-busy: #fde047;
+  --fm-health-strained: #fdba74;
+  --fm-health-critical: #fca5a5;
+}
+
+html,
 body {
   margin: 0;
-  padding: 10px;
-  font: 12px/1.4 system-ui, sans-serif;
-  color: var(--orca-foreground);
-  background: var(--orca-background);
+  background: var(--fm-bg);
 }
-.muted {
-  color: var(--orca-muted-foreground);
+
+.fm,
+.fm *,
+.fm *::before,
+.fm *::after {
+  box-sizing: border-box;
 }
-.error {
-  color: var(--orca-destructive);
+
+.fm {
+  display: block;
+  width: 100%;
+  min-width: 220px;
+  max-width: 700px;
+  padding: 0 clamp(8px, 4%, 14px) 16px;
+  background: var(--fm-bg);
+  color: var(--fm-fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
 }
-.machine {
-  border: 1px solid var(--orca-border);
-  border-radius: var(--orca-radius, 6px);
-  background: var(--orca-card);
-  color: var(--orca-card-foreground);
-  padding: 8px 10px;
-  margin-bottom: 8px;
+.fm button {
+  font: inherit;
 }
-.machine.is-offline {
-  opacity: 0.6;
+.fm button:focus-visible {
+  outline: 2px solid var(--fm-ring);
+  outline-offset: 2px;
 }
-.machine.level-strained,
-.machine.level-critical {
-  border-color: var(--orca-destructive);
+.fm-ghost:hover {
+  background: var(--fm-accent);
 }
-header {
+.fm-flex-none {
+  flex: none;
+}
+
+/* Health of a machine sets --fm-level; the level of one metric sets --fm-tone. Charts stay in the
+ * primary colour until the metric is elevated. */
+[data-health='ok'] {
+  --fm-level: var(--fm-health-ok);
+}
+[data-health='busy'] {
+  --fm-level: var(--fm-health-busy);
+}
+[data-health='strained'] {
+  --fm-level: var(--fm-health-strained);
+}
+[data-health='critical'] {
+  --fm-level: var(--fm-health-critical);
+}
+[data-health='unknown'] {
+  --fm-level: var(--fm-muted-fg);
+}
+[data-tone='ok'] {
+  --fm-tone: var(--fm-primary);
+  --fm-tone-text: var(--fm-card-fg);
+}
+[data-tone='busy'] {
+  --fm-tone: var(--fm-health-busy);
+  --fm-tone-text: var(--fm-health-busy);
+}
+[data-tone='strained'] {
+  --fm-tone: var(--fm-health-strained);
+  --fm-tone-text: var(--fm-health-strained);
+}
+[data-tone='critical'] {
+  --fm-tone: var(--fm-health-critical);
+  --fm-tone-text: var(--fm-health-critical);
+}
+
+/* Level pips: one to four bars lit. */
+.fm-pips {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 10px;
+}
+.fm-pips > span {
+  width: 3px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.28;
+}
+.fm-pips > span:nth-child(1) {
+  height: 4px;
+}
+.fm-pips > span:nth-child(2) {
+  height: 6px;
+}
+.fm-pips > span:nth-child(3) {
+  height: 8px;
+}
+.fm-pips > span:nth-child(4) {
+  height: 10px;
+}
+[data-health='ok'] .fm-pips > span:nth-child(-n + 1),
+[data-health='busy'] .fm-pips > span:nth-child(-n + 2),
+[data-health='strained'] .fm-pips > span:nth-child(-n + 3),
+[data-health='critical'] .fm-pips > span {
+  opacity: 1;
+}
+
+/* --- header ------------------------------------------------------------------------------------ */
+
+.fm-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* The design's 10px below the header, 4px of it as margin: a focus ring on the first card
+   * then shows instead of sliding under the sticky header. */
+  padding: 12px 0 6px;
+  margin-bottom: 4px;
+  background: var(--fm-bg);
+}
+.fm-top-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fm-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.fm-summary {
+  margin: 1px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--fm-muted-fg);
+}
+.fm-icon-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--fm-muted-fg);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fm-icon-btn[aria-expanded='true'] {
+  color: var(--fm-fg);
+  background: var(--fm-accent);
+}
+.fm-hint {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  font-size: 12px;
+  color: var(--fm-muted-fg);
+  background: var(--fm-muted);
+  border-radius: var(--fm-radius);
+}
+.fm-hint svg {
+  margin-top: 1px;
+}
+.fm-hint p {
+  margin: 0;
+}
+.fm-hint strong {
+  font-weight: 600;
+  color: var(--fm-fg);
+}
+
+/* --- overview ---------------------------------------------------------------------------------- */
+
+.fm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
+  gap: 10px;
+}
+.fm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  text-align: left;
+  color: var(--fm-card-fg);
+  background: var(--fm-card);
+  border: 1px solid var(--fm-border);
+  border-radius: var(--fm-radius);
+  cursor: pointer;
+}
+.fm-card:hover {
+  border-color: var(--fm-muted-fg);
+}
+.fm-card--offline,
+.fm-card--waiting {
+  gap: 6px;
+  color: var(--fm-muted-fg);
+  background: transparent;
+}
+.fm-card--waiting {
+  gap: 12px;
+}
+.fm-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.fm-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fm-level);
+}
+.fm-dot--hollow {
+  background: transparent;
+  border: 1.5px solid var(--fm-muted-fg);
+}
+.fm-name {
+  flex: 1 1 64px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.fm-tag {
+  flex: none;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--fm-muted-fg);
+  border: 1px solid var(--fm-border);
+  border-radius: 4px;
+}
+.fm-level {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fm-level);
+}
+.fm-state {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fm-muted-fg);
+}
+.fm-card-note {
+  font-size: 11px;
+}
+.fm-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+}
+.fm-metric {
+  flex: 1 1 80px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fm-metric-label {
+  font-size: 11px;
+  color: var(--fm-muted-fg);
+}
+.fm-metric-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+}
+.fm-big {
+  font-family: var(--fm-mono);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--fm-tone-text);
+}
+.fm-unit {
+  font-size: 12px;
+  font-weight: 500;
+}
+.fm-big--lg {
+  font-size: 24px;
+}
+.fm-big--lg .fm-unit {
+  font-size: 13px;
+}
+.fm-sub {
+  font-family: var(--fm-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--fm-muted-fg);
+}
+.fm-sub--xs {
+  font-size: 10px;
+}
+.fm-spark {
+  display: block;
+  width: 100%;
+  height: 28px;
+  overflow: visible;
+  color: var(--fm-tone);
+}
+.fm-area {
+  fill: currentColor;
+  fill-opacity: 0.12;
+}
+.fm-plot .fm-area {
+  fill-opacity: 0.14;
+}
+.fm-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Skeletons: loading, and a machine read for the first time. */
+.fm-skel {
+  animation: fm-pulse 1.4s ease-in-out infinite;
+}
+@keyframes fm-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fm-skel {
+    animation: none;
+  }
+}
+.fm-skel-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: var(--fm-card);
+  border: 1px solid var(--fm-border);
+  border-radius: var(--fm-radius);
+}
+.fm-skel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fm-skel-bar {
+  background: var(--fm-muted);
+  border-radius: 4px;
+}
+.fm-skel-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.fm-skel-end {
+  margin-left: auto;
+}
+.fm-skel-row {
+  display: flex;
+  gap: 12px;
+}
+.fm-skel-col {
+  flex: 1 1 0%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fm-skel-col > .fm-skel-bar:first-child {
+  border-radius: 3px;
+}
+
+/* Nothing paired (only this computer). */
+.fm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 36px 8px 20px;
+  text-align: center;
+}
+.fm-empty-icon {
+  color: var(--fm-muted-fg);
+}
+.fm-empty h2 {
+  margin: 6px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.fm-empty p {
+  max-width: 250px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fm-muted-fg);
+}
+.fm-empty .fm-path {
+  max-width: 100%;
+  margin-top: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fm-fg);
+  background: var(--fm-muted);
+  border-radius: 6px;
+}
+.fm-notice {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  font-size: 12px;
+  color: var(--fm-muted-fg);
+  background: var(--fm-muted);
+  border-radius: var(--fm-radius);
+  overflow-wrap: anywhere;
+}
+
+/* --- detail ------------------------------------------------------------------------------------ */
+
+.fm-top--detail {
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 10px 0 6px;
+}
+.fm-back {
+  margin-left: -4px;
+  color: var(--fm-fg);
+}
+.fm-detail-id {
+  flex: 1 1 96px;
+  min-width: 0;
+}
+.fm-detail-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.fm-detail-name {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+.fm-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+  gap: 10px;
+  align-items: start;
+}
+.fm-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  color: var(--fm-card-fg);
+  background: var(--fm-card);
+  border: 1px solid var(--fm-border);
+  border-radius: var(--fm-radius);
+}
+.fm-section h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.fm-section p {
+  margin: 0;
+}
+.fm-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.fm-reading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+.fm-note {
+  font-size: 11px;
+  color: var(--fm-muted-fg);
+}
+.fm-chart {
   display: flex;
   gap: 6px;
-  align-items: center;
 }
-.name {
-  font-weight: 600;
-  flex: 1;
+.fm-yaxis {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 72px;
+  font-family: var(--fm-mono);
+  font-size: 10px;
+  line-height: 1;
+  text-align: right;
+  color: var(--fm-muted-fg);
+}
+.fm-plot {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fm-plot svg {
+  display: block;
+  width: 100%;
+  height: 72px;
+  overflow: visible;
+  color: var(--fm-tone);
+}
+.fm-gridline {
+  stroke: var(--fm-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.fm-gridline--mid {
+  stroke-dasharray: 2 3;
+}
+.fm-xaxis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 5px;
+  font-family: var(--fm-mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fm-muted-fg);
+}
+.fm-cores-head {
+  margin-bottom: 6px;
+}
+.fm-cores h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fm-muted-fg);
+}
+.fm-core-groups {
+  display: flex;
+  gap: 8px;
+}
+.fm-core-group {
+  flex: 1 1 0%;
+  min-width: 0;
+}
+.fm-core-bars {
+  display: flex;
+  gap: 2px;
+  height: 40px;
+}
+.fm-core-bars--dense {
+  gap: 1px;
+}
+.fm-core {
+  flex: 1 1 0%;
+  min-width: 2px;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+  background: var(--fm-muted);
+  border-radius: 2px;
+}
+.fm-core-bars--dense .fm-core {
+  min-width: 1px;
+  border-radius: 1px;
+}
+.fm-core-fill {
+  width: 100%;
+  background: var(--fm-tone);
+}
+.fm-core-label {
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--fm-muted-fg);
+}
+
+/* Top workspaces */
+.fm-ws-head,
+.fm-ws {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px 58px;
+  column-gap: 8px;
+}
+.fm-ws-head {
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--fm-muted-fg);
+}
+.fm-ws-head span + span {
+  text-align: right;
+}
+.fm-ws-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fm-ws {
+  row-gap: 4px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.fm-ws-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.badge {
-  font-size: 10px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--orca-secondary);
-  color: var(--orca-secondary-foreground);
+.fm-ws-cpu,
+.fm-ws-mem {
+  font-family: var(--fm-mono);
+  text-align: right;
+  white-space: nowrap;
 }
-.level-busy .health {
-  background: var(--orca-primary);
-  color: var(--orca-primary-foreground);
+.fm-ws-mem {
+  color: var(--fm-muted-fg);
 }
-.level-strained .health,
-.level-critical .health {
-  background: var(--orca-destructive);
-  color: var(--orca-destructive-foreground);
+.fm-ws-bar {
+  grid-column: 1 / -1;
+  display: block;
+  height: 3px;
+  overflow: hidden;
+  background: var(--fm-muted);
+  border-radius: 2px;
 }
-dl {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 2px 10px;
-  margin: 6px 0;
+.fm-ws-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--fm-primary);
+  border-radius: 2px;
 }
-dt {
-  color: var(--orca-muted-foreground);
+
+/* Basic tier: install Fleet Monitor there */
+.fm-install {
+  grid-column: 1 / -1;
+  background: var(--fm-muted);
+  border-radius: var(--fm-radius);
 }
-dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-}
-.cores {
+.fm-install-toggle {
   display: flex;
-  gap: 2px;
-  height: 18px;
-  align-items: flex-end;
-  margin: 4px 0;
-}
-.core {
-  flex: 1;
-  height: calc(var(--v) * 1%);
-  min-height: 1px;
-  background: var(--orca-primary);
-}
-.sparks {
-  display: grid;
-  gap: 2px;
-}
-.spark {
+  align-items: center;
+  gap: 10px;
   width: 100%;
+  padding: 9px 12px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--fm-muted-fg);
+  background: transparent;
+  border: 0;
+  border-radius: var(--fm-radius);
+  cursor: pointer;
+}
+.fm-install-toggle:hover {
+  background: var(--fm-accent);
+}
+.fm-install-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fm-chevron {
+  flex: none;
+  transition: transform 120ms ease;
+}
+.is-open .fm-chevron {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fm-chevron {
+    transition: none;
+  }
+}
+.fm-install-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Under the label (icon 16 + gap 10 + 12) when there is room, less on a narrow panel. */
+  padding: 0 12px 12px clamp(12px, 9%, 38px);
+  font-size: 12px;
+  color: var(--fm-muted-fg);
+}
+.fm-install-body p {
+  margin: 0;
+}
+.fm-command {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 6px 6px 6px 10px;
+  background: var(--fm-card);
+  border: 1px solid var(--fm-border);
+  border-radius: 6px;
+}
+.fm-command code {
+  flex: 1 1 150px;
+  min-width: 0;
+  font-family: var(--fm-mono);
+  font-size: 11px;
+  color: var(--fm-card-fg);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.fm-word {
+  white-space: nowrap;
+}
+.fm-copy {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fm-fg);
+  background: transparent;
+  border: 1px solid var(--fm-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* Offline */
+.fm-offline,
+.fm-message {
+  grid-column: 1 / -1;
+  align-items: flex-start;
+}
+.fm-offline-row {
+  display: flex;
+  gap: 10px;
+}
+.fm-offline-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--fm-muted-fg);
+}
+.fm-offline-text {
+  min-width: 0;
+}
+.fm-offline-text p,
+.fm-message p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--fm-muted-fg);
+}
+.fm-error-text {
+  font-family: var(--fm-mono);
+  font-size: 11px !important;
+  overflow-wrap: anywhere;
+}
+.fm-btn {
   height: 28px;
-  background: var(--orca-muted);
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fm-fg);
+  background: transparent;
+  border: 1px solid var(--fm-border);
+  border-radius: 6px;
+  cursor: pointer;
 }
-.spark polyline {
-  fill: none;
-  stroke-width: 1.5;
-  vector-effect: non-scaling-stroke;
+.fm-btn[disabled] {
+  cursor: default;
+  opacity: 0.7;
 }
-.spark-cpu polyline {
-  stroke: var(--orca-primary);
+
+/* Facts */
+.fm-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
 }
-.spark-mem polyline {
-  stroke: var(--orca-accent-foreground);
+.fm-fact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 12px;
 }
-.ws ol {
-  margin: 2px 0 4px;
-  padding-left: 18px;
+.fm-fact dt {
+  color: var(--fm-muted-fg);
 }
-.label {
-  color: var(--orca-muted-foreground);
-  margin-top: 4px;
+.fm-fact dd {
+  margin: 0 0 0 auto;
+  font-family: var(--fm-mono);
+  text-align: right;
+  overflow-wrap: anywhere;
 }
-footer {
-  margin-top: 4px;
+.fm-fact-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--fm-muted-fg);
 }

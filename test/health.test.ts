@@ -30,6 +30,15 @@ test('the worse of CPU and memory wins, with its reason', () => {
   assert.deepEqual(both.reasons, ['CPU load 90% ≥ 85%', 'memory 90% ≥ 88%'])
 })
 
+test('each metric keeps its own level, judged on its own thresholds', () => {
+  const h = assessHealth({ online: true, cpu: { percent: 72, source: 'sampler' }, memory: memory(80) }, DEFAULT_HEALTH)
+  assert.deepEqual([h.level, h.cpu, h.memory], ['busy', 'busy', 'busy'])
+  const split = assessHealth({ online: true, cpu: { percent: 72, source: 'sampler' }, memory: memory(10) }, DEFAULT_HEALTH)
+  assert.deepEqual([split.level, split.cpu, split.memory], ['busy', 'busy', 'ok'])
+  const untrusted = assessHealth({ online: true, cpu: { percent: 5, source: 'sampler' }, memory: memory(99, false) }, DEFAULT_HEALTH)
+  assert.equal(untrusted.memory, null, 'memory that cannot be trusted has no level')
+})
+
 test('memory that cannot be trusted does not count', () => {
   const h = assessHealth({ online: true, cpu: { percent: 10, source: 'sampler' }, memory: memory(97, false) }, DEFAULT_HEALTH)
   assert.equal(h.level, 'ok')
@@ -40,7 +49,9 @@ test('offline and no-data machines are unknown', () => {
   assert.equal(assessHealth({ online: false, cpu: { percent: 99, source: 'beacon' }, memory: null }, DEFAULT_HEALTH).level, 'unknown')
   assert.deepEqual(assessHealth({ online: true, cpu: { percent: null, source: null }, memory: null }, DEFAULT_HEALTH), {
     level: 'unknown',
-    reasons: ['no data yet']
+    reasons: ['no data yet'],
+    cpu: null,
+    memory: null
   })
 })
 
@@ -56,7 +67,7 @@ test('worstMachine picks the highest level, then the busiest CPU, and skips offl
       latencyMs: 1,
       error: null,
       beacon: {
-        latest: { ...localSample(), run: 'r', seq: 1, intervalMs: 5000, cpu, perCore: null, memTotal: 10, memFree: 9, loggedAt: 0 },
+        latest: { ...localSample(), run: 'r', seq: 1, intervalMs: 5000, cpu, perCore: null, coreGroups: null, memTotal: 10, memFree: 9, loggedAt: 0 },
         fresh: true,
         ageMs: 0,
         pluginKey: 'local.fleet-monitor',

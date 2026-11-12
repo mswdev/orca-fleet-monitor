@@ -44,37 +44,39 @@ export function assessHealth(
   settings: HealthSettings
 ): Health {
   if (!input.online) {
-    return { level: 'unknown', reasons: ['offline'] }
+    return { level: 'unknown', reasons: ['offline'], cpu: null, memory: null }
   }
   const parts: { level: HealthLevel; reason: string }[] = []
+  let cpu: HealthLevel | null = null
+  let memory: HealthLevel | null = null
   if (input.cpu.percent !== null) {
-    const level = levelFor(input.cpu.percent, settings.cpu)
+    cpu = levelFor(input.cpu.percent, settings.cpu)
     const label = input.cpu.source === 'load' ? 'CPU load' : 'CPU'
     parts.push({
-      level,
+      level: cpu,
       reason:
-        level === 'ok'
-          ? ''
-          : `${label} ${Math.round(input.cpu.percent)}% ≥ ${thresholdOf(level, orderedThresholds(settings.cpu))}%`
+        cpu === 'ok' ? '' : `${label} ${Math.round(input.cpu.percent)}% ≥ ${thresholdOf(cpu, orderedThresholds(settings.cpu))}%`
     })
   }
   if (input.memory && input.memory.reliable) {
-    const level = levelFor(input.memory.percent, settings.memory)
+    memory = levelFor(input.memory.percent, settings.memory)
     parts.push({
-      level,
+      level: memory,
       reason:
-        level === 'ok'
+        memory === 'ok'
           ? ''
-          : `memory ${Math.round(input.memory.percent)}% ≥ ${thresholdOf(level, orderedThresholds(settings.memory))}%`
+          : `memory ${Math.round(input.memory.percent)}% ≥ ${thresholdOf(memory, orderedThresholds(settings.memory))}%`
     })
   }
   if (parts.length === 0) {
-    return { level: 'unknown', reasons: ['no data yet'] }
+    return { level: 'unknown', reasons: ['no data yet'], cpu, memory }
   }
   const worst = parts.reduce((a, b) => (rank(b.level) > rank(a.level) ? b : a))
   return {
     level: worst.level,
-    reasons: parts.filter((p) => p.level === worst.level && p.reason).map((p) => p.reason)
+    reasons: parts.filter((p) => p.level === worst.level && p.reason).map((p) => p.reason),
+    cpu,
+    memory
   }
 }
 

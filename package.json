@@ -1,0 +1,17 @@
+{
+  "name": "orca-fleet-monitor",
+  "private": true,
+  "description": "Development tooling only (type-checking). Orca runs the plugin straight from its source and installs nothing from here.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "orca plugin types . && node node_modules/typescript/bin/tsc --noEmit -p .",
+    "test": "orca plugin test .",
+    "validate": "orca plugin validate .",
+    "preview": "node tools/preview-server.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}

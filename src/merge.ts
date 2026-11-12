@@ -47,13 +47,18 @@ export function mergeMachine(input: MergeInput): MachineState {
   const fresh = beacon?.fresh && beacon.latest ? beacon.latest : null
   const known = local ?? beacon?.latest ?? null
 
-  let cpu: MachineState['cpu'] = { percent: null, source: null, perCore: null }
+  let cpu: MachineState['cpu'] = { percent: null, source: null, perCore: null, groups: null }
   if (local?.cpu) {
-    cpu = { percent: local.cpu.total, source: 'sampler', perCore: local.cpu.perCore }
+    cpu = { percent: local.cpu.total, source: 'sampler', perCore: local.cpu.perCore, groups: local.coreGroups ?? null }
   } else if (fresh && fresh.cpu !== null) {
-    cpu = { percent: fresh.cpu, source: 'beacon', perCore: fresh.perCore }
+    cpu = {
+      percent: fresh.cpu,
+      source: 'beacon',
+      perCore: fresh.perCore,
+      groups: fresh.perCore ? fresh.coreGroups : null
+    }
   } else if (diag) {
-    cpu = { percent: loadEstimate(diag.host.load1, diag.host.cores), source: 'load', perCore: null }
+    cpu = { percent: loadEstimate(diag.host.load1, diag.host.cores), source: 'load', perCore: null, groups: null }
   }
 
   let memory: MachineState['memory'] = null
@@ -119,7 +124,7 @@ export function mergeMachine(input: MergeInput): MachineState {
       ? { cpu: diag.app.cpu, memory: diag.app.memory, totalCpu: diag.totalCpu, totalMemory: diag.totalMemory }
       : null,
     workspaces: diag ? topWorkspaces(diag.workspaces, input.topLimit ?? 5) : { byCpu: [], byMemory: [] },
-    health: { level: 'unknown', reasons: [] },
+    health: { level: 'unknown', reasons: [], cpu: null, memory: null },
     beacon: {
       state: input.kind === 'local' ? 'fresh' : fresh ? 'fresh' : beacon?.latest ? 'stale' : 'absent',
       ageMs: input.kind === 'local' ? 0 : (beacon?.ageMs ?? null),

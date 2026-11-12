@@ -1,4 +1,10 @@
+// Type-checking only (`npm run typecheck`); Orca runs the TypeScript itself.
+// .orca/types comes from `orca plugin types .`, node_modules/@types from `npm install`.
 {
   "extends": "./.orca/types/tsconfig.json",
-  "include": ["src", "test", "tools"]
+  "compilerOptions": {
+    "typeRoots": ["./.orca/types", "./node_modules/@types"],
+    "types": ["orca", "orca-host", "orca-frame", "orca-worker", "orca-services", "orca-testing", "node"]
+  },
+  "include": ["src", "test", "tools", "panel/*.d.mts"]
 }

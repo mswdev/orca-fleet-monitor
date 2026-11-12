@@ -4,6 +4,10 @@ export type HealthLevel = 'ok' | 'busy' | 'strained' | 'critical'
 export type Tier = 'full' | 'basic'
 export type FleetMode = 'fast' | 'slow'
 
+/** A run of `os.cpus()` entries of one kind: `perCore.slice(start, start + count)`. Only Apple
+ *  silicon Macs report a split (see src/core-groups.ts); everywhere else there is none. */
+export type CoreGroup = { kind: 'performance' | 'efficiency'; start: number; count: number }
+
 /** One reading of the machine this worker runs on, from `node:os` only. */
 export type LocalSample = {
   /** Epoch ms on this machine's clock. */
@@ -20,6 +24,8 @@ export type LocalSample = {
   /** `os.freemem()` is not "available" memory on macOS, so this is a fallback only. */
   memory: { total: number; free: number }
   load: [number, number, number]
+  /** How `cpu.perCore` splits into performance and efficiency cores; absent when unknown. */
+  coreGroups?: CoreGroup[] | null
 }
 
 /** A beacon read back from a remote worker's log. Times are on the remote's clock. */
@@ -41,6 +47,8 @@ export type BeaconRecord = {
   memTotal: number
   memFree: number
   load: [number, number, number]
+  /** Only from beacons written by a Fleet Monitor that knows its core split; older ones have none. */
+  coreGroups: CoreGroup[] | null
   /** When the remote Orca appended the log line (remote clock). */
   loggedAt: number
 }
@@ -83,7 +91,13 @@ export type HistoryColumns = { t: number[]; cpu: (number | null)[]; mem: (number
 
 export type HealthThresholds = { busy: number; strained: number; critical: number }
 
-export type Health = { level: HealthLevel | 'unknown'; reasons: string[] }
+/** `level` is the worse of the CPU and memory levels; each is null when it cannot be judged. */
+export type Health = {
+  level: HealthLevel | 'unknown'
+  reasons: string[]
+  cpu: HealthLevel | null
+  memory: HealthLevel | null
+}
 
 export type BeaconState = {
   state: 'fresh' | 'stale' | 'absent'
@@ -120,6 +134,8 @@ export type MachineState = {
     percent: number | null
     source: 'sampler' | 'beacon' | 'load' | null
     perCore: number[] | null
+    /** How `perCore` splits by core kind; null means one group. */
+    groups: CoreGroup[] | null
   }
   memory: {
     total: number
@@ -144,6 +160,9 @@ export type MachineView = MachineState & { history: HistoryColumns }
 
 export type CliInfo = { path: string | null; source: string | null; error: string | null }
 
+/** The person's thresholds, so a panel can colour each metric and core the way health is judged. */
+export type FleetThresholds = { cpu: HealthThresholds; memory: HealthThresholds }
+
 export type FleetSnapshot = {
   v: 1
   seq: number
@@ -152,6 +171,11 @@ export type FleetSnapshot = {
   intervalMs: number
   historyWindowMs: number
   cli: CliInfo
+  thresholds: FleetThresholds
+  /** Rises whenever history older than a post's recent window changes (a back-fill). */
+  historyRev: number
+  /** Random id of this worker run; `seq` starts again when it changes. */
+  run: string
   machines: MachineView[]
 }
 
@@ -165,6 +189,11 @@ export type FleetUpdate = {
   mode: FleetMode
   intervalMs: number
   cli: CliInfo
+  thresholds: FleetThresholds
+  /** A different value from the panel's snapshot means older history changed: re-fetch. */
+  historyRev: number
+  /** A different run from the panel's snapshot means the worker restarted: re-fetch. */
+  run: string
   machines: MachineState[]
   recentMs: number
   appended: Record<string, HistoryColumns>

@@ -148,6 +148,22 @@ export function parseEnvironments(envelope: Envelope, localRuntimeId: string | n
   return out
 }
 
+/** The name Orca shows for this computer, from `orca host list --json`: the `local` host's
+ *  `machineName`. Null when the answer has none (older Orca, or an error). */
+export function parseLocalHostName(envelope: Envelope): string | null {
+  if (!envelope.ok) {
+    return null
+  }
+  const hosts = record(envelope.result).hosts
+  for (const entry of Array.isArray(hosts) ? hosts : []) {
+    const h = record(entry)
+    if (h.kind !== 'local') continue
+    const name = text(h.machineName).trim()
+    return name ? name.slice(0, 128) : null
+  }
+  return null
+}
+
 export type RemotePluginInfo = {
   state: 'running' | 'installed' | 'absent'
   /** Keys to read beacons from, best first. */

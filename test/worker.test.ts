@@ -31,7 +31,9 @@ function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | n
         : { path: override.cliPath ?? '/fake/orca', source: 'bundled', tried: [], error: null },
     createRunner: () => ({ run: cli.run, stop: () => {} }),
     localName: () => 'this-desktop',
-    runId: () => 'cafe01'
+    runId: () => 'cafe01',
+    workerFile: '/home/u/code/orca-fleet-monitor/src/worker.ts',
+    declaredCommands: ['fleet.show']
   }
 }
 
@@ -41,7 +43,11 @@ function fakeCli(time: FakeTime): FakeCli {
       return okResult(envelope({ environments: [{ id: 'env-a', name: 'Build Box', runtimeId: 'rt-a' }] }, { runtimeId: 'local' }))
     }
     if (args[0] === 'diagnostics') return okResult(diagnosticsFor({ collectedAt: time.now(), load1: 4, cores: 8 }))
+    if (args[0] === 'plugin' && args[1] === 'list' && !args.includes('--environment')) {
+      return okResult(envelope({ plugins: [{ pluginKey: 'local.fleet-monitor', status: 'running', isDev: true, panels: [{ id: 'fleet' }] }] }))
+    }
     if (args[0] === 'plugin' && args[1] === 'list') return okResult(envelope({ plugins: [] }))
+    if (args[0] === 'plugin' && args[1] === 'open') return okResult(envelope({ pluginKey: args[2], panelId: 'fleet' }))
     return okResult(envelope(null))
   })
 }
@@ -75,6 +81,8 @@ test('the worker module has the shape Orca calls', () => {
   assert.equal(typeof worker.default, 'function')
   assert.equal(typeof worker.deactivate, 'function')
   assert.equal(worker.localMachineName('build-box.local'), 'build-box')
+  assert.equal(worker.localMachineName('Example.localdomain'), 'Example')
+  assert.equal(worker.localMachineName('192.0.2.7'), '192.0.2.7')
   assert.equal(worker.localMachineName(''), 'This machine')
 })
 
@@ -86,6 +94,7 @@ test('answers fleet.snapshot and fleet.heartbeat, and a heartbeat turns on fast 
   assert.equal(snap.machines[0]?.id, 'local')
   assert.equal(snap.machines[0]?.name, 'this-desktop')
   assert.equal(snap.cli.source, 'bundled')
+  assert.deepEqual(snap.thresholds.cpu, { busy: 70, strained: 85, critical: 95 }, 'thresholds travel with the snapshot')
   await t.settle()
   const beat = (await t.mounted.request('fleet.heartbeat')) as { ok: boolean; mode: string }
   assert.deepEqual([beat.ok, beat.mode], [true, 'fast'])
@@ -148,6 +157,46 @@ test('reads settings, and follows a change', async () => {
   assert.match(snap.cli.error ?? '', /cannot be run/)
   assert.deepEqual(t.mounted.refusals, [])
   await t.mounted.deactivate()
+})
+
+test('fleet.retry reads a machine now, and refuses a request without an id', async () => {
+  const t = await mount()
+  await t.mounted.request('fleet.heartbeat')
+  await t.settle()
+  const before = t.cli.count((a) => a[0] === 'diagnostics' && a.includes('env-a'))
+  const answer = (await t.mounted.request('fleet.retry', { id: 'env-a' })) as { ok: boolean }
+  assert.equal(answer.ok, true)
+  await t.settle()
+  assert.ok(t.cli.count((a) => a[0] === 'diagnostics' && a.includes('env-a')) > before)
+  assert.deepEqual(await t.mounted.request('fleet.retry', { id: 'no-such-machine' }), { ok: false })
+  let code: unknown = null
+  try {
+    await t.mounted.request('fleet.retry', {} as { id: string }) // deliberately without the id
+  } catch (error) {
+    code = (error as { code?: unknown }).code
+  }
+  assert.equal(code, 'invalid_params')
+  await t.mounted.deactivate()
+})
+
+test('the status bar command shows the panel through the CLI, on this machine only', async () => {
+  const t = await mount()
+  await t.mounted.command('fleet.show')
+  const opens = t.cli.calls.filter((c) => c.args[0] === 'plugin' && c.args[1] === 'open').map((c) => c.args)
+  assert.deepEqual(opens, [['plugin', 'open', 'local.fleet-monitor', '--panel', 'fleet', '--json']])
+  assert.deepEqual(t.mounted.refusals, [])
+  await t.mounted.deactivate()
+})
+
+test('declaredCommands follows the manifest and fails closed', () => {
+  const manifest = (commands: unknown) => () => JSON.stringify({ contributes: { commands } })
+  assert.deepEqual(worker.declaredCommands(manifest([{ id: 'fleet.show', title: 'Show' }, { id: 'x', title: 'X', action: 'view.tasks' }])), ['fleet.show'])
+  assert.deepEqual(worker.declaredCommands(manifest(undefined)), [])
+  assert.deepEqual(worker.declaredCommands(() => 'not json'), [])
+  assert.deepEqual(worker.declaredCommands(() => {
+    throw new Error('no file')
+  }), [])
+  assert.ok(worker.declaredCommands().includes('fleet.show'), 'this repository declares it')
 })
 
 test('deactivate stops every timer', async () => {

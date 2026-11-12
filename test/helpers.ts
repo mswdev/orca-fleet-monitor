@@ -91,9 +91,9 @@ export function timeoutResult(): CommandResult {
 }
 
 /** Which machine a CLI call is about: the `--environment` value, or `local`. The environment
- *  list reads this machine's pairing store and is about no machine in particular. */
+ *  and host lists read this machine's pairing store and are about no machine in particular. */
 export function machineOf(args: readonly string[]): string {
-  if (args[0] === 'environment') return '(pairing store)'
+  if (args[0] === 'environment' || args[0] === 'host') return '(pairing store)'
   const index = args.indexOf('--environment')
   return index === -1 ? 'local' : (args[index + 1] ?? 'local')
 }

@@ -11,6 +11,8 @@ declare module 'orca' {
     'fleet.snapshot': { output: FleetSnapshot }
     /** "A panel is open": keeps fast polling on for about 15 s more. */
     'fleet.heartbeat': { output: { ok: true; mode: 'fast' | 'slow'; seq: number } }
+    /** "Retry connection" on an offline machine: read it now rather than after its back-off. */
+    'fleet.retry': { input: { id: string }; output: { ok: boolean } }
   }
   // oxlint-disable-next-line typescript/consistent-type-definitions -- declaration merging needs an interface
   interface PluginPanelEvents {

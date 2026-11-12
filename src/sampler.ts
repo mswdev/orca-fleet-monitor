@@ -1,6 +1,8 @@
-// Local machine sampler: node:os only, no child processes.
+// Local machine sampler: node:os only, no child processes. The core split, which needs `sysctl`,
+// is read once elsewhere (src/core-groups.ts) and handed in with `setCoreGroups`.
 import os from 'node:os'
-import type { LocalSample } from './model.ts'
+import { groupsFit } from './core-groups.ts'
+import type { CoreGroup, LocalSample } from './model.ts'
 
 export type CpuTimes = { user: number; nice: number; sys: number; idle: number; irq: number }
 export type CpuInfo = { model: string; times: CpuTimes }
@@ -84,6 +86,7 @@ export class LocalSampler {
   private readonly source: OsSource
   private previous: CpuInfo[] = []
   private last: LocalSample | null = null
+  private coreGroups: CoreGroup[] | null = null
 
   constructor(source: OsSource = realOs) {
     this.source = source
@@ -92,6 +95,11 @@ export class LocalSampler {
 
   latest(): LocalSample | null {
     return this.last
+  }
+
+  /** How the cores split by kind, once known. Ignored by any reading it does not fit. */
+  setCoreGroups(groups: CoreGroup[] | null): void {
+    this.coreGroups = groups
   }
 
   sample(): LocalSample {
@@ -113,7 +121,8 @@ export class LocalSampler {
       uptimeSec: Math.max(0, Math.round(finite(src.uptime()))),
       cpu: delta,
       memory: { total, free: Math.min(total, Math.max(0, finite(src.freemem()))) },
-      load: [finite(load[0]), finite(load[1]), finite(load[2])]
+      load: [finite(load[0]), finite(load[1]), finite(load[2])],
+      coreGroups: delta && groupsFit(this.coreGroups, delta.perCore.length) ? this.coreGroups : null
     }
     this.last = sample
     return sample

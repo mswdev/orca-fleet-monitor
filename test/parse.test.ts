@@ -4,6 +4,7 @@ import {
   parseDiagnostics,
   parseEnvelope,
   parseEnvironments,
+  parseLocalHostName,
   parseLogs,
   topWorkspaces
 } from '../src/parse.ts'
@@ -125,4 +126,16 @@ describe('findPluginKeys', () => {
 test('parseLogs reads lines, and an unknown key answers ok with none', () => {
   const env = parseEnvelope(JSON.stringify({ ok: true, result: { pluginKey: 'local.none', lines: [], cursor: 'x:0' } }))
   assert.deepEqual(parseLogs(env), { pluginKey: 'local.none', lines: [] })
+})
+
+test('parseLocalHostName takes the local host\'s machine name from `orca host list`', () => {
+  const answer = (hosts: unknown) => parseEnvelope(JSON.stringify({ ok: true, result: { hosts } }))
+  const hosts = [
+    { kind: 'local', name: 'this machine', id: 'local', machineName: '  Example Workstation  ', platform: 'darwin' },
+    { kind: 'environment', name: 'Build Box', id: 'env-1' }
+  ]
+  assert.equal(parseLocalHostName(answer(hosts)), 'Example Workstation')
+  assert.equal(parseLocalHostName(answer([{ kind: 'local', name: 'this machine', id: 'local' }])), null, 'older Orca: no machineName')
+  assert.equal(parseLocalHostName(answer('nope')), null)
+  assert.equal(parseLocalHostName(parseEnvelope(fixtureText('error-unknown-environment.json'))), null)
 })

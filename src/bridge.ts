@@ -8,8 +8,9 @@
 // coalesced to at most one per `minPostGapMs` and only sent while a panel is heartbeating.
 // Each post repeats the last `recentWindowMs` of history, so a panel merges points by time and a
 // missed post costs nothing; a gap in `seq` longer than that window means it should re-fetch.
+import { DEFAULT_HEALTH } from './health.ts'
 import { downsample, toColumns, HISTORY_WINDOW_MS } from './history.ts'
-import type { CliInfo, FleetMode, FleetSnapshot, FleetUpdate, HistoryColumns } from './model.ts'
+import type { CliInfo, FleetMode, FleetSnapshot, FleetThresholds, FleetUpdate, HistoryColumns } from './model.ts'
 import type { MachineEntry } from './poller.ts'
 
 export const SNAPSHOT_MAX_BYTES = 960 * 1024
@@ -50,6 +51,8 @@ export type BridgeSource = {
   entries(): MachineEntry[]
   mode(): FleetMode
   intervalMs(): number
+  /** See FleetPoller.historyRevision; 0 when the source never rewrites older history. */
+  historyRevision?(): number
 }
 
 export type BridgeDeps = {
@@ -57,6 +60,10 @@ export type BridgeDeps = {
   post: (payload: FleetUpdate) => void
   now: () => number
   cli: () => CliInfo
+  /** The person's CPU and memory thresholds; the defaults when not given. */
+  thresholds?: () => FleetThresholds
+  /** This worker run's id, so a panel can tell a restart (seq starting over) from old posts. */
+  run?: string
   setTimeout: (fn: () => void, ms: number) => unknown
   clearTimeout: (handle: unknown) => void
   minPostGapMs?: number
@@ -91,6 +98,9 @@ export class PanelBridge {
       intervalMs: this.deps.source.intervalMs(),
       historyWindowMs: HISTORY_WINDOW_MS,
       cli: this.deps.cli(),
+      thresholds: this.thresholds(),
+      historyRev: this.deps.source.historyRevision?.() ?? 0,
+      run: this.deps.run ?? '',
       machines: entries.map((entry) => ({
         ...entry.state,
         history: downsample(histories.get(entry.state.id)!, step)
@@ -140,6 +150,9 @@ export class PanelBridge {
       mode: this.deps.source.mode(),
       intervalMs: this.deps.source.intervalMs(),
       cli: this.deps.cli(),
+      thresholds: this.thresholds(),
+      historyRev: this.deps.source.historyRevision?.() ?? 0,
+      run: this.deps.run ?? '',
       machines: entries.map((entry) => entry.state),
       recentMs: this.recentWindowMs(),
       appended
@@ -149,6 +162,10 @@ export class PanelBridge {
     }
     this.deps.post(update)
     return update
+  }
+
+  private thresholds(): FleetThresholds {
+    return this.deps.thresholds?.() ?? DEFAULT_HEALTH
   }
 
   /** How much recent history each post repeats. */

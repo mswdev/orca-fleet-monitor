@@ -26,7 +26,7 @@ describe('local machine', () => {
     const m = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin' }), diag }))
     assert.equal(m.tier, 'full')
     assert.equal(m.online, true)
-    assert.deepEqual(m.cpu, { percent: 42.5, source: 'sampler', perCore: [40, 45, 41.2, 43.8] })
+    assert.deepEqual(m.cpu, { percent: 42.5, source: 'sampler', perCore: [40, 45, 41.2, 43.8], groups: null })
     assert.equal(m.memory?.source, 'orca')
     assert.equal(m.memory?.percent, 50)
     assert.equal(m.memory?.reliable, true)
@@ -63,10 +63,31 @@ describe('remote machine', () => {
     assert.equal(m.host.uptimeSec, 3_600)
   })
 
+  test('core groups come from the local sampler or a fresh beacon, never from a stale one', () => {
+    const groups = [
+      { kind: 'performance' as const, start: 1, count: 3 },
+      { kind: 'efficiency' as const, start: 0, count: 1 }
+    ]
+    const local = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ coreGroups: groups }), diag }))
+    assert.deepEqual(local.cpu.groups, groups)
+    const fresh = mergeMachine(
+      base({ diag, beacon: { latest: beaconOf({ coreGroups: groups }), fresh: true, ageMs: 0, pluginKey: 'k', remotePlugin: 'running' } })
+    )
+    assert.deepEqual(fresh.cpu.groups, groups)
+    const old = mergeMachine(
+      base({ diag, beacon: { latest: beaconOf(), fresh: true, ageMs: 0, pluginKey: 'k', remotePlugin: 'running' } })
+    )
+    assert.equal(old.cpu.groups, null, 'a beacon from the first release has none: one group')
+    const stale = mergeMachine(
+      base({ diag, beacon: { latest: beaconOf({ coreGroups: groups }), fresh: false, ageMs: 60_000, pluginKey: 'k', remotePlugin: 'running' } })
+    )
+    assert.equal(stale.cpu.groups, null)
+  })
+
   test('basic tier: CPU is estimated from load and labelled so', () => {
     const m = mergeMachine(base({ diag }))
     assert.equal(m.tier, 'basic')
-    assert.deepEqual(m.cpu, { percent: 75, source: 'load', perCore: null })
+    assert.deepEqual(m.cpu, { percent: 75, source: 'load', perCore: null, groups: null })
     assert.deepEqual(m.load, { one: 6, five: null, fifteen: null })
     assert.equal(m.health.level, 'busy')
     assert.deepEqual(m.health.reasons, ['CPU load 75% ≥ 70%'])

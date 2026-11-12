@@ -14,6 +14,7 @@ import {
   parseDiagnostics,
   parseEnvelope,
   parseEnvironments,
+  parseLocalHostName,
   parseLogs,
   type Envelope,
   type RemotePluginInfo
@@ -24,6 +25,12 @@ export const LOCAL_ID = 'local'
 export const FAST_LINGER_MS = 15_000
 export const MAX_BACKOFF_MS = 5 * 60_000
 export const PLUGIN_LIST_INTERVAL_MS = 5 * 60_000
+/** While a panel is open, a machine without a live beacon has its plugin list re-read this often,
+ *  so installing Fleet Monitor there shows up within about half a minute. */
+export const BASIC_PLUGIN_RECHECK_MS = 30_000
+/** How often the name Orca shows for this computer (`orca host list`) is re-read. */
+export const LOCAL_NAME_INTERVAL_MS = 30 * 60_000
+const LOCAL_NAME_RETRY_MS = 5 * 60_000
 /** With a fresh beacon, diagnostics (memory, workspaces) are read at most this often while fast. */
 export const FULL_TIER_DIAG_MIN_MS = 15_000
 
@@ -62,6 +69,8 @@ type Slot = {
   /** Remote clock minus local clock, from diagnostics `collectedAt`. */
   offsetMs: number | null
   plugin: RemotePluginInfo | null
+  /** Local clock, when the plugin list was last read; null before the first read. */
+  keysReadAt: number | null
   keyIndex: number
   emptyReads: number
   latest: BeaconRecord | null
@@ -82,6 +91,9 @@ export class FleetPoller {
   private running = 0
   private envBusy = false
   private envDue = 0
+  private nameBusy = false
+  private nameDue = 0
+  private historyRev = 0
   private heartbeatAt = Number.NEGATIVE_INFINITY
   private localRuntimeId: string | null = null
   private stopped = false
@@ -115,9 +127,24 @@ export class FleetPoller {
         if (slot.failures > 0) continue // keep the back-off
         slot.due.diag = Math.min(slot.due.diag, now)
         slot.due.beacon = Math.min(slot.due.beacon, now)
+        // A panel just opened: has Fleet Monitor been installed on a basic machine meanwhile?
+        if (slot.kind === 'remote' && !slot.beaconFresh) slot.due.keys = Math.min(slot.due.keys, now)
       }
     }
     this.tick()
+  }
+
+  /** "Retry connection": reads the machine now instead of waiting out its back-off. A failure
+   *  still counts toward the back-off. False for an unknown or local id. */
+  retry(id: string): boolean {
+    const slot = this.slots.get(id)
+    if (!slot || slot.kind !== 'remote') return false
+    const now = this.deps.now()
+    slot.due.diag = Math.min(slot.due.diag, now)
+    slot.due.keys = Math.min(slot.due.keys, now)
+    slot.due.beacon = Math.min(slot.due.beacon, now)
+    this.tick()
+    return true
   }
 
   updateSettings(settings: PollerSettings): void {
@@ -151,6 +178,11 @@ export class FleetPoller {
 
   inFlight(): number {
     return this.running
+  }
+
+  /** Rises each time older history is rewritten (a back-fill), which posts alone cannot carry. */
+  historyRevision(): number {
+    return this.historyRev
   }
 
   stop(): void {
@@ -191,12 +223,16 @@ export class FleetPoller {
     for (const slot of this.slots.values()) {
       if (slot.busy) continue
       const feed = this.nextFeed(slot, now)
-      if (feed) due.push({ slot, feed, at: slot.due[feed] })
+      if (feed) due.push({ slot, feed, at: this.dueOf(slot, feed, now) })
     }
     due.sort((a, b) => a.at - b.at)
     for (const { slot, feed } of due) {
       if (this.running >= max) break
       void this.startFeed(slot, feed)
+    }
+    // Readings first; the display name can wait for a free slot.
+    if (!this.nameBusy && now >= this.nameDue && this.running < max) {
+      void this.refreshLocalName()
     }
   }
 
@@ -210,9 +246,19 @@ export class FleetPoller {
     }
     let best: Feed | null = null
     for (const feed of candidates) {
-      if (slot.due[feed] <= now && (best === null || slot.due[feed] < slot.due[best])) best = feed
+      const at = this.dueOf(slot, feed, now)
+      if (at <= now && (best === null || at < this.dueOf(slot, best, now))) best = feed
     }
     return best
+  }
+
+  /** When a feed is next due. The plugin list of a machine without a live beacon is re-read
+   *  every `BASIC_PLUGIN_RECHECK_MS` while a panel is open, whatever its slow schedule says. */
+  private dueOf(slot: Slot, feed: Feed, now: number): number {
+    const at = slot.due[feed]
+    if (feed !== 'keys' || slot.beaconFresh || slot.failures > 0 || slot.keysReadAt === null) return at
+    if (this.mode(now) !== 'fast') return at
+    return Math.min(at, slot.keysReadAt + BASIC_PLUGIN_RECHECK_MS)
   }
 
   private diagInterval(slot: Slot, now: number): number {
@@ -271,6 +317,28 @@ export class FleetPoller {
       this.changed()
     } finally {
       this.envBusy = false
+      this.finishJob()
+    }
+  }
+
+  /** The name Orca itself shows for this computer; the hostname stays until one arrives. */
+  private async refreshLocalName(): Promise<void> {
+    this.nameBusy = true
+    this.running += 1
+    try {
+      const { envelope } = await this.callCli(['host', 'list', '--json'])
+      if (this.stopped) return
+      const done = this.deps.now()
+      const name = parseLocalHostName(envelope)
+      const local = this.slots.get(LOCAL_ID)
+      if (name && local && local.name !== name) {
+        local.name = name
+        this.remerge(local, false)
+        this.changed()
+      }
+      this.nameDue = done + (name ? LOCAL_NAME_INTERVAL_MS : LOCAL_NAME_RETRY_MS)
+    } finally {
+      this.nameBusy = false
       this.finishJob()
     }
   }
@@ -367,6 +435,7 @@ export class FleetPoller {
     const { envelope } = await this.callCli(['plugin', 'list', '--environment', slot.id, '--json'])
     if (this.stopped || !this.slots.has(slot.id)) return
     const now = this.deps.now()
+    slot.keysReadAt = now
     const info = findPluginKeys(envelope, this.deps.pluginId)
     if (!info) {
       slot.due.keys = now + this.intervalMs(now)
@@ -432,6 +501,7 @@ export class FleetPoller {
       if (points.length > 0) {
         slot.history.dropFrom(points[0]!.t)
         for (const point of points) slot.history.add(point, now)
+        this.historyRev += 1
       }
     }
     this.remerge(slot, assessed.fresh && assessed.advanced)
@@ -457,6 +527,7 @@ export class FleetPoller {
       diag: null,
       offsetMs: null,
       plugin: null,
+      keysReadAt: null,
       keyIndex: 0,
       emptyReads: 0,
       latest: null,

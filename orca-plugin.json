@@ -22,12 +22,19 @@
         "ui": "html"
       }
     ],
+    "commands": [
+      {
+        "id": "fleet.show",
+        "title": "Show Fleet Monitor"
+      }
+    ],
     "statusBarItems": [
       {
         "id": "fleet",
         "text": "Fleet",
         "icon": "gauge",
-        "tooltip": "Fleet Monitor"
+        "tooltip": "Fleet Monitor",
+        "command": "fleet.show"
       }
     ],
     "settings": [

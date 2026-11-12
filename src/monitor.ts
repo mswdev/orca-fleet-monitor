@@ -5,6 +5,7 @@ import { BEACON_INTERVAL_MS, encodeBeacon } from './beacon.ts'
 import { PanelBridge } from './bridge.ts'
 import type { CliResolution, CommandRunner } from './cli.ts'
 import type { CliInfo, LocalSample } from './model.ts'
+import { openOwnPanel, SHOW_COMMAND_ID } from './open-panel.ts'
 import { FleetPoller } from './poller.ts'
 import { readSettings, type FleetSettings } from './settings.ts'
 import { STATUS_BAR_ID, statusBarView, type StatusBarView } from './status-bar.ts'
@@ -22,7 +23,7 @@ const HEADLESS_AFTER_MS = 2 * 60_000
 const HEADLESS_RETRY_MS = 60_000
 const LOG_REPEAT_MS = 10 * 60_000
 
-export type WorkerOrca = Pick<OrcaWorkerApi, 'settings' | 'panels' | 'host' | 'log'>
+export type WorkerOrca = Pick<OrcaWorkerApi, 'settings' | 'panels' | 'host' | 'log' | 'commands'>
 
 export type MonitorDeps = {
   now: () => number
@@ -35,6 +36,10 @@ export type MonitorDeps = {
   createRunner: (cliPath: () => string | null) => { run: CommandRunner; stop(): void }
   localName: () => string
   runId: () => string
+  /** The worker's own file, from which "Show Fleet Monitor" works out this copy's plugin key. */
+  workerFile?: string | null
+  /** Worker commands the manifest declares; only those are registered. */
+  declaredCommands?: readonly string[]
 }
 
 export type FleetMonitor = {
@@ -94,6 +99,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     if (statusTimer === null) statusTimer = deps.setTimeout(() => void pushStatus(), STATUS_BAR_DEBOUNCE_MS)
   }
 
+  // One id per worker run: the beacon carries it, and so do the panel posts.
+  const runId = deps.runId()
   let bridge: PanelBridge | null = null
   const poller = new FleetPoller(
     {
@@ -117,6 +124,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     post: (payload) => orca.panels.post('fleet.update', payload),
     now: deps.now,
     cli: cliInfo,
+    thresholds: () => settings.health,
+    run: runId,
     setTimeout: deps.setTimeout,
     clearTimeout: deps.clearTimeout
   })
@@ -131,6 +140,12 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     orca.panels.handle('fleet.heartbeat', () => {
       poller.heartbeat()
       return { ok: true as const, mode: poller.mode(), seq: activeBridge.currentSeq }
+    }),
+    orca.panels.handle('fleet.retry', (input) => {
+      const id = input && typeof input === 'object' && typeof input.id === 'string' ? input.id : null
+      if (!id) throw Object.assign(new Error('fleet.retry needs { id }'), { code: 'invalid_params' })
+      poller.heartbeat()
+      return { ok: poller.retry(id) }
     })
   )
 
@@ -144,9 +159,18 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     poller.updateSettings(next)
   }
   disposables.push(orca.settings.onDidChange(() => void reloadSettings()))
+  // "Show Fleet Monitor", run by the status bar item. Orca stops a worker that registers a command
+  // its manifest does not declare, so it is registered only when declared.
+  if (deps.declaredCommands?.includes(SHOW_COMMAND_ID)) {
+    disposables.push(
+      orca.commands.register(SHOW_COMMAND_ID, async () => {
+        await openOwnPanel(runner.run, PLUGIN_ID, deps.workerFile ?? null)
+      })
+    )
+  }
+
 
   // The beacon has its own timer so a slow or hung CLI call never delays it.
-  const runId = deps.runId()
   let seq = 0
   const sampleNow = (): void => {
     const sample = deps.sampler.sample()

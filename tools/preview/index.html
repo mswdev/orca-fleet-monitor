@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fleet Monitor preview</title>
+    <style>
+      body { margin: 0; padding: 24px; font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #e9e9ec; color: #1a1b1f; }
+      body.dark { background: #0b0b0d; color: #ececf1; }
+      h1 { margin: 0 0 4px; font-size: 16px; }
+      p { margin: 0 0 16px; color: #5f6370; }
+      nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+      nav a { padding: 4px 10px; border-radius: 6px; background: #fff; color: inherit; text-decoration: none; border: 1px solid #d6d7dd; }
+      body.dark nav a { background: #1b1c20; border-color: #2f3038; }
+      nav a[aria-current='true'] { font-weight: 600; border-color: currentColor; }
+      section { margin-bottom: 28px; }
+      h2 { margin: 0 0 8px; font-size: 13px; }
+      .row { display: flex; gap: 16px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
+      figure { margin: 0; }
+      figcaption { margin-bottom: 4px; font-size: 11px; color: #8a8d97; }
+      iframe { display: block; border: 1px solid #c9cad1; border-radius: 6px; background: transparent; }
+      body.dark iframe { border-color: #2f3038; }
+    </style>
+  </head>
+  <body>
+    <h1>Fleet Monitor panel preview</h1>
+    <p>The real panel code fed with invented sample data (tools/preview/sample-fleet.mjs). Nothing here talks to Orca.</p>
+    <nav id="nav"></nav>
+    <main id="states"></main>
+    <script type="module">
+      const params = new URLSearchParams(location.search)
+      const theme = params.get('theme') === 'dark' ? 'dark' : 'light'
+      const host = params.get('host') ?? ''
+      document.body.classList.toggle('dark', theme === 'dark' || host === 'slate')
+      const links = [
+        ['Light', '?theme=light'],
+        ['Dark', '?theme=dark'],
+        ['Host theme: slate', '?host=slate'],
+        ['Host theme: paper', '?host=paper'],
+        ['Host theme: mist (tinted)', '?host=mist']
+      ]
+      const nav = document.getElementById('nav')
+      for (const [label, href] of links) {
+        const a = Object.assign(document.createElement('a'), { href, textContent: label })
+        a.setAttribute('aria-current', String(href === location.search || (!location.search && href === '?theme=light')))
+        nav.append(a)
+      }
+      const states = [
+        ['Overview', 'state=live', 900],
+        ['Detail', 'state=live&machine=studio', 1180],
+        ['Detail, this computer', 'state=live&machine=mbp', 1180],
+        ['Detail, basic machine (install row open)', 'state=live&machine=ci&install=open', 1000],
+        ['Detail, offline', 'state=live&machine=air', 560],
+        ['Loading', 'state=loading', 520],
+        ['Nothing paired', 'state=empty', 640],
+        ['A machine connecting', 'state=connecting', 1000],
+        ['Worker not answering', 'state=error', 360]
+      ]
+      const main = document.getElementById('states')
+      for (const [title, query, height] of states) {
+        const section = document.createElement('section')
+        section.append(Object.assign(document.createElement('h2'), { textContent: title }))
+        const row = document.createElement('div')
+        row.className = 'row'
+        for (const width of [220, 360, 700]) {
+          const figure = document.createElement('figure')
+          figure.append(Object.assign(document.createElement('figcaption'), { textContent: `${width} px` }))
+          const frame = document.createElement('iframe')
+          frame.width = String(width)
+          frame.height = String(height)
+          frame.title = `${title}, ${width} px`
+          frame.src = `frame.html?${query}&theme=${theme}${host ? `&host=${host}` : ''}`
+          figure.append(frame)
+          row.append(figure)
+        }
+        section.append(row)
+        main.append(section)
+      }
+    </script>
+  </body>
+</html>

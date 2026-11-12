@@ -24,7 +24,7 @@ function machine(id: string, over: { status?: MachineState['status']; cpu?: numb
       id === 'local'
         ? null
         : {
-            latest: { ...localSample(), run: 'r', seq: 1, intervalMs: 5_000, cpu: over.cpu ?? 10, perCore: null, memTotal: 10, memFree: 5, loggedAt: 0 },
+            latest: { ...localSample(), run: 'r', seq: 1, intervalMs: 5_000, cpu: over.cpu ?? 10, perCore: null, coreGroups: null, memTotal: 10, memFree: 5, loggedAt: 0 },
             fresh: true,
             ageMs: 0,
             pluginKey: 'local.fleet-monitor',

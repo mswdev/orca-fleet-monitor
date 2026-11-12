@@ -352,6 +352,130 @@ describe('tiers and the beacon', () => {
   })
 })
 
+describe('noticing Fleet Monitor installed on a basic machine', () => {
+  const env = { id: 'env-a', name: 'A', runtimeId: 'rt-a' }
+  const listCalls = (t: ReturnType<typeof setup>) =>
+    t.cli.count((a) => a[0] === 'plugin' && a[1] === 'list' && machineOf(a) === 'env-a')
+  /** One panel heartbeat a second for `seconds`. */
+  const panelOpenFor = async (t: ReturnType<typeof setup>, seconds: number) => {
+    for (let s = 0; s < seconds; s += 1) {
+      t.time.advance(1_000)
+      t.poller.heartbeat()
+      await t.drain()
+    }
+  }
+
+  test('while a panel is open, a basic machine has its plugin list re-read about every 30 s', async () => {
+    const t = setup({ envs: [env] })
+    await t.poller.runOnce()
+    assert.equal(listCalls(t), 1)
+    await panelOpenFor(t, 29)
+    assert.equal(listCalls(t), 1)
+    await panelOpenFor(t, 2)
+    assert.equal(listCalls(t), 2, 're-read 30 s after the last one, not 5 minutes')
+    await panelOpenFor(t, 60)
+    assert.equal(listCalls(t), 4)
+  })
+
+  test('a machine that gains Fleet Monitor goes full within about 30 s', async () => {
+    const t = setup({ envs: [env] })
+    await t.poller.runOnce()
+    assert.equal(t.machine('env-a')!.state.tier, 'basic')
+    // Installed there now; its worker has started beaconing.
+    t.state.plugins.set('env-a', runningPlugin('example-owner.fleet-monitor'))
+    t.state.logs.set('env-a', () =>
+      beaconLogs({ key: 'example-owner.fleet-monitor', lastT: t.time.now() + SKEW - 1_000, count: 2 })
+    )
+    await panelOpenFor(t, 32)
+    assert.equal(t.machine('env-a')!.state.tier, 'full')
+    assert.equal(t.machine('env-a')!.state.beacon.pluginKey, 'example-owner.fleet-monitor')
+  })
+
+  test('with no panel open the slow 5-minute schedule stands, and opening a panel re-checks at once', async () => {
+    const t = setup({ envs: [env] })
+    t.poller.tick()
+    await t.drain()
+    assert.equal(t.poller.mode(), 'slow')
+    assert.equal(listCalls(t), 1)
+    for (let s = 0; s < 120; s += 1) {
+      t.time.advance(1_000)
+      t.poller.tick()
+      await t.drain()
+    }
+    assert.equal(listCalls(t), 1, 'no re-check every 30 s while nobody is looking')
+    t.poller.heartbeat()
+    await t.drain()
+    assert.equal(listCalls(t), 2, 'a panel opening re-reads the list')
+  })
+
+  test('a full-tier machine keeps the 5-minute schedule while a panel is open', async () => {
+    const t = setup({ envs: [env] })
+    t.state.plugins.set('env-a', runningPlugin())
+    let written = 2 // the remote keeps beaconing, so its sequence moves on
+    t.state.logs.set('env-a', () =>
+      beaconLogs({ key: 'local.fleet-monitor', lastT: t.time.now() + SKEW - 1_000, count: Math.min(150, written++) })
+    )
+    await t.poller.runOnce()
+    assert.equal(t.machine('env-a')!.state.tier, 'full')
+    await panelOpenFor(t, 90)
+    assert.equal(t.machine('env-a')!.state.tier, 'full')
+    assert.equal(listCalls(t), 1)
+  })
+})
+
+describe('the local machine name', () => {
+  test('is the name Orca shows for this computer, read from `orca host list`', async () => {
+    const t = setup({
+      respond: (args, _time, fallback) =>
+        args[0] === 'host'
+          ? okResult(envelope({ hosts: [{ kind: 'local', id: 'local', name: 'this machine', machineName: 'Example Workstation' }] }))
+          : fallback(args)
+    })
+    assert.equal(t.machine(LOCAL_ID)!.state.name, 'this-desktop', 'the hostname until Orca answers')
+    await t.poller.runOnce()
+    assert.equal(t.machine(LOCAL_ID)!.state.name, 'Example Workstation')
+    assert.equal(t.cli.count((a) => a[0] === 'host'), 1)
+  })
+
+  test('falls back to the hostname when Orca has no name for it, and asks again later', async () => {
+    const t = setup({
+      respond: (args, _time, fallback) => (args[0] === 'host' ? okResult(envelope({ hosts: [{ kind: 'local', id: 'local' }] })) : fallback(args))
+    })
+    await t.poller.runOnce()
+    assert.equal(t.machine(LOCAL_ID)!.state.name, 'this-desktop')
+    for (let s = 0; s < 301; s += 1) {
+      t.time.advance(1_000)
+      t.poller.heartbeat()
+      await t.drain()
+    }
+    assert.equal(t.cli.count((a) => a[0] === 'host'), 2, 'retried after 5 minutes')
+  })
+})
+
+describe('retry', () => {
+  test('reads an offline machine at once instead of waiting out its back-off', async () => {
+    const t = setup({
+      envs: [{ id: 'env-a', name: 'A', runtimeId: 'rt-a' }],
+      respond: (args, _time, fallback) => (isDiag('env-a')(args) ? timeoutResult() : fallback(args))
+    })
+    await t.poller.runOnce()
+    t.time.advance(5_000)
+    t.poller.heartbeat()
+    await t.drain()
+    assert.equal(t.machine('env-a')!.state.status, 'offline')
+    const before = t.cli.count(isDiag('env-a'))
+    t.time.advance(1_000)
+    t.poller.tick()
+    await t.drain()
+    assert.equal(t.cli.count(isDiag('env-a')), before, 'backing off')
+    assert.ok(t.poller.retry('env-a'))
+    await t.drain()
+    assert.equal(t.cli.count(isDiag('env-a')), before + 1)
+    assert.equal(t.poller.retry('local'), false)
+    assert.equal(t.poller.retry('nope'), false)
+  })
+})
+
 describe('discovery', () => {
   test('machines come and go with the environment list; a pairing to this runtime is dropped', async () => {
     const t = setup({

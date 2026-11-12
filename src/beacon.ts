@@ -1,6 +1,11 @@
 // The beacon: one compact log line per interval that a paired desktop reads back with
 // `orca plugin logs <key> --environment <id> --json`.
-import type { BeaconRecord, LocalSample } from './model.ts'
+//
+// Compatibility: the version stays 1 for as long as fields are only added. A reader ignores keys
+// it does not know, and every key added after the first release (`cg`) is optional, so an older
+// Fleet Monitor on either side keeps working.
+import { groupsFit } from './core-groups.ts'
+import type { BeaconRecord, CoreGroup, LocalSample } from './model.ts'
 
 export const BEACON_PREFIX = 'FLEETMON1 '
 export const BEACON_VERSION = 1
@@ -26,9 +31,33 @@ type Wire = {
   u: number
   c: number | null
   pc?: number[]
+  /** Core groups over `pc`: [kind, start, count], kind `P` (performance) or `E` (efficiency). */
+  cg?: [string, number, number][]
   mt: number
   mf: number
   l: [number, number, number]
+}
+
+const WIRE_KIND: Record<CoreGroup['kind'], string> = { performance: 'P', efficiency: 'E' }
+const KIND_OF_WIRE: Record<string, CoreGroup['kind']> = { P: 'performance', E: 'efficiency' }
+
+function encodeGroups(groups: readonly CoreGroup[] | null | undefined, cores: number): [string, number, number][] | undefined {
+  if (!groups || !groupsFit(groups, cores)) return undefined
+  return groups.map((g) => [WIRE_KIND[g.kind], g.start, g.count])
+}
+
+function decodeGroups(raw: unknown, cores: number): CoreGroup[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 4) return null
+  const groups: CoreGroup[] = []
+  for (const entry of raw) {
+    if (!Array.isArray(entry) || entry.length !== 3) return null
+    const kind = typeof entry[0] === 'string' ? KIND_OF_WIRE[entry[0]] : undefined
+    const start = entry[1]
+    const count = entry[2]
+    if (!kind || typeof start !== 'number' || typeof count !== 'number') return null
+    groups.push({ kind, start, count })
+  }
+  return groupsFit(groups, cores) ? groups : null
 }
 
 const round1 = (value: number): number => Math.round(value * 10) / 10
@@ -56,15 +85,16 @@ export function encodeBeacon(
     u: sample.uptimeSec,
     c: sample.cpu ? round1(sample.cpu.total) : null,
     ...(sample.cpu ? { pc: sample.cpu.perCore.map((value) => Math.round(value)) } : {}),
+    ...(sample.cpu ? { cg: encodeGroups(sample.coreGroups, sample.cpu.perCore.length) } : {}),
     mt: sample.memory.total,
     mf: sample.memory.free,
     l: [round2(sample.load[0]), round2(sample.load[1]), round2(sample.load[2])]
   }
-  // Degrade in steps: per-core values first, then long free-text fields.
+  // Degrade in steps: per-core values (and the groups over them) first, then long free-text fields.
   const attempts: Wire[] = [
     wire,
-    { ...wire, pc: undefined },
-    { ...wire, pc: undefined, h: clip(wire.h, TEXT_LIMIT), m: clip(wire.m, TEXT_LIMIT), rl: clip(wire.rl, 32) }
+    { ...wire, pc: undefined, cg: undefined },
+    { ...wire, pc: undefined, cg: undefined, h: clip(wire.h, TEXT_LIMIT), m: clip(wire.m, TEXT_LIMIT), rl: clip(wire.rl, 32) }
   ]
   for (const attempt of attempts) {
     const line = BEACON_PREFIX + JSON.stringify(attempt)
@@ -144,6 +174,7 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
     memTotal: Math.max(0, memTotal),
     memFree: Math.min(Math.max(0, memTotal), Math.max(0, memFree)),
     load: [load[0] ?? 0, load[1] ?? 0, load[2] ?? 0],
+    coreGroups: perCore ? decodeGroups(w.cg, perCore.length) : null,
     loggedAt: loggedAt ?? t
   }
 }

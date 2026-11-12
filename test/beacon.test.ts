@@ -94,6 +94,57 @@ describe('encode and decode', () => {
   })
 })
 
+describe('core groups (added after the first release)', () => {
+  const groups = [
+    { kind: 'performance' as const, start: 1, count: 3 },
+    { kind: 'efficiency' as const, start: 0, count: 1 }
+  ]
+
+  test('travel with the per-core values and come back the same', () => {
+    const line = encodeBeacon(localSample({ coreGroups: groups }), meta)!
+    assert.match(line, /"cg":\[\["P",1,3\],\["E",0,1\]\]/)
+    const back = decodeBeacon(line)
+    assert.deepEqual(back?.coreGroups, groups)
+  })
+
+  test('a beacon written by the first release (no cg) still decodes, with no groups', () => {
+    // Written by encodeBeacon at commit c895441, which remotes may still run.
+    const old =
+      'FLEETMON1 {"v":1,"r":"run-a","q":7,"t":1800000000000,"iv":5000,"h":"test-host","p":"darwin","a":"arm64","rl":"25.0.0","m":"Example Chip","n":6,"u":3600,"c":33.3,"pc":[10,20,30,40,50,60],"mt":17179869184,"mf":4294967296,"l":[1.5,1.25,1]}'
+    const back = decodeBeacon(old)
+    assert.ok(back)
+    assert.equal(back.cpu, 33.3)
+    assert.deepEqual(back.perCore, [10, 20, 30, 40, 50, 60])
+    assert.equal(back.coreGroups, null)
+  })
+
+  test('keeps version 1, so the first release still reads new beacons', () => {
+    const line = encodeBeacon(localSample({ coreGroups: groups }), meta)!
+    const wire = JSON.parse(line.slice(BEACON_PREFIX.length)) as Record<string, unknown>
+    assert.equal(wire.v, 1)
+    for (const key of ['r', 'q', 't', 'iv', 'h', 'p', 'a', 'rl', 'm', 'n', 'u', 'c', 'pc', 'mt', 'mf', 'l']) {
+      assert.ok(key in wire, `first-release field ${key} is still written`)
+    }
+  })
+
+  test('groups that do not cover the cores exactly once are dropped, not trusted', () => {
+    const wire = (cg: unknown) =>
+      decodeBeacon(
+        `${BEACON_PREFIX}${JSON.stringify({ v: 1, r: 'r', q: 1, t: 1, iv: 5_000, n: 4, mt: 1, mf: 1, c: 5, pc: [1, 2, 3, 4], cg })}`
+      )?.coreGroups
+    assert.equal(wire([['P', 0, 3]]), null, 'a core left out')
+    assert.equal(wire([['P', 0, 3], ['E', 2, 2]]), null, 'overlap')
+    assert.equal(wire([['X', 0, 4]]), null, 'unknown kind')
+    assert.equal(wire('P4'), null, 'not a list')
+    assert.deepEqual(wire([['P', 0, 4]]), [{ kind: 'performance', start: 0, count: 4 }])
+  })
+
+  test('groups without per-core values are not written', () => {
+    const line = encodeBeacon(localSample({ cpu: null, coreGroups: groups }), meta)!
+    assert.ok(!line.includes('"cg"'))
+  })
+})
+
 test('readBeacons keeps beacons only, oldest first, across worker runs', () => {
   const line = (seq: number, t: number, run = 'run-a') => encodeBeacon(localSample({ t }), { run, seq, intervalMs: 5_000 })
   const lines = [

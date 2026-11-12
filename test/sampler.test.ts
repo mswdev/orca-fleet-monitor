@@ -58,6 +58,17 @@ test('LocalSampler reports CPU since its previous reading', () => {
   const second = sampler.sample()
   assert.deepEqual(second.cpu, { total: 0, perCore: [0, 0] })
   assert.equal(sampler.latest(), second)
+  assert.equal(second.coreGroups, null, 'no split until one is handed in')
+  sampler.setCoreGroups([
+    { kind: 'performance', start: 1, count: 1 },
+    { kind: 'efficiency', start: 0, count: 1 }
+  ])
+  assert.deepEqual(sampler.sample().coreGroups, [
+    { kind: 'performance', start: 1, count: 1 },
+    { kind: 'efficiency', start: 0, count: 1 }
+  ])
+  sampler.setCoreGroups([{ kind: 'performance', start: 0, count: 8 }])
+  assert.equal(sampler.sample().coreGroups, null, 'a split that does not fit these cores is ignored')
 })
 
 test('LocalSampler survives os.cpus() returning nothing', () => {
