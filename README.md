@@ -269,7 +269,7 @@ Reading a machine means running the Orca CLI, one short-lived process per read. 
 - While a panel is open, the diagnostics call for a full machine, and for this computer, runs every 15 seconds instead of every 5.
 - At most two reads run at once. A machine that fails to answer moves to two slots of its own, so it can hold up the others for one call at most, until the 15-second timeout.
 - Fleet Monitor retries an unreachable machine with a growing delay, up to 5 minutes.
-- While a machine's Activity tab is on screen, the panel asks for its processes every 5 seconds for this computer and every 10 seconds for a paired Mac. This computer reads its processes only while asked.
+- While a machine's Activity tab is on screen, the panel asks for its processes every 5 seconds for this computer and every 10 seconds for a paired Mac. The full list for this computer is read only while asked for; its lighter 30-second reading, which names the largest process and feeds the published top list, runs in the background.
 
 Measured on a Mac, the worker uses about 1% of one core with nobody looking. While this computer's Activity tab is open, it uses about 8% of one core to read its processes, and stops 20 seconds after the tab closes.
 
@@ -280,10 +280,10 @@ With **Publish this machine's readings** on, which is the default, the worker wr
 - the hostname, platform, architecture, OS release and CPU model;
 - the number of cores, the uptime, total and per-core CPU use, and on Apple silicon which cores are performance cores and which are efficiency cores;
 - the load averages, and the memory figures listed under [Memory](#memory);
-- on a Mac, the network, disk, GPU and battery readings listed under [Activity](#activity);
+- on a Mac, the network, disk, GPU and battery readings listed under [Activity](#activity), including the name of the network interface in use;
 - a random id for the worker run, a sequence number and the time.
 
-On a Mac, about every 30 seconds, it also writes a line starting `FLEETPS1` with its top processes, about 60 by memory and CPU. For each one it holds the process ID, the parent's process ID, the short name (at most 16 characters, with no arguments or path), the owner's user name, CPU, memory, energy impact and the start time.
+On a Mac, about every 30 seconds, it also writes a line starting `FLEETPS1` with its top processes, about 60 by memory and CPU, and the number of processes running. For each one it holds the process ID, the parent's process ID, the short name (at most 16 characters, with no arguments or path), the owner's user name, CPU, memory, energy impact and the start time.
 
 The same log gets one line for each memory alert the machine shows, with the alert's title, which names the machine the alert is about, and whether Orca delivered it.
 
@@ -321,7 +321,7 @@ Fleet Monitor treats a paired server, the CLI's answers about it and the lines i
 - The Orca desktop app. The panel is not made for Orca's browser client (`orca serve` opened in a web browser).
 - macOS, both for this computer and for paired servers. It is the only platform Fleet Monitor is tested on and, in practice, the only one it supports. Linux and Windows are implemented but untested. That covers the launcher names, ending a timed-out CLI call's process tree, and Windows having no load average.
 - History covers the last 30 minutes. The worker keeps it in memory, so it starts again whenever Orca or the plugin restarts. So does what it has already alerted about: after a restart, a machine that is still short of memory alerts again.
-- When a machine reaches the full level, the readings still in its log, about the last 16 minutes, fill the gaps in its history. They are added only where there is no reading yet.
+- When a machine reaches the full level, the readings still in its log, about the last 14 minutes on a Mac that also publishes its processes (16 otherwise), fill the gaps in its history. They are added only where there is no reading yet.
 - The Activity tab (network, disk, GPU, battery and processes) is a Mac's only: this computer when it is a Mac, and paired Macs running Fleet Monitor 1.2 or later.
 - Only Apple silicon reports the split into P-cores and E-cores. Which core is which was measured on an Apple M2 Max, and other Apple chips are assumed to number their cores the same way. Where the split is unknown, the panel draws the cores as one group.
 
