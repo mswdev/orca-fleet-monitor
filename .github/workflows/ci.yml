@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # The Orca release whose CLI runs the tests and writes the typings. Bump both lines together:
+  # the hash is the .deb's sha512 from that release's latest-linux.yml.
+  ORCA_VERSION: "1.4.257"
+  ORCA_DEB_SHA512: "SIhUxsvRvUbiAcxUXJTx5UBNT5LOd7/hyVl+0lFFFbaxkq1+FcqVwenIRzyItmZ3nEzwAAHUmM8cCnWJEMaOJQ=="
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Cache the Orca package
+        id: orca-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/orca-deb
+          key: orca-deb-${{ env.ORCA_VERSION }}-linux-x64
+      - name: Download Orca
+        if: steps.orca-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/orca-deb"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/orca-deb/orca.deb" \
+            "https://github.com/stablyai/orca/releases/download/v${ORCA_VERSION}/orca-ide_${ORCA_VERSION}_amd64.deb"
+      # `orca plugin test` and `orca plugin types` need the desktop app's CLI: the server-only
+      # tarball ships neither the typings nor the orca/testing modules. Nothing is installed or
+      # started; the CLI runs in Electron's Node mode, like the `orca` command on a Mac.
+      - name: Put the Orca CLI on PATH
+        run: |
+          deb="$RUNNER_TEMP/orca-deb/orca.deb"
+          actual="$(openssl dgst -sha512 -binary "$deb" | base64 -w0)"
+          if [ "$actual" != "$ORCA_DEB_SHA512" ]; then
+            echo "::error::orca-ide_${ORCA_VERSION}_amd64.deb does not match ORCA_DEB_SHA512."
+            exit 1
+          fi
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/orca"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/orca/opt/Orca/resources/bin/orca-ide" "$RUNNER_TEMP/bin/orca"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: orca --version
+
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run validate
+      # `orca plugin test .` under c8 (config in package.json): src/ and panel/, without the
+      # type-only src/model.ts and src/protocol.ts and the panel entry point panel/main.mjs.
+      - run: npm run test:coverage
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-summary
+          path: coverage/coverage-summary.json
+
+  # Publishes main's coverage totals to the `badges` branch, where the README badge reads
+  # `total.lines.pct` through a shields.io dynamic JSON badge. The first run creates the branch.
+  coverage-badge:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push to the badges branch
+    concurrency:
+      group: coverage-badge
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-summary
+          path: ${{ runner.temp }}/coverage
+      - name: Commit the totals if they changed
+        run: |
+          if git ls-remote --exit-code --heads origin badges >/dev/null; then
+            git fetch --depth=1 origin badges
+            git checkout -B badges FETCH_HEAD
+          else
+            status=$?
+            [ "$status" -eq 2 ] || exit "$status" # 2: no such branch yet
+            git checkout --orphan badges
+            git rm -rf --quiet .
+          fi
+          # Keep only the totals so per-file churn doesn't create badge commits.
+          jq '{total: .total}' "$RUNNER_TEMP/coverage/coverage-summary.json" > coverage-summary.json
+          git add coverage-summary.json
+          if git rev-parse -q --verify HEAD >/dev/null && git diff --cached --quiet; then
+            echo "Coverage unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Coverage for ${GITHUB_SHA::7}"
+          git push origin HEAD:badges
