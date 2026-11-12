@@ -304,8 +304,8 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
 export const HISTORY_SLOTS = 30
 export const SLOT_MS = 60_000
 export const TOP_WORKSPACES = 5
-/** What `orca plugin install` takes to install Fleet Monitor from its repository. */
-export const INSTALL_SOURCE = 'mswdev/orca-fleet-monitor'
+/** What `orca plugin install` takes to install Fleet Monitor from Orca's community catalog (its catalog id). */
+export const INSTALL_SOURCE = 'mswdev.fleet-monitor'
 export const LEVEL_LABELS = Object.freeze({
   ok: 'OK',
   busy: 'Busy',

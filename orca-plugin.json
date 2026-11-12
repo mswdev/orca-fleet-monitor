@@ -5,7 +5,7 @@
   "id": "fleet-monitor",
   "name": "Fleet Monitor",
   "version": "1.1.0",
-  "description": "A system monitor for your whole Orca fleet, like an activity monitor or task manager: live CPU, RAM and memory usage, per-core load and performance stats for this computer and every paired remote Orca server, in one sidebar panel.",
+  "description": "System monitor for Orca: live CPU usage, per-core load and memory usage (RAM, swap, memory pressure) for this computer and all your paired remote servers. Like an activity monitor or task manager for all your machines: performance monitoring, stats and system resources in one sidebar panel.",
   "author": { "name": "mswdev" },
   "repository": "https://github.com/mswdev/orca-fleet-monitor",
   "license": "MIT",

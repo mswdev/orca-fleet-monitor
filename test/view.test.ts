@@ -280,10 +280,10 @@ describe('the install row', () => {
     const v = mount(viewOf([local(), absent('Build Box'), absent('Build Box”; Write-Output injected; #', 'env-b')]))
     v.handle.show('00000000-0000-4000-8000-000000000001')
     $(v.root, '[data-action="install"]')!.click()
-    assert.equal($(v.root, '[data-command]')?.textContent, 'orca plugin install mswdev/orca-fleet-monitor --environment "Build Box"')
+    assert.equal($(v.root, '[data-command]')?.textContent, 'orca plugin install mswdev.fleet-monitor --environment "Build Box"')
     v.handle.show('env-b')
     $(v.root, '[data-action="install"]')!.click()
-    assert.equal($(v.root, '[data-command]')?.textContent, 'orca plugin install mswdev/orca-fleet-monitor --environment=env-b')
+    assert.equal($(v.root, '[data-command]')?.textContent, 'orca plugin install mswdev.fleet-monitor --environment=env-b')
   })
 
   test('with neither a safe name nor a safe id there is no command, only words', () => {
@@ -314,7 +314,7 @@ describe('the install row', () => {
     assert.ok(status, 'the live region is there before anything is copied')
     assert.equal(status.textContent, '')
     $(v.root, '[data-action="copy"]')!.click()
-    assert.equal(v.document.copied[0], 'orca plugin install mswdev/orca-fleet-monitor --environment "Build Box"')
+    assert.equal(v.document.copied[0], 'orca plugin install mswdev.fleet-monitor --environment "Build Box"')
     assert.equal($(v.root, '[role="status"][aria-live="polite"]')?.textContent, 'Command copied')
   })
 })

@@ -41,10 +41,10 @@ Fleet Monitor is a plugin for [Orca](https://github.com/stablyai/orca). It puts 
 
 A paired server shows up without anything installed on it. Install Fleet Monitor there as well and you get measured CPU, the load on every core and, on a Mac, real RAM usage.
 
-To install it on this computer:
+To install it on this computer, [open it in Orca](https://orca.dev/plugins/mswdev.fleet-monitor?catalog=community) or run:
 
 ```sh
-orca plugin install mswdev/orca-fleet-monitor
+orca plugin install mswdev.fleet-monitor
 ```
 
 [Install](#install) has the command for a paired server.
@@ -142,15 +142,15 @@ When a machine's memory reaches Strained or Critical, Fleet Monitor sends a desk
 On this computer:
 
 ```sh
-orca plugin install mswdev/orca-fleet-monitor
+orca plugin install mswdev.fleet-monitor
 ```
 
-You can also install it from **Settings → Plugins** in Orca.
+You can also install it from **Settings → Plugins** in Orca, or with the [Open in Orca](https://orca.dev/plugins/mswdev.fleet-monitor?catalog=community) link.
 
 For the full level on a paired server, run the same command on this computer with that server's name, as `orca environment list` shows it:
 
 ```sh
-orca plugin install mswdev/orca-fleet-monitor --environment "<server name>"
+orca plugin install mswdev.fleet-monitor --environment "<server name>"
 ```
 
 Orca asks before it installs anything that runs code. The first `install` stops with `approval_required`, lists what the plugin would be allowed to do, and prints the exact command, ending in `--approve <fingerprint>`, that installs it. Fleet Monitor never installs anything by itself.
