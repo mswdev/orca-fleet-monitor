@@ -44,6 +44,12 @@ export type MacMemory = {
   /** Average swap-outs, pages per second, over about the last 30 s, when every reading in that
    *  time saw some (see SUSTAINED_SWAP in src/mac-memory.ts); null otherwise. */
   sustainedSwapOutsPerSec: number | null
+  /** How old the RAM figures (`vm_stat`'s: used and its parts, the swap rates) are, in ms, when a
+   *  read failed and they were carried from an earlier one; absent when this reading read them. */
+  ageMs?: number
+  /** How old the kernel's figures (`sysctl`'s: pressure level, percent available, swap used) are,
+   *  in ms, when carried from an earlier read; absent when this reading read them. */
+  pressureAgeMs?: number
 }
 
 /** One reading of the machine this worker runs on, from `node:os` only. */
@@ -200,8 +206,10 @@ export type MachineState = {
     reliable: boolean
     /** `used`: a Mac's own reading (`mac` is set). `pressure`: Orca's memory pressure reading of a
      *  Mac (its `availableMemorySource` is `memory-pressure`), never to be called "used".
+     *  `unavailable`: Orca reports only free memory (`free-memory`) for a machine that is not
+     *  Windows, which is neither RAM in use nor pressure; never judged (`reliable` is false).
      *  Absent: as before 1.1 (Linux MemAvailable, Windows free memory, `os.freemem()`). */
-    kind?: 'used' | 'pressure'
+    kind?: 'used' | 'pressure' | 'unavailable'
     /** Memory pressure, 100 − percent available, which the memory thresholds judge. */
     pressurePercent?: number | null
     mac?: MacMemory | null
@@ -212,10 +220,30 @@ export type MachineState = {
   workspaces: { byCpu: WorkspaceUsage[]; byMemory: WorkspaceUsage[] }
   health: Health
   beacon: BeaconState
+  /** Set when the reading that carries this machine's memory stopped arriving while its memory was
+   *  elevated (src/health.ts `memoryElevated`): what the last one said. It clears once that reading
+   *  comes again (src/poller.ts). */
+  lost?: LostReading
   updatedAt: number
   /** Set by the panel bridge on a machine it sent without its per-core values and workspaces, to
    *  fit Orca's size caps; a panel keeps the ones it already holds for it. */
   lean?: true
+}
+
+/** A machine that stopped answering, or whose own readings stopped arriving, while its memory was
+ *  elevated. Times are on the worker's clock. */
+export type LostReading = {
+  /** `unanswered`: a call to it failed or timed out, or it went offline: it stopped answering.
+   *  `stale`: it still answers, but its Fleet Monitor readings stopped moving. */
+  how: 'unanswered' | 'stale'
+  /** When that was noticed. */
+  since: number
+  /** When the last reading was taken. */
+  lastReadingAt: number | null
+  /** The memory level that reading gave (`ok` or `busy` when only elevated). */
+  level: HealthLevel
+  /** That reading in words, for example "memory pressure critical, 15.8 of 16 GB used, swap 9.1 GB". */
+  summary: string
 }
 
 export type MachineView = MachineState & { history: HistoryColumns }

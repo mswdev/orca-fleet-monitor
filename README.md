@@ -22,6 +22,7 @@ Live CPU, memory, per-core load and the busiest workspaces for this computer and
 <a href="#what-it-shows">What it shows</a> ·
 <a href="#two-levels-of-detail">Basic and full</a> ·
 <a href="#memory">Memory</a> ·
+<a href="#memory-alerts">Alerts</a> ·
 <a href="#settings">Settings</a> ·
 <a href="#in-the-background">Background and privacy</a> ·
 <a href="#requirements-and-limits">Limits</a>
@@ -66,7 +67,7 @@ The panel opens on an overview with one card per machine. Click a card for that 
 - The detail has CPU and memory charts with the average and peak, the load on every core (P-cores and E-cores apart on Apple silicon), the five busiest workspaces, load averages, uptime, the chip, and what Orca itself is using.
 - On a Mac running Fleet Monitor, memory is real RAM usage with its breakdown, swap and the kernel's pressure level. [Memory](#memory) has the details.
 - Health has four levels: OK, busy, strained and critical. It is the worse of the CPU level and the memory level, and the detail says why, for example "Strained: CPU 86% ≥ 85%".
-- A desktop notification tells you when a machine's memory reaches Strained or Critical.
+- A desktop notification tells you when a machine's memory reaches Strained or Critical, and when a machine stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details.
 - Each level is drawn as one to four bars as well as a colour, so you can read it without the colour.
 - A machine that goes offline keeps its last readings and says when it was last seen.
 - A status bar item names the machine that most needs attention, such as `Mac Studio strained · 1 offline`, and lists every machine in its tooltip. Clicking it opens the panel.
@@ -133,9 +134,41 @@ A machine without Fleet Monitor reports only Orca's memory-pressure percentage. 
 
 The memory level is there to warn you before a machine locks up. Kernel pressure at warning makes a machine Strained, and at critical makes it Critical. RAM used above a threshold you can change, 90% by default, makes it Busy. Memory pressure has its own thresholds (75, 88 and 95% by default), and sustained swapping counts as well.
 
-When a machine's memory reaches Strained or Critical, Fleet Monitor sends a desktop notification. A setting turns the notifications off.
+If one of a Mac's two memory commands fails, Fleet Monitor keeps what the other returned. If both fail, it carries the last reading over the next two, marked with its age, and after that the reading is unknown. The panel says when figures are carried. When Orca reports only free memory for a Mac, which Orca can do for the rest of its run after one slow reading, the panel says memory is unavailable and nothing is judged on it.
 
 <br clear="right">
+
+## Memory alerts
+
+Fleet Monitor sends a desktop notification when a machine's memory runs short:
+
+- at Critical, on the first reading that shows it;
+- at Strained, once two readings in a row show it, which on a Mac running Fleet Monitor is about 10 seconds;
+- again if it goes on from Strained to Critical, and as a reminder every 10 minutes while it stays Critical, up to five an hour;
+- when a machine stops answering, or its readings stop arriving, while its memory was elevated (see below). The notification gives the last reading, for example "Mac mini stopped answering. Last reading, 20 s ago: memory pressure critical, 15.8 of 16 GB used, swap 9.1 GB." The panel, the status bar and its tooltip say the same until the machine's readings come back.
+
+A machine counts as stopped only once a call to it fails, or a fresh read of its log still finds nothing new; not reading it (no panel open with background monitoring off) never counts. Just after this computer wakes from sleep, Fleet Monitor waits a minute before it decides.
+
+Alerts are judged on the machine's own readings, not on how often this computer reads it. A Mac running Fleet Monitor writes a reading every 5 seconds, and each read of its log brings every reading written since the last one, so each counts. For a machine without Fleet Monitor, or with a version before 1.1, each answer from Orca is a reading.
+
+A reading that could not be taken, or one carried over a failed read, is unknown: it neither counts towards an alert nor cancels one that is building. On a Mac that reports its own readings, Orca's figure counts only when it is Strained or Critical, because Orca does not see the kernel's pressure level.
+
+Memory is elevated at any of: kernel pressure above normal, RAM used at 80% or more, 30% or less of memory available, or any swap-outs since the last reading. While a machine's memory is elevated and no panel is open, Fleet Monitor reads it about every 15 seconds instead of every 60, and retries it from 15 seconds when it does not answer. That is about three more CLI calls a minute for that machine, until its memory is back to normal.
+
+How long an alert takes, from the remote Mac's own reading to the notification, in a simulation with every timing at its worst:
+
+- with a panel open, up to about 10 seconds for Critical and 15 for Strained;
+- with no panel open and memory already elevated, up to about 20 seconds for Critical and 25 for Strained;
+- with no panel open and memory fine until then, up to about a minute, the slow interval.
+
+After two minutes back below Strained, the next time a machine gets there alerts again. A machine gets at most six notifications an hour, and at most three of them for Strained, so a machine that keeps flipping cannot flood you and there is always room for Critical and for "stopped answering".
+
+To check that this computer shows them, run **Fleet Monitor: Send a test alert** from Orca's command palette. Orca reports a notification as delivered once it has handed it to macOS, but Focus, or Orca's notification setting in System Settings, can still keep it off the screen. Only the test shows you. Each notification also writes one line to the plugin's log with what Orca answered.
+
+> [!IMPORTANT]
+> With **Monitor in the background** off, paired machines are read, and alert, only while a Fleet Monitor panel is open on this computer. This computer still alerts about itself.
+
+What it cannot catch: a machine that goes from fine to locked up between two reads. With no panel open, a machine whose memory is not elevated is read once a minute. If it runs out of memory and stops answering within that minute, there is no reading of the problem to send, and it shows as offline like any other machine. A Mac on its way to running out usually passes through elevated first, and from then on it is read every 15 seconds and its silence is reported.
 
 ## Install
 
@@ -176,25 +209,25 @@ On a Linux desktop, type `orca-ide` where these commands say `orca`.
 | CPU busy, strained, critical at | 70,&nbsp;85,&nbsp;95&nbsp;% | The thresholds for the CPU level. |
 | Memory busy, strained, critical at | 75,&nbsp;88,&nbsp;95&nbsp;% | The thresholds for memory pressure, the share of memory the system no longer has available. |
 | RAM used busy at | 90&nbsp;% | A machine whose RAM used passes this counts as Busy. [Memory](#memory) has the other memory rules. |
-| Alert when memory runs short | On | Sends a desktop notification when a machine's memory reaches Strained or Critical. |
+| Alert when memory runs short | On | Sends a desktop notification when a machine's memory reaches Strained or Critical, or when it stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details. |
 | Orca CLI path | Empty | Leave it empty to find the CLI that ships with this Orca. |
 | Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. |
-| Monitor in the background | On | Reads machines on the slow interval while no panel is open, to keep the status bar current. |
+| Monitor in the background | On | Reads machines on the slow interval while no panel is open, to keep the status bar current and to send memory alerts for paired machines. Off, paired machines alert only while a panel is open. |
 
 ## In the background
 
 Each installed copy runs a worker for as long as the plugin is enabled. With no panel open, the worker does two things:
 
 - It publishes this machine's readings every 5 seconds. **Publish this machine's readings** turns that off.
-- It reads every machine its Orca reaches every 60 seconds, the slow interval, to keep its status bar item current. **Monitor in the background** turns that off.
+- It reads every machine its Orca reaches every 60 seconds, the slow interval, to keep its status bar item current and to send memory alerts. **Monitor in the background** turns that off.
 
-On a server that has Fleet Monitor only so that a desktop can show it at the full level, nobody looks at the status bar. Turn **Monitor in the background** off there. The server then makes no CLI calls unless one of its own panels is open, and it keeps publishing. The setting is on by default everywhere because Orca gives a plugin no reliable way to tell such a server from a desktop. On a desktop with it off, the status bar sums up this computer only.
+On a server that has Fleet Monitor only so that a desktop can show it at the full level, nobody looks at the status bar. Turn **Monitor in the background** off there. The server then makes no CLI calls unless one of its own panels is open, and it keeps publishing. The setting is on by default everywhere because Orca gives a plugin no reliable way to tell such a server from a desktop. On a desktop with it off, the status bar sums up this computer only, and paired machines send no alerts while no panel is open.
 
 ### What polling costs
 
 Reading a machine means running the Orca CLI, one short-lived process per read. Each takes a few tenths of a second, most of it start-up.
 
-- Fleet Monitor reads machines every 5 seconds only while a panel is open. Otherwise it reads them every 60 seconds, or not at all with background monitoring off. A machine whose memory is Strained or Critical is read about every 15 seconds until it recovers.
+- Fleet Monitor reads machines every 5 seconds only while a panel is open. Otherwise it reads them every 60 seconds, or not at all with background monitoring off. A machine whose memory is elevated is read about every 15 seconds until it recovers ([Memory alerts](#memory-alerts)).
 - While a panel is open, the diagnostics call for a full machine, and for this computer, runs every 15 seconds instead of every 5.
 - At most two reads run at once. A machine that fails to answer moves to two slots of its own, so it can hold up the others for one call at most, until the 15-second timeout.
 - Fleet Monitor retries an unreachable machine with a growing delay, up to 5 minutes.
@@ -208,6 +241,8 @@ With **Publish this machine's readings** on, which is the default, the worker wr
 - the load averages, and the memory figures listed under [Memory](#memory);
 - a random id for the worker run, a sequence number and the time.
 
+The same log gets one line for each memory alert the machine shows, with the alert's title, which names the machine the alert is about, and whether Orca delivered it.
+
 Anyone who can read that machine's plugin logs can read these lines. That means someone on that machine, and any Orca paired with it (`orca plugin logs <key> --environment <machine>`). Nothing is sent anywhere else, and the panel makes no network requests. With the setting off, other machines show this one at the basic level.
 
 <details>
@@ -215,7 +250,8 @@ Anyone who can read that machine's plugin logs can read these lines. That means 
 
 Fleet Monitor is a full-access (`trusted-worker`) plugin: its worker runs as a Node process on your machine.
 
-- It asks for two capabilities: `settings:own`, and `notifications:show` for the memory notification. It adds one panel, one status bar item and one command, **Show Fleet Monitor**.
+- It asks for two capabilities: `settings:own`, and `notifications:show` for the memory notifications. It adds one panel, one status bar item and two commands, **Show Fleet Monitor** and **Fleet Monitor: Send a test alert**.
+- In the desktop app, the panel's **Star on GitHub** link opens this project's page, `https://github.com/mswdev/orca-fleet-monitor`, in your browser through Orca, which asks you first. It is the only address the plugin opens, and only when you click it.
 - It runs these Orca CLI commands, all read-only: `environment list`, `host list`, `diagnostics memory`, `plugin list` and `plugin logs`. The last three also run against paired servers.
 - It runs `plugin open` on this machine when you click the status bar item.
 - On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. On Windows it runs `taskkill` to end a CLI call that timed out.
@@ -240,7 +276,7 @@ Fleet Monitor treats a paired server, the CLI's answers about it and the lines i
 - Orca 1.4.248 or later.
 - The Orca desktop app. The panel is not made for Orca's browser client (`orca serve` opened in a web browser).
 - macOS, both for this computer and for paired servers. It is the only platform Fleet Monitor is tested on and, in practice, the only one it supports. Linux and Windows are implemented but untested. That covers the launcher names, ending a timed-out CLI call's process tree, and Windows having no load average.
-- History covers the last 30 minutes. The worker keeps it in memory, so it starts again whenever Orca or the plugin restarts.
+- History covers the last 30 minutes. The worker keeps it in memory, so it starts again whenever Orca or the plugin restarts. So does what it has already alerted about: after a restart, a machine that is still short of memory alerts again.
 - When a machine reaches the full level, the readings still in its log, about the last 16 minutes, fill the gaps in its history. They are added only where there is no reading yet.
 - Only Apple silicon reports the split into P-cores and E-cores. Which core is which was measured on an Apple M2 Max, and other Apple chips are assumed to number their cores the same way. Where the split is unknown, the panel draws the cores as one group.
 

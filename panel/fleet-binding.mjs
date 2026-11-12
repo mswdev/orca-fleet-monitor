@@ -293,6 +293,21 @@ export function createFleetBinding(orca, options = {}) {
   }
 }
 
+/**
+ * The frame's `orca.shell.openExternal`, when this Orca offers it to a panel, else null. It exists
+ * only in the desktop app and needs a click or key press; `orca.host.has` says whether it is
+ * there, so the panel shows a link only where it can open it.
+ */
+export function externalOpener(orca) {
+  try {
+    if (typeof orca?.host?.has !== 'function' || orca.host.has('shell.openExternal') !== true) return null
+    if (typeof orca.shell?.openExternal !== 'function') return null
+  } catch {
+    return null
+  }
+  return (url) => orca.shell.openExternal(url)
+}
+
 // --- From the live model to the design's FLEET shape ------------------------------------------
 
 /** The worker's defaults (src/health.ts), for a snapshot that carries no thresholds. */
@@ -563,7 +578,27 @@ const rateOrNull = (value) => (finite(value) && value >= 0 ? value : null)
 function memoryKindOf(memory) {
   if (memory?.kind === 'used' && memory.mac && typeof memory.mac === 'object') return 'used'
   if (memory?.kind === 'pressure') return 'pressure'
+  if (memory?.kind === 'unavailable') return 'unavailable'
   return 'orca'
+}
+
+const LOST_LABELS = Object.freeze({ unanswered: 'Stopped answering', stale: 'Readings stopped' })
+
+/** A machine that stopped answering (or whose readings stopped) while its memory was elevated:
+ *  what to say, its last reading, and the level it is drawn at (never below strained). */
+function lostOf(m) {
+  const lost = m.lost
+  if (!lost || typeof lost !== 'object') return null
+  const how = own(LOST_LABELS, lost.how) ? lost.how : 'unanswered'
+  const last = levelOrNull(lost.level)
+  return {
+    how,
+    label: LOST_LABELS[how],
+    summary: typeof lost.summary === 'string' ? plainText(lost.summary.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')).slice(0, 200) : '',
+    level: last === 'critical' ? 'critical' : 'strained',
+    lastReadingAt: finite(lost.lastReadingAt) ? lost.lastReadingAt : null,
+    since: finite(lost.since) ? lost.since : null
+  }
 }
 
 /** A Mac's own reading, as the detail rows show it; null for any other machine. */
@@ -618,7 +653,9 @@ function toMachine(m, thresholds, now, context) {
   const newestCpu = newestReading(history, 'cpu')
   const newestMem = newestReading(history, memKey)
   const seen = [m.lastSeenAt, newestCpu?.t, newestMem?.t].filter(finite)
-  const health = online ? (levelOrNull(m.health?.level) ?? 'unknown') : 'unknown'
+  const lost = local ? null : lostOf(m)
+  // Offline and lost: drawn at the level of its last reading, so it is not mistaken for a quiet one.
+  const health = online ? (levelOrNull(m.health?.level) ?? 'unknown') : lost ? lost.level : 'unknown'
   const perCoreCount = Array.isArray(m.cpu?.perCore) ? m.cpu.perCore.length : 0
   return {
     id: String(m.id),
@@ -630,8 +667,9 @@ function toMachine(m, thresholds, now, context) {
     tier: basic ? 'basic' : 'full',
     tag: local ? localTag(platform) : basic ? 'Basic' : '',
     health,
-    healthLabel: own(LEVEL_LABELS, health) ?? LEVEL_LABELS.unknown,
-    reasons: online && Array.isArray(m.health?.reasons) ? m.health.reasons.filter((r) => typeof r === 'string' && r !== 'offline').slice(0, 4) : [],
+    healthLabel: !online && lost ? lost.label : (own(LEVEL_LABELS, health) ?? LEVEL_LABELS.unknown),
+    reasons: (online || lost) && Array.isArray(m.health?.reasons) ? m.health.reasons.filter((r) => typeof r === 'string' && r !== 'offline').map(plainText).slice(0, 4) : [],
+    lost,
     updatedAt: seen.length > 0 ? Math.max(...seen) : null,
     lastSeenAt: finite(m.lastSeenAt) ? m.lastSeenAt : null,
     error: typeof m.error === 'string' && m.error ? plainText(m.error) : null,
@@ -654,10 +692,13 @@ function toMachine(m, thresholds, now, context) {
       kind: memKind,
       /** What the figure is called: never "used" for Orca's pressure reading of a Mac. */
       label: memKind === 'pressure' ? 'Memory pressure' : 'Memory',
-      pct: memPct,
-      reliable: memReliable,
+      // Orca's free memory on a Mac is neither RAM in use nor pressure: no figure is shown.
+      pct: memKind === 'unavailable' ? null : memPct,
+      reliable: memReliable && memKind !== 'unavailable',
+      /** Carried over a failed read on that Mac, for longer than a reading or two: how old, in s. */
+      carriedSec: memKind === 'used' && finite(m.memory.mac.ageMs) && m.memory.mac.ageMs >= 1_000 ? Math.round(m.memory.mac.ageMs / 1_000) : null,
       // Orca's "used" on a Mac is pressure, not RAM in use, so it is not shown as such.
-      usedBytes: memKind !== 'pressure' && m.memory && finite(m.memory.used) ? m.memory.used : null,
+      usedBytes: memKind !== 'pressure' && memKind !== 'unavailable' && m.memory && finite(m.memory.used) ? m.memory.used : null,
       totalBytes: m.memory && finite(m.memory.total) ? m.memory.total : null,
       tone: levelOrNull(m.health?.memory) ?? (memReliable && memPct !== null ? levelFor(memPct, thresholds.memory) : 'ok'),
       history: bucketHistory(history, memKey, now),

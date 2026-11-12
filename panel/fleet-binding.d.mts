@@ -94,6 +94,16 @@ export type MachineModel = {
   health: Level | 'unknown'
   healthLabel: string
   reasons: string[]
+  /** It stopped answering (`unanswered`) or its readings stopped (`stale`) while its memory was
+   *  elevated: its last reading, and the level it is drawn at (strained or critical). */
+  lost: {
+    how: 'unanswered' | 'stale'
+    label: string
+    summary: string
+    level: 'strained' | 'critical'
+    lastReadingAt: number | null
+    since: number | null
+  } | null
   /** Local clock: the newest reading of any kind. */
   updatedAt: number | null
   lastSeenAt: number | null
@@ -119,7 +129,7 @@ export type MachineModel = {
   mem: {
     /** `used`: RAM in use from a Mac's own reading. `pressure`: Orca's memory pressure reading of a
      *  Mac. `orca`: Orca's figure elsewhere, shown as before. */
-    kind: 'used' | 'pressure' | 'orca'
+    kind: 'used' | 'pressure' | 'unavailable' | 'orca'
     /** `Memory pressure` for the `pressure` kind, else `Memory`. */
     label: string
     /** RAM used % (`used`), memory pressure % (`pressure`), or Orca's figure. */
@@ -133,6 +143,8 @@ export type MachineModel = {
     history: (number | null)[]
     stats: Stats | null
     mac: MacDetail | null
+    /** For the `used` kind, how many seconds old figures carried over a failed read are. */
+    carriedSec: number | null
     /** Memory pressure % beside RAM in use, for the `used` kind. */
     pressurePct: number | null
     /** For the `pressure` kind, what would add RAM in use: install, enable or update Fleet
@@ -193,3 +205,7 @@ export function installCommand(
   options?: { launcher?: string; ambiguous?: boolean }
 ): string | null
 export function toFleet(view: FleetView | null | undefined, now?: number): FleetModel
+
+/** `orca.shell.openExternal` when the frame's `orca.host.has('shell.openExternal')` says it is
+ *  offered (the desktop app), else null. */
+export function externalOpener(orca: unknown): ((url: string) => Promise<unknown>) | null

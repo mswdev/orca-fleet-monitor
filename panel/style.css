@@ -966,3 +966,59 @@ body {
   font-weight: 600;
   color: var(--fm-level);
 }
+
+/* A machine that stopped answering, or whose readings stopped, while its memory was short: the
+ * level of its last reading marks the card and the notice, and the words say it. */
+.fm-card--lost {
+  border-color: var(--fm-level);
+}
+.fm-card--lost .fm-lost-note {
+  color: var(--fm-card-fg);
+  overflow-wrap: anywhere;
+}
+.fm-lost-line {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fm-level);
+  overflow-wrap: anywhere;
+}
+.fm-lost-line .fm-lost-note {
+  font-weight: 400;
+  color: var(--fm-card-fg);
+}
+.fm-lost {
+  grid-column: 1 / -1;
+  border-color: var(--fm-level);
+  overflow-wrap: anywhere;
+}
+.fm-lost h2 {
+  color: var(--fm-level);
+}
+.fm-lost p {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* The foot of the overview: one quiet link, in the muted text colour. */
+.fm-foot {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+.fm-foot-link {
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--fm-muted-fg);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--fm-border);
+  text-underline-offset: 3px;
+}
+.fm-foot-link:hover {
+  color: var(--fm-fg);
+  text-decoration-color: currentColor;
+}

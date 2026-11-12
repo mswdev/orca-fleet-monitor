@@ -63,6 +63,11 @@ type WireMac = {
   si?: number
   so?: number
   ss?: number
+  /** Only on a reading carried over a failed read (1.1.0 after deb1d7c): how old, in ms, the
+   *  `vm_stat` figures (`va`) and the kernel's (`ka`) are. Readers that do not know them ignore
+   *  them. */
+  va?: number
+  ka?: number
 }
 
 const WIRE_PRESSURE: Record<PressureLevel, number> = { normal: 1, warning: 2, critical: 4 }
@@ -85,9 +90,14 @@ function encodeMac(m: MacMemory | null | undefined): WireMac | undefined {
     ps: m.pageSize,
     ...opt('si', m.swapInsPerSec),
     ...opt('so', m.swapOutsPerSec),
-    ...opt('ss', m.sustainedSwapOutsPerSec)
+    ...opt('ss', m.sustainedSwapOutsPerSec),
+    ...opt('va', m.ageMs === undefined ? null : Math.round(m.ageMs)),
+    ...opt('ka', m.pressureAgeMs === undefined ? null : Math.round(m.pressureAgeMs))
   }
 }
+
+/** The longest age a carried figure may claim; Fleet Monitor carries none for longer than 5 min. */
+const MAX_FIGURE_AGE_MS = 3_600_000
 
 /** Page rates beyond this are nonsense, not readings. */
 const MAX_PAGE_RATE = 1e9
@@ -118,6 +128,14 @@ function decodeMac(raw: unknown): MacMemory | null {
     const n = num(value)
     return n === null || n < 0 ? null : Math.min(MAX_PAGE_RATE, n)
   }
+  // An age that is there but out of shape still says "carried": it is kept, at the longest.
+  const age = (value: unknown): { ms?: number } => {
+    if (value === undefined) return {}
+    const n = num(value)
+    return { ms: n === null ? MAX_FIGURE_AGE_MS : Math.min(MAX_FIGURE_AGE_MS, Math.max(0, Math.round(n))) }
+  }
+  const vmAge = age(w.va).ms
+  const kernelAge = age(w.ka).ms
   return {
     total,
     used,
@@ -132,7 +150,9 @@ function decodeMac(raw: unknown): MacMemory | null {
     pageSize: Math.round(pageSize),
     swapInsPerSec: rate(w.si),
     swapOutsPerSec: rate(w.so),
-    sustainedSwapOutsPerSec: rate(w.ss)
+    sustainedSwapOutsPerSec: rate(w.ss),
+    ...(vmAge === undefined ? {} : { ageMs: vmAge }),
+    ...(kernelAge === undefined ? {} : { pressureAgeMs: kernelAge })
   }
 }
 

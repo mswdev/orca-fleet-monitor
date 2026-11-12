@@ -1,7 +1,7 @@
 // Wires the pieces together inside a worker. Everything that touches the outside world comes in
 // through `MonitorDeps`, so tests run the real wiring with a fake CLI and a fake clock.
 import type { OrcaWorkerApi } from 'orca/worker'
-import { MemoryAlerts, type AlertNotice } from './alerts.ts'
+import { MemoryAlerts, oneLine, type AlertNotice } from './alerts.ts'
 import { BEACON_INTERVAL_MS, encodeBeacon } from './beacon.ts'
 import { PanelBridge } from './bridge.ts'
 import { cliLauncherName, type CliResolution, type CommandRunner } from './cli.ts'
@@ -13,6 +13,8 @@ import { STATUS_BAR_ID, statusBarView, type StatusBarView } from './status-bar.t
 // src/protocol.ts types `fleet.*` requests and posts; tsconfig includes it, nothing imports it.
 
 export const PLUGIN_ID = 'fleet-monitor'
+/** "Fleet Monitor: Send a test alert": a labelled test notification, through the alerts' own path. */
+export const TEST_ALERT_COMMAND_ID = 'fleet.testAlert'
 const TICK_MS = 1_000
 const STATUS_BAR_DEBOUNCE_MS = 1_000
 /** `statusBar.update` failing with `unavailable` for this long, without a success in between,
@@ -128,16 +130,23 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     now: deps.now,
     enabled: () => settings.memoryAlerts,
     health: () => settings.health,
-    memoryRules: () => settings.memoryRules
+    memoryRules: () => settings.memoryRules,
+    log: (line) => orca.log(`fleet-monitor: ${oneLine(line)}`)
   })
+  /** Shows one alert, and writes one line for it to the plugin log with what Orca answered, so
+   *  delivery can be checked (`delivered: true` means Orca handed it to the system; Focus or
+   *  macOS's notification settings can still hide it). The line never starts like a beacon: the
+   *  machine's name in it is on one line, after "fleet-monitor:". */
   const showAlert = async (notice: AlertNotice): Promise<void> => {
+    const what = oneLine(`${notice.kind} alert "${notice.title}"`).slice(0, 200)
     try {
       // Only `title` and `body`: Orca refuses a field it does not know.
       const result = (await orca.host.call('notifications.show', { title: notice.title, body: notice.body })) as { delivered?: unknown } | null
-      if (result?.delivered !== true) logOnce('notify-undelivered', 'a memory alert was not shown as a desktop notification here')
+      const delivered = result && typeof result === 'object' ? result.delivered : undefined
+      orca.log(`fleet-monitor: ${what} sent; Orca answered delivered: ${delivered === true ? 'true' : delivered === false ? 'false' : 'unknown'}`)
     } catch (error) {
       const code = (error as { code?: unknown }).code
-      logOnce('notify', `memory alert failed: ${String(code ?? error)}`)
+      orca.log(`fleet-monitor: ${what} not sent; Orca answered ${oneLine(String(code ?? (error instanceof Error ? error.message : error))).slice(0, 120)}`)
     }
   }
 
@@ -157,8 +166,12 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
         bridge?.notify()
         scheduleStatus()
       },
-      onMemoryReading: (state) => {
-        const notice = alerts.observe(state)
+      onMemoryReading: (reading) => {
+        const notice = alerts.observe(reading)
+        if (notice) void showAlert(notice)
+      },
+      onMemoryLost: (event) => {
+        const notice = alerts.stopped(event)
         if (notice) void showAlert(notice)
       },
       log: (message) => logOnce(message.split(':')[0] ?? message, message)
@@ -212,6 +225,14 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     disposables.push(
       orca.commands.register(SHOW_COMMAND_ID, async () => {
         await openOwnPanel(runner.run, PLUGIN_ID, deps.workerFile ?? null)
+      })
+    )
+  }
+  // "Fleet Monitor: Send a test alert": so a person can check that this computer shows them.
+  if (deps.declaredCommands?.includes(TEST_ALERT_COMMAND_ID)) {
+    disposables.push(
+      orca.commands.register(TEST_ALERT_COMMAND_ID, async () => {
+        await showAlert(alerts.testNotice())
       })
     )
   }

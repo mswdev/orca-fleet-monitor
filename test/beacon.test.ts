@@ -360,3 +360,32 @@ describe('a Mac memory reading (added in 1.1)', () => {
     assert.deepEqual({ ...fromOld, macMemory: undefined }, { ...released.decodeBeacon(oldLine)!, macMemory: undefined })
   })
 })
+
+describe('a reading carried over a failed read (1.1.0, this round)', () => {
+  const lineWith = (mm: Record<string, unknown>) => {
+    const line = encodeBeacon(localSample({ platform: 'darwin', macMemory: macMemory() }), meta)!
+    const wire = JSON.parse(line.slice(BEACON_PREFIX.length))
+    return BEACON_PREFIX + JSON.stringify({ ...wire, mm: { ...wire.mm, ...mm } })
+  }
+
+  test('travels with the ages of its vm_stat and kernel figures, and comes back the same', () => {
+    const carried = macMemory({ pressure: 'warning', ageMs: 5_000, pressureAgeMs: 10_000 })
+    const line = encodeBeacon(localSample({ platform: 'darwin', macMemory: carried }), meta)!
+    assert.match(line, /"va":5000,"ka":10000/)
+    assert.deepEqual(decodeBeacon(line)?.macMemory, carried)
+    const fresh = encodeBeacon(localSample({ platform: 'darwin', macMemory: macMemory() }), meta)!
+    assert.ok(!/"va"|"ka"/.test(fresh), 'a fresh reading carries no ages')
+    assert.equal(decodeBeacon(fresh)?.macMemory?.pressureAgeMs, undefined)
+  })
+
+  test('an age out of shape still says "carried", at the longest; the rest of the reading is kept', () => {
+    const at = (value: unknown) => decodeBeacon(lineWith({ ka: value }))?.macMemory?.pressureAgeMs
+    assert.equal(at(-5), 0)
+    assert.equal(at(1e12), 3_600_000)
+    assert.equal(at('5000'), 3_600_000)
+    assert.equal(at(null), 3_600_000)
+    assert.equal(decodeBeacon(lineWith({ va: 2_500.4 }))?.macMemory?.ageMs, 2_500)
+    assert.equal(decodeBeacon(lineWith({ ka: 'x' }))?.macMemory?.used, macMemory().used)
+  })
+})
+

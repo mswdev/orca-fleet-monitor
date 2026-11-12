@@ -2,6 +2,7 @@
 import type { FleetBinding, FleetModel } from './fleet-binding.mjs'
 
 export const PAIR_PATH: string
+export const REPOSITORY_URL: string
 
 export type FleetViewOptions = {
   binding: Pick<FleetBinding, 'current' | 'subscribe' | 'retry' | 'refresh'>
@@ -10,6 +11,8 @@ export type FleetViewOptions = {
   setInterval?: (fn: () => void, ms: number) => unknown
   clearInterval?: (handle: unknown) => void
   setTimeout?: (fn: () => void, ms: number) => unknown
+  /** Opens a URL in the browser (the frame's `orca.shell.openExternal`); with none, no link is drawn. */
+  openExternal?: ((url: string) => unknown) | null
 }
 
 export type FleetViewHandle = {

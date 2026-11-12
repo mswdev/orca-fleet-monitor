@@ -7,8 +7,13 @@ import { performance } from 'node:perf_hooks'
 import { groupsFit } from './core-groups.ts'
 import type { CoreGroup, LocalSample, MacMemory } from './model.ts'
 
-/** A Mac memory reading older than this (two sample intervals and a bit) is not attached. */
+/** A Mac memory reading older than this (two sample intervals and a bit) is not attached. Until
+ *  then, a sample whose own read failed carries the last one, marked with its age, so one failed
+ *  read neither drops the figures nor reads as a new reading. */
 export const MAC_MEMORY_MAX_AGE_MS = 12_000
+/** A read that has not answered after this long is given up on, so the next sample starts a fresh
+ *  one (each command has a 2 s timeout of its own; src/monitor.ts waits at most 3 s). */
+export const PREPARE_DEADLINE_MS = 2_750
 
 /** Reads a Mac's memory; src/mac-memory.ts's MacMemoryReader. */
 export type MemoryReader = { read(): Promise<MacMemory | null> }
@@ -95,17 +100,30 @@ export class LocalSampler {
   private readonly source: OsSource
   private readonly memory: MemoryReader | null
   private readonly mono: () => number
+  private readonly later: (fn: () => void, ms: number) => unknown
+  private readonly cancel: (handle: unknown) => void
   private previous: CpuInfo[] = []
   private last: LocalSample | null = null
   private coreGroups: CoreGroup[] | null = null
-  private mac: { value: MacMemory; at: number } | null = null
+  /** The last good reading, and whether the next sample is the first to carry it. */
+  private mac: { value: MacMemory; at: number; fresh: boolean } | null = null
   private reading: Promise<void> | null = null
+  private readingSince = 0
+  private generation = 0
 
-  /** `memory` reads a Mac's memory (null elsewhere); `mono` is a monotonic clock in ms. */
-  constructor(source: OsSource = realOs, memory: MemoryReader | null = null, mono: () => number = () => performance.now()) {
+  /** `memory` reads a Mac's memory (null elsewhere); `mono` is a monotonic clock in ms; `timers`
+   *  are for the read's deadline (test seams). */
+  constructor(
+    source: OsSource = realOs,
+    memory: MemoryReader | null = null,
+    mono: () => number = () => performance.now(),
+    timers: { setTimeout?: (fn: () => void, ms: number) => unknown; clearTimeout?: (handle: unknown) => void } = {}
+  ) {
     this.source = source
     this.memory = memory
     this.mono = mono
+    this.later = timers.setTimeout ?? ((fn, ms) => setTimeout(fn, ms).unref?.())
+    this.cancel = timers.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
     this.previous = this.readCpus()
   }
 
@@ -114,21 +132,45 @@ export class LocalSampler {
   }
 
   /** Reads the Mac's memory for the next `sample()`; resolves once it has (at once without a
-   *  reader). A read still running is joined, not started again. Never rejects. */
+   *  reader). A read still running is joined, not started again, until PREPARE_DEADLINE_MS: then
+   *  it is given up on (what it answers later is dropped) and the next call starts a fresh one. A
+   *  failed read keeps the last good reading for `sample()` to carry. Never rejects. */
   prepare(): Promise<void> {
     if (!this.memory) return Promise.resolve()
+    // A read older than the deadline on this sampler's own clock is given up on here too, should
+    // its timer not have fired (a host that froze timers, say).
+    if (this.reading && this.mono() - this.readingSince >= PREPARE_DEADLINE_MS) {
+      this.generation += 1
+      this.reading = null
+    }
     if (this.reading) return this.reading
     const reader = this.memory
-    this.reading = (async () => {
-      try {
-        const value = await reader.read()
-        this.mac = value ? { value, at: this.mono() } : null
-      } catch {
-        this.mac = null
-      } finally {
+    const generation = ++this.generation
+    this.readingSince = this.mono()
+    this.reading = new Promise<void>((resolve) => {
+      let handle: unknown = null
+      const done = (): void => {
+        if (generation !== this.generation || this.reading === null) return
+        this.cancel(handle)
         this.reading = null
+        resolve()
       }
-    })()
+      handle = this.later(() => {
+        if (generation !== this.generation) return
+        this.generation += 1 // what this read answers from now on is dropped
+        this.reading = null
+        resolve()
+      }, PREPARE_DEADLINE_MS)
+      void (async () => {
+        try {
+          const value = await reader.read()
+          if (generation === this.generation && value) this.mac = { value, at: this.mono(), fresh: true }
+        } catch {
+          // A failed read: the last good one stays, to be carried while it is young enough.
+        }
+        done()
+      })()
+    })
     return this.reading
   }
 
@@ -159,7 +201,20 @@ export class LocalSampler {
       load: [finite(load[0]), finite(load[1]), finite(load[2])],
       coreGroups: delta && groupsFit(this.coreGroups, delta.perCore.length) ? this.coreGroups : null
     }
-    if (this.mac && this.mono() - this.mac.at <= MAC_MEMORY_MAX_AGE_MS) sample.macMemory = this.mac.value
+    const mac = this.mac
+    if (mac) {
+      const age = Math.max(0, this.mono() - mac.at)
+      if (age > MAC_MEMORY_MAX_AGE_MS) {
+        this.mac = null
+      } else if (mac.fresh) {
+        sample.macMemory = mac.value
+        mac.fresh = false
+      } else {
+        // Carried: this sample's own read failed. Every figure is that much older than it was.
+        const carried = Math.round(age)
+        sample.macMemory = { ...mac.value, ageMs: (mac.value.ageMs ?? 0) + carried, pressureAgeMs: (mac.value.pressureAgeMs ?? 0) + carried }
+      }
+    }
     this.last = sample
     return sample
   }

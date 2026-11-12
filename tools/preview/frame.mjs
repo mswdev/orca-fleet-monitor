@@ -6,7 +6,7 @@
 // detail)  host=<token set> (pretend a user theme)  live=1 (moving data)  install=open (expands
 // the basic machine's install row)  pair=open (opens the pairing hint)
 import { applyHealthContrast } from '../../panel/contrast.mjs'
-import { createFleetBinding } from '../../panel/fleet-binding.mjs'
+import { createFleetBinding, externalOpener } from '../../panel/fleet-binding.mjs'
 import { mountFleetView } from '../../panel/view.mjs'
 import { createFakeOrca } from './fake-orca.mjs'
 
@@ -45,10 +45,10 @@ if (host) {
 }
 
 applyHealthContrast()
-const { orca } = createFakeOrca({ state: params.get('state') ?? 'live', live: params.get('live') === '1' })
+const { orca } = createFakeOrca({ state: params.get('state') ?? 'live', live: params.get('live') === '1', external: params.get('external') !== '0' })
 window.orca = orca
 const binding = createFleetBinding(orca)
-const view = mountFleetView(document.getElementById('app'), { binding })
+const view = mountFleetView(document.getElementById('app'), { binding, openExternal: externalOpener(orca) })
 
 binding.ready.then(() => {
   const machine = params.get('machine')

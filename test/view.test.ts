@@ -1,7 +1,7 @@
 // The panel's drawing (panel/view.mjs over panel/dom.mjs) in a small fake DOM (test/fake-dom.ts),
 // which refuses and records any attempt to parse a string as markup. Every value is invented.
 import { afterEach, assert, beforeEach, describe, test } from 'orca/testing'
-import type { FleetReadyView, FleetView } from '../panel/fleet-binding.mjs'
+import { externalOpener, type FleetReadyView, type FleetView } from '../panel/fleet-binding.mjs'
 import { mountFleetView } from '../panel/view.mjs'
 import { DEFAULT_HEALTH } from '../src/health.ts'
 import type { MachineView } from '../src/model.ts'
@@ -76,7 +76,7 @@ afterEach(() => {
 })
 
 /** Mounts the view on a binding that always answers `view`; timers run only when told to. */
-function mount(view: FleetView) {
+function mount(view: FleetView, openExternal: ((url: string) => unknown) | null = null) {
   const timers: (() => void)[] = []
   const retries: string[] = []
   const binding = {
@@ -102,7 +102,8 @@ function mount(view: FleetView) {
     setTimeout: ((fn: () => void) => {
       timers.push(fn)
       return 0
-    }) as unknown as typeof setTimeout
+    }) as unknown as typeof setTimeout,
+    openExternal
   })
   const runTimers = () => {
     for (const fn of timers.splice(0)) fn()
@@ -488,3 +489,82 @@ describe('memory (1.1)', () => {
     assert.deepEqual(facts.find((f) => f[0] === 'Memory'), ['Memory', '94% · 15.1 / 16 GB'])
   })
 })
+
+describe('a machine that stopped answering while its memory was short', () => {
+  const lost = { how: 'unanswered' as const, since: NOW - 10_000, lastReadingAt: NOW - 25_000, level: 'critical' as const, summary: 'memory pressure critical, 15.8 of 16 GB used, swap 9.1 GB' }
+
+  test('its card says so, at the level of its last reading, with that reading', () => {
+    const off = machine({ online: false, status: 'offline', lost, health: { level: 'unknown', reasons: ['offline', 'stopped answering; last reading: memory pressure critical, 15.8 of 16 GB used, swap 9.1 GB'], cpu: null, memory: null } })
+    const v = mount(viewOf([local(), off]))
+    const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
+    assert.equal(card.getAttribute('data-health'), 'critical')
+    assert.match(text(card), /Stopped answering/)
+    assert.equal($(card, '.fm-lost-note')?.textContent, 'Last reading 25s ago: memory pressure critical, 15.8 of 16 GB used, swap 9.1 GB')
+    assert.match(card.getAttribute('aria-label') ?? '', /Stopped answering while its memory was elevated\. Last reading 25s ago: memory pressure critical/)
+  })
+
+  test('its detail opens on what stopped, and an online one whose readings stopped says so above its figures', async () => {
+    const stale = machine({ lost: { ...lost, how: 'stale', level: 'strained' }, health: { level: 'strained', reasons: ['readings stopped; last reading: memory pressure warning'], cpu: 'ok', memory: 'ok' } })
+    const v = mount(viewOf([local(), stale]))
+    const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
+    assert.match($(card, '.fm-lost-line')?.textContent ?? '', /^Readings stopped · Last reading 25s ago: memory pressure critical/)
+    card.click()
+    await settle()
+    const section = $(v.root, '.fm-lost')!
+    assert.ok(section, 'a notice at the top of the detail')
+    assert.match(text(section), /Build Box’s readings stopped/)
+  })
+
+  test('memory Orca cannot give for a Mac is said to be unavailable', async () => {
+    const m = machine({ memory: { total: 64 * GIB, used: 63 * GIB, available: GIB, percent: 98, source: 'orca', reliable: false, kind: 'unavailable' }, health: { level: 'ok', reasons: [], cpu: 'ok', memory: null } })
+    const v = mount(viewOf([local(), m]))
+    $(v.root, '[data-action="open"][data-id="env-a"]')!.click()
+    await settle()
+    assert.match(text($(v.root, '[data-key="unavailable-note"]')!), /^Memory unavailable/)
+    assert.ok(!/98/.test(text($(v.root, '[data-key="memory"]')!)), 'no figure shown')
+  })
+})
+
+describe('the "Star on GitHub" link', () => {
+  /** A frame API as Orca gives it, offering `shell.openExternal` or not. */
+  const frame = (offered: boolean) => {
+    const opened: string[] = []
+    const orca = {
+      host: { has: (name: string) => offered && name === 'shell.openExternal', call: async () => null },
+      shell: { openExternal: async (url: string) => {
+        opened.push(url)
+        return { opened: true }
+      } }
+    }
+    return { orca, opened }
+  }
+
+  test('is drawn only where the frame offers shell.openExternal, and opens exactly the repository', () => {
+    const offered = frame(true)
+    const v = mount(viewOf([local()]), externalOpener(offered.orca))
+    const link = $(v.root, '[data-action="star"]')!
+    assert.ok(link, 'drawn')
+    assert.equal(link.textContent, 'Star on GitHub')
+    assert.equal(link.getAttribute('href'), null, 'a button, so the frame itself never navigates')
+    link.click()
+    assert.deepEqual(offered.opened, ['https://github.com/mswdev/orca-fleet-monitor'])
+    dom.restore()
+    dom = installFakeDom()
+    const missing = frame(false)
+    assert.equal(externalOpener(missing.orca), null)
+    const w = mount(viewOf([local()]), externalOpener(missing.orca))
+    assert.equal($(w.root, '[data-action="star"]'), null, 'not drawn without it')
+    assert.equal(externalOpener({}), null, 'an Orca without host.has')
+    assert.equal(externalOpener({ host: { has: () => true } }), null, 'or without shell.openExternal')
+  })
+
+  test('sits at the foot of the overview, not on a machine’s detail', async () => {
+    const v = mount(viewOf([local(), machine()]), externalOpener(frame(true).orca))
+    const nodes = v.root.childNodes as FakeElement[]
+    assert.equal(nodes[nodes.length - 1]?.getAttribute('data-key'), 'foot', 'last on the overview')
+    $(v.root, '[data-action="open"][data-id="env-a"]')!.click()
+    await settle()
+    assert.equal($(v.root, '[data-action="star"]'), null)
+  })
+})
+

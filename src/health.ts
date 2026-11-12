@@ -17,6 +17,16 @@ export const DEFAULT_RAM_USED_BUSY = 90
 export type MemoryRules = { ramUsedBusyPercent: number }
 export const DEFAULT_MEMORY_RULES: MemoryRules = { ramUsedBusyPercent: DEFAULT_RAM_USED_BUSY }
 
+/** A Mac's figures carried over a failed read (`ageMs`, `pressureAgeMs`) are judged until they are
+ *  this old, about two 5 s readings, and are unknown after that. */
+export const MAC_FIGURES_MAX_AGE_MS = 12_000
+
+/** Memory is "elevated", and its machine watched more closely (src/poller.ts), at any of: macOS's
+ *  pressure level above normal, RAM in use at or above `ramUsedPercent`, `availablePercent` or
+ *  less of memory available, any swap-outs since the last reading, or a strained or critical
+ *  level. */
+export const ELEVATED = { ramUsedPercent: 80, availablePercent: 30 } as const
+
 export function rank(level: HealthLevel | 'unknown'): number {
   return level === 'unknown' ? -1 : HEALTH_ORDER.indexOf(level)
 }
@@ -57,7 +67,7 @@ function mbPerSec(pages: number, pageSize: number): string {
 export type MemoryInput = {
   percent: number
   reliable: boolean
-  kind?: 'used' | 'pressure'
+  kind?: 'used' | 'pressure' | 'unavailable'
   pressurePercent?: number | null
   total?: number
   used?: number
@@ -66,13 +76,24 @@ export type MemoryInput = {
 
 type Part = { level: HealthLevel; reason: string }
 
+/** Whether a Mac's RAM figures (`vm_stat`'s) and its kernel figures (`sysctl`'s) are young enough
+ *  to judge: read with this reading, or carried over a failed read for at most
+ *  MAC_FIGURES_MAX_AGE_MS. */
+export function macFiguresFresh(mac: MacMemory | null | undefined): { ram: boolean; kernel: boolean } {
+  return {
+    ram: (mac?.ageMs ?? 0) <= MAC_FIGURES_MAX_AGE_MS,
+    kernel: (mac?.pressureAgeMs ?? 0) <= MAC_FIGURES_MAX_AGE_MS
+  }
+}
+
 /**
  * The memory level: the worst of
  * - macOS's own pressure level: critical is critical, warning is strained;
  * - memory pressure % (100 − available) on the memory thresholds, on every machine;
  * - RAM used % at `ramUsedBusyPercent` or more: busy (only where RAM in use is reported);
  * - swap-outs sustained over about 30 s while swap in use is at least a quarter of RAM: busy.
- * Each rule that fires says so, with its numbers.
+ * Each rule that fires says so, with its numbers. A Mac's figures carried for longer than
+ * MAC_FIGURES_MAX_AGE_MS are not judged.
  */
 function memoryParts(memory: MemoryInput, thresholds: HealthThresholds, rules: MemoryRules): Part[] {
   const parts: Part[] = []
@@ -80,6 +101,7 @@ function memoryParts(memory: MemoryInput, thresholds: HealthThresholds, rules: M
   const judged = (level: HealthLevel, reason: string): void => {
     parts.push({ level, reason: level === 'ok' ? '' : reason })
   }
+  if (memory.kind === 'unavailable') return parts
   if (memory.kind !== 'used') {
     const level = levelFor(memory.percent, t)
     const what = memory.kind === 'pressure' ? 'memory pressure' : 'memory'
@@ -87,15 +109,17 @@ function memoryParts(memory: MemoryInput, thresholds: HealthThresholds, rules: M
     return parts
   }
   const mac = memory.mac ?? null
-  if (mac?.pressure === 'critical' || mac?.pressure === 'warning') {
+  const fresh = macFiguresFresh(mac)
+  if (fresh.kernel && (mac?.pressure === 'critical' || mac?.pressure === 'warning')) {
     const left = mac.availablePercent === null ? '' : `, ${Math.round(mac.availablePercent)}% available`
     judged(mac.pressure === 'critical' ? 'critical' : 'strained', `macOS memory pressure ${mac.pressure}${left}`)
   }
   const pressure = memory.pressurePercent
-  if (typeof pressure === 'number' && Number.isFinite(pressure)) {
+  if (fresh.kernel && typeof pressure === 'number' && Number.isFinite(pressure)) {
     const level = levelFor(pressure, t)
     judged(level, `memory pressure ${Math.round(pressure)}% ≥ ${thresholdOf(level, t)}%`)
   }
+  if (!fresh.ram) return parts
   const busyAt = Math.min(100, Math.max(1, rules.ramUsedBusyPercent))
   const used = memory.used ?? 0
   const total = memory.total ?? 0
@@ -168,6 +192,40 @@ export function memoryReasons(
   if (parts.length === 0) return { level: null, reasons: [] }
   const level = parts.reduce((a, b) => (rank(b.level) > rank(a.level) ? b : a)).level
   return { level, reasons: parts.filter((p) => p.level === level && p.reason).map((p) => p.reason) }
+}
+
+/** Is this memory elevated (see ELEVATED)? Unknown, unreliable or unavailable memory is not. */
+export function memoryElevated(memory: MemoryInput | null | undefined, settings: HealthSettings, rules: MemoryRules = DEFAULT_MEMORY_RULES): boolean {
+  if (!memory || !memory.reliable || memory.kind === 'unavailable') return false
+  const level = memoryReasons(memory, settings, rules).level
+  if (level === 'strained' || level === 'critical') return true
+  const pressureAt = 100 - ELEVATED.availablePercent
+  if (memory.kind !== 'used') return memory.percent >= pressureAt
+  const mac = memory.mac ?? null
+  const fresh = macFiguresFresh(mac)
+  if (fresh.kernel && (mac?.pressure === 'warning' || mac?.pressure === 'critical')) return true
+  if (fresh.kernel && typeof memory.pressurePercent === 'number' && memory.pressurePercent >= pressureAt) return true
+  if (fresh.ram && memory.percent >= ELEVATED.ramUsedPercent) return true
+  return fresh.ram && (mac?.swapOutsPerSec ?? 0) > 0
+}
+
+/** A memory reading in words, as an alert or a "stopped answering" note gives it: "memory
+ *  pressure critical, 15.8 of 16 GB used, swap 9.1 GB" for a Mac's own reading, "memory pressure
+ *  90% of 32 GB" for Orca's reading of a Mac, "memory 90% of 32 GB" elsewhere. */
+export function memorySummary(memory: MemoryInput | null | undefined): string {
+  if (!memory || memory.kind === 'unavailable' || !memory.reliable) return 'memory unknown'
+  const total = memory.total ?? 0
+  if (memory.kind === 'used') {
+    const mac = memory.mac ?? null
+    const parts: string[] = []
+    if (mac?.pressure === 'warning' || mac?.pressure === 'critical') parts.push(`memory pressure ${mac.pressure}`)
+    else if (typeof memory.pressurePercent === 'number' && Number.isFinite(memory.pressurePercent)) parts.push(`memory pressure ${Math.round(memory.pressurePercent)}%`)
+    parts.push(`${gbText(memory.used ?? 0)} of ${gbText(total)} GB used`)
+    if (mac?.swapUsed !== null && mac?.swapUsed !== undefined && mac.swapUsed > 0) parts.push(`swap ${gbText(mac.swapUsed)} GB`)
+    return parts.join(', ')
+  }
+  const what = memory.kind === 'pressure' ? 'memory pressure' : 'memory'
+  return total > 0 ? `${what} ${Math.round(memory.percent)}% of ${gbText(total)} GB` : `${what} ${Math.round(memory.percent)}%`
 }
 
 /** CPU read by a sampler (here or in a remote's beacon), as opposed to estimated from load. */

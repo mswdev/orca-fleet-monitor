@@ -225,21 +225,96 @@ export function swapRates(history: readonly Counters[], pageSize: number): Pick<
 export type ExecResult = { error: (Error & { code?: unknown; killed?: boolean }) | null; stdout: string }
 export type ExecFile = (file: string, args: readonly string[], options: { timeout: number; maxBuffer: number }) => Promise<ExecResult>
 
-const realExec: ExecFile = (file, args, options) =>
-  new Promise((resolve) => {
-    try {
-      execFile(file, [...args], { timeout: options.timeout, maxBuffer: options.maxBuffer, encoding: 'utf8', windowsHide: true, env: {} }, (error, stdout) =>
-        resolve({ error: error as ExecResult['error'], stdout: String(stdout ?? '') })
-      )
-    } catch (error) {
-      resolve({ error: error instanceof Error ? error : new Error(String(error)), stdout: '' })
-    }
-  })
+/** A command's answer is waited for this much past its timeout, then given up on. */
+const KILL_GRACE_MS = 250
+/** Children of timed-out reads that have not exited yet. While this many linger, no new one
+ *  starts: on a Mac short of memory, processes stuck in the kernel must not pile up. */
+export const MAX_LINGERING = 4
+
+/** What runBounded needs of `child_process.execFile` (a test seam). */
+type Spawn = (
+  file: string,
+  args: string[],
+  options: { timeout: number; killSignal: 'SIGKILL'; maxBuffer: number; encoding: 'utf8'; windowsHide: boolean; env: Record<string, string> },
+  callback: (error: Error | null, stdout: string) => void
+) => { exitCode: number | null; signalCode: string | null; kill(signal?: string): boolean; once(event: 'exit', listener: () => void): unknown }
+
+/**
+ * Runs a command with a timeout, and always answers by `timeout` + 250 ms. Node's own timeout
+ * kills the child (SIGKILL here) and closes its pipes, but its callback still waits for the child
+ * to exit, which a process stuck in the kernel (a Mac thrashing) may not do for a long time. So
+ * this answers on its own timer as well, as timed out, and the next read starts fresh; at most
+ * MAX_LINGERING such children are left waiting to exit before it starts no more. Never rejects.
+ */
+export function createRunBounded(spawn: Spawn = execFile as unknown as Spawn): ExecFile {
+  let lingering = 0
+  return (file, args, options) =>
+    new Promise((resolve) => {
+      if (lingering >= MAX_LINGERING) {
+        resolve({ error: Object.assign(new Error('earlier reads have not exited'), { code: 'EBUSY' }), stdout: '' })
+        return
+      }
+      let settled = false
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const finish = (result: ExecResult): void => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        resolve(result)
+      }
+      let child: ReturnType<Spawn>
+      try {
+        child = spawn(
+          file,
+          [...args],
+          { timeout: options.timeout, killSignal: 'SIGKILL', maxBuffer: options.maxBuffer, encoding: 'utf8', windowsHide: true, env: {} },
+          (error, stdout) => finish({ error: error as ExecResult['error'], stdout: String(stdout ?? '') })
+        )
+      } catch (error) {
+        finish({ error: error instanceof Error ? error : new Error(String(error)), stdout: '' })
+        return
+      }
+      timer = setTimeout(() => {
+        if (settled) return
+        if (child.exitCode === null && child.signalCode === null) {
+          lingering += 1
+          child.once('exit', () => {
+            lingering -= 1
+          })
+        }
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // Already gone.
+        }
+        finish({ error: Object.assign(new Error(`${file} did not answer`), { killed: true, code: null }), stdout: '' })
+      }, Math.max(0, options.timeout) + KILL_GRACE_MS)
+      timer.unref?.()
+    })
+}
+
+/** The runner every MacMemoryReader uses unless given another. */
+export const runBounded: ExecFile = createRunBounded()
+
+/** When one command fails, what the other read is kept, with an earlier reading of the failed
+ *  one standing in for it, marked with its age:
+ *  - `sysctl`'s figures (the kernel's pressure level, percent available, swap) for up to this long,
+ *    about two 5 s readings; */
+export const SYSCTL_CARRY_MS = 12_000
+/**  - `vm_stat`'s figures (RAM in use and its parts) for up to this long while `sysctl` still
+ *    reads, because the kernel's level is what warns of a lock-up. A desktop judges RAM figures
+ *    older than MAC_FIGURES_MAX_AGE_MS (src/health.ts) as unknown. */
+export const VM_STAT_CARRY_MS = 5 * 60_000
+
+type VmFigures = { vm: VmStat; at: number; rates: Pick<MacMemory, 'swapInsPerSec' | 'swapOutsPerSec' | 'sustainedSwapOutsPerSec'> }
 
 /**
  * Reads a Mac's memory: one `vm_stat` and one `sysctl -n` each time, run side by side with a
- * timeout. Keeps the swap counters of the last minute or so for the rates. Never throws; anything
- * that fails resolves null, and on any other platform it runs nothing.
+ * timeout. Keeps the swap counters of the last minute or so for the rates. When only one command
+ * fails, the other's figures are kept and the failed one's last figures stand in, marked with their
+ * age (`ageMs`, `pressureAgeMs`). Never throws; resolves null when neither can give a reading
+ * (src/sampler.ts then carries the last whole reading briefly), and on any other platform it runs
+ * nothing.
  */
 export class MacMemoryReader {
   private readonly exec: ExecFile
@@ -247,9 +322,11 @@ export class MacMemoryReader {
   private readonly osTotal: () => number
   private readonly platform: string
   private counters: Counters[] = []
+  private lastVm: VmFigures | null = null
+  private lastSys: { sys: SysctlMemory; at: number } | null = null
 
   constructor(options: { exec?: ExecFile; mono?: () => number; osTotal?: () => number; platform?: string } = {}) {
-    this.exec = options.exec ?? realExec
+    this.exec = options.exec ?? runBounded
     this.mono = options.mono ?? (() => performance.now())
     this.osTotal = options.osTotal ?? (() => 0)
     this.platform = options.platform ?? process.platform
@@ -260,19 +337,36 @@ export class MacMemoryReader {
     const limits = { timeout: TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES }
     const [vmOut, sysOut] = await Promise.all([this.exec(VM_STAT_PATH, [], limits), this.exec(SYSCTL_PATH, ['-n', ...SYSCTL_NAMES], limits)])
     const at = this.mono()
-    // sysctl exits 1 when it skips a name it does not know and still prints the rest; a timeout,
-    // a kill or a failure to start leaves nothing to read.
-    const sysUsable = !sysOut.error || (typeof sysOut.error.code === 'number' && !sysOut.error.killed)
-    const vm = vmOut.error ? null : parseVmStat(vmOut.stdout)
-    if (!vm) return null
     let total = 0
     try {
       total = this.osTotal()
     } catch {
       total = 0
     }
-    const figures = macMemoryOf(vm, parseSysctl(sysUsable ? sysOut.stdout : '', total), total)
-    if (!figures) return null
+    // sysctl exits 1 when it skips a name it does not know and still prints the rest; a timeout,
+    // a kill or a failure to start leaves nothing to read.
+    const sysUsable = !sysOut.error || (typeof sysOut.error.code === 'number' && !sysOut.error.killed)
+    const parsedSys = sysUsable ? parseSysctl(sysOut.stdout, total) : null
+    const freshSys = parsedSys && Object.values(parsedSys).some((value) => value !== null) ? parsedSys : null
+    if (freshSys) this.lastSys = { sys: freshSys, at }
+    const carriedSys = !freshSys && this.lastSys && at - this.lastSys.at >= 0 && at - this.lastSys.at <= SYSCTL_CARRY_MS ? this.lastSys : null
+    const sys = freshSys ?? carriedSys?.sys ?? parseSysctl('', total)
+
+    const parsedVm = vmOut.error ? null : parseVmStat(vmOut.stdout)
+    const freshFigures = parsedVm ? macMemoryOf(parsedVm, sys, total) : null
+    if (parsedVm && freshFigures) {
+      this.lastVm = { vm: parsedVm, at, rates: this.rates(parsedVm, at) }
+      return { ...freshFigures, ...this.lastVm.rates, ...(carriedSys ? { pressureAgeMs: Math.round(at - carriedSys.at) } : {}) }
+    }
+    // vm_stat gave nothing usable: its last figures stand in, but only beside a fresh kernel level.
+    const last = this.lastVm
+    if (!freshSys || !last || at - last.at < 0 || at - last.at > VM_STAT_CARRY_MS) return null
+    const carried = macMemoryOf(last.vm, sys, total)
+    return carried ? { ...carried, ...last.rates, ageMs: Math.round(at - last.at) } : null
+  }
+
+  /** Swap rates from this reading's counters and the last minute or so of earlier ones. */
+  private rates(vm: VmStat, at: number): VmFigures['rates'] {
     if (vm.swapIns !== null && vm.swapOuts !== null) {
       const last = this.counters[this.counters.length - 1]
       // Counters that went back (or time that did) start the history again.
@@ -283,6 +377,6 @@ export class MacMemoryReader {
     } else {
       this.counters = []
     }
-    return { ...figures, ...swapRates(this.counters, vm.pageSize) }
+    return swapRates(this.counters, vm.pageSize)
   }
 }

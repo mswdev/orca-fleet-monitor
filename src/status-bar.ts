@@ -1,5 +1,7 @@
-// The one status bar item: the machine that most needs attention.
+// The one status bar item: the machine that most needs attention. A machine that stopped answering
+// while its memory was elevated (`lost`) comes first: it may have run out of memory.
 import { gbText, isMeasuredCpu, rank, worstMachine } from './health.ts'
+import { lostLevel } from './merge.ts'
 import type { MachineState } from './model.ts'
 
 export const STATUS_BAR_ID = 'fleet'
@@ -29,6 +31,7 @@ function cpuText(m: MachineState): string {
 /** Memory as the panel names it: RAM in use for a Mac's own reading, memory pressure for Orca's
  *  reading of a Mac (never "used"), and Orca's figure as before elsewhere. */
 function memoryText(m: MachineState): string {
+  if (m.memory?.kind === 'unavailable') return 'memory unavailable'
   const memory = m.memory && m.memory.reliable ? m.memory : null
   if (!memory) return 'mem –'
   if (memory.kind === 'used') {
@@ -40,6 +43,21 @@ function memoryText(m: MachineState): string {
   }
   if (memory.kind === 'pressure') return `memory pressure ${pct(memory.percent)}`
   return `mem ${pct(memory.percent)}`
+}
+
+/** "stopped answering" or "readings stopped", for a lost machine. */
+function lostWords(m: MachineState): string {
+  return m.lost?.how === 'stale' ? 'readings stopped' : 'stopped answering'
+}
+
+/** The lost machine to name, if any: the one whose last level was worst, then the latest. */
+function worstLost(machines: readonly MachineState[]): MachineState | null {
+  let worst: MachineState | null = null
+  for (const m of machines) {
+    if (!m.lost) continue
+    if (!worst || rank(lostLevel(m.lost)) > rank(lostLevel(worst.lost!)) || (rank(lostLevel(m.lost)) === rank(lostLevel(worst.lost!)) && m.lost.since > worst.lost!.since)) worst = m
+  }
+  return worst
 }
 
 /** The level and, when it is not ok, why. */
@@ -61,22 +79,34 @@ export function statusBarView(all: readonly MachineState[], options: StatusBarOp
   const offline = machines.filter((m) => m.kind === 'remote' && m.status === 'offline')
   const worst = worstMachine(machines)
   const level = worst?.health.level ?? 'unknown'
+  const lost = worstLost(machines)
   let text: string
   let tone: StatusBarView['tone']
-  if (worst && rank(level) > rank('ok')) {
+  let named: MachineState | null = null
+  if (lost && (!worst || worst.lost || rank(lostLevel(lost.lost!)) >= rank(level))) {
+    named = lost
+    text = `${clip(lost.name, 24)} ${lostWords(lost)}`
+    tone = 'danger'
+  } else if (worst && rank(level) > rank('ok')) {
     text = `${clip(worst.name, 24)} ${causeText(worst)}${level}`
     tone = level === 'critical' ? 'danger' : level === 'strained' ? 'warning' : 'accent'
   } else {
     text = `${online.length} ${online.length === 1 ? 'machine' : 'machines'} ok`
     tone = 'neutral'
   }
-  if (offline.length > 0) {
-    text += ` · ${offline.length} offline`
+  const otherOffline = offline.filter((m) => m !== named).length
+  if (otherOffline > 0) {
+    text += named ? ` · ${otherOffline} more offline` : ` · ${otherOffline} offline`
     if (tone === 'neutral' || tone === 'accent') tone = 'warning'
   }
   const lines = machines.map((m) => {
-    if (!m.online) return `${clip(m.name, 64)}: ${m.status}`
-    return `${clip(m.name, 64)}: ${levelText(m)} · ${cpuText(m)} · ${memoryText(m)}`
+    const name = clip(m.name, 64)
+    if (m.lost) {
+      const now = m.online ? ` · now ${cpuText(m)} · ${memoryText(m)}` : ''
+      return `${name}: ${lostWords(m)} · last reading: ${m.lost.summary}${now}`
+    }
+    if (!m.online) return `${name}: ${m.status}`
+    return `${name}: ${levelText(m)} · ${cpuText(m)} · ${memoryText(m)}`
   })
   const paused = all.length > machines.length
   if (paused) lines.push('Paired machines are read only while Fleet Monitor is open (background monitoring is off).')

@@ -50,6 +50,10 @@
       {
         "id": "fleet.show",
         "title": "Show Fleet Monitor"
+      },
+      {
+        "id": "fleet.testAlert",
+        "title": "Fleet Monitor: Send a test alert"
       }
     ],
     "statusBarItems": [
@@ -156,14 +160,14 @@
       {
         "key": "backgroundMonitoring",
         "title": "Monitor in the background",
-        "description": "Read machines on the slow interval while no Fleet Monitor panel is open, to keep the status bar current. Turn it off on a machine that is there to publish its readings: it then reads machines only while one of its own panels is open, and keeps publishing.",
+        "description": "Read machines on the slow interval while no Fleet Monitor panel is open, to keep the status bar current and to send memory alerts for paired machines. Off, paired machines are read, and alert, only while a Fleet Monitor panel is open here; this computer still alerts. Turn it off on a machine that is there to publish its readings: it keeps publishing.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "memoryAlerts",
         "title": "Alert when memory runs short",
-        "description": "Show a desktop notification when a machine's memory reaches strained or critical and stays there for two readings in a row, and again if it reaches critical.",
+        "description": "Show a desktop notification when a machine's memory reaches critical (on its first reading) or strained (two readings in a row), with a reminder every 10 minutes while it stays critical, and when a machine stops answering while its memory is short.",
         "type": "boolean",
         "default": true
       }

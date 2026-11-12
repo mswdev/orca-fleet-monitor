@@ -449,3 +449,24 @@ describe('health colour contrast', () => {
     assert.equal(needsStrongerHealth([null, ...design], [null]), false, 'unknown colours are not guessed')
   })
 })
+
+describe('memory the panel must not misstate', () => {
+  test("Orca's pressure reading of a Mac has no used bytes, and its free-memory figure no figure at all", () => {
+    const pressure = only(machine({ memory: { total: 64 * GIB, used: 60 * GIB, available: 4 * GIB, percent: 94, source: 'orca', reliable: true, kind: 'pressure', pressurePercent: 94 } }))
+    assert.equal(pressure.mem.usedBytes, null)
+    assert.equal(pressure.mem.label, 'Memory pressure')
+    const free = only(machine({ memory: { total: 64 * GIB, used: 63 * GIB, available: GIB, percent: 98.4, source: 'orca', reliable: false, kind: 'unavailable' } }))
+    assert.deepEqual([free.mem.kind, free.mem.pct, free.mem.usedBytes, free.mem.reliable], ['unavailable', null, null, false])
+  })
+
+  test('a machine that stopped answering while elevated is drawn at its last level, with its last reading', () => {
+    const lost = { how: 'unanswered' as const, since: NOW - 10_000, lastReadingAt: NOW - 25_000, level: 'critical' as const, summary: 'memory pressure critical, 15.8 of 16 GB used\nswap 9.1 GB' }
+    const m = only(machine({ online: false, status: 'offline', lost, health: { level: 'unknown', reasons: ['offline', 'stopped answering; last reading: x'], cpu: null, memory: null } }))
+    assert.deepEqual([m.health, m.healthLabel, m.lost?.label, m.lost?.level], ['critical', 'Stopped answering', 'Stopped answering', 'critical'])
+    assert.equal(m.lost?.summary, 'memory pressure critical, 15.8 of 16 GB used swap 9.1 GB', 'on one line')
+    assert.deepEqual(m.reasons, ['stopped answering; last reading: x'])
+    const plain = only(machine({ online: false, status: 'offline', health: { level: 'unknown', reasons: ['offline'], cpu: null, memory: null } }))
+    assert.deepEqual([plain.lost, plain.health, plain.reasons], [null, 'unknown', []])
+  })
+})
+

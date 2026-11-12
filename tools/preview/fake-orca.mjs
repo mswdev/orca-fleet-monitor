@@ -6,7 +6,7 @@ import { sampleSnapshot } from './sample-fleet.mjs'
  * state: live | empty | connecting | loading (never answers) | error (worker unreachable)
  * live: true posts a changing update every 2 s, as the worker does while a panel is open.
  */
-export function createFakeOrca({ state = 'live', live = false, now = () => Date.now() } = {}) {
+export function createFakeOrca({ state = 'live', live = false, now = () => Date.now(), external = true } = {}) {
   const handlers = new Map()
   let seq = 1
   let snapshot = null
@@ -38,6 +38,14 @@ export function createFakeOrca({ state = 'live', live = false, now = () => Date.
   const orca = {
     api: Object.freeze({ major: 1, minor: 6 }),
     locale: 'en',
+    // As in the desktop app: `shell.openExternal` is offered (the browser client has none).
+    host: { has: (name) => external && name === 'shell.openExternal' },
+    shell: {
+      openExternal(url) {
+        requests.push({ name: 'shell.openExternal', input: { url } })
+        return Promise.resolve({ opened: true })
+      }
+    },
     plugin: {
       request(name, input) {
         requests.push({ name, input })

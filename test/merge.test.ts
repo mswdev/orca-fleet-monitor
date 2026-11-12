@@ -239,3 +239,39 @@ describe('memory from a Mac’s own reading (1.1)', () => {
     ])
   })
 })
+
+describe('1.1 fixes', () => {
+  const freeDiag = (load1: number) => parseDiagnostics(parseEnvelope(fixtureText('diagnostics-remote.json').replace(/"availableMemorySource":\s*"[^"]*"/, '"availableMemorySource": "free-memory"').replace(/"loadAverage1m":\s*[\d.]+/, `"loadAverage1m": ${load1}`)))!
+
+  test("Orca's free-memory figure is unavailable on a Mac or an unknown machine, and Orca's usual figure on Windows", () => {
+    assert.equal(freeDiag(2).host.availableMemorySource, 'free-memory')
+    const basicMac = mergeMachine(base({ diag: freeDiag(2) }))
+    assert.deepEqual([basicMac.memory?.kind, basicMac.memory?.reliable, basicMac.health.memory], ['unavailable', false, null])
+    const fullMac = mergeMachine(base({ diag: freeDiag(2), beacon: { latest: beaconOf({ platform: 'darwin' }), fresh: true, ageMs: 0, pluginKey: 'k', remotePlugin: 'running' } }))
+    assert.equal(fullMac.memory?.kind, 'unavailable')
+    const windows = mergeMachine(base({ diag: freeDiag(0) }))
+    assert.deepEqual([windows.memory?.kind, windows.memory?.reliable], [undefined, true], 'no load average: Windows, where free memory is the figure')
+  })
+
+  test('a fresh beacon without a Mac reading shows one carried from a beacon just before (display only)', () => {
+    const latest = beaconOf({ platform: 'darwin' })
+    const carried = macMemory({ ageMs: 5_000, pressureAgeMs: 5_000 })
+    const s = mergeMachine(base({ diag, beacon: { latest, fresh: true, ageMs: 0, pluginKey: 'k', remotePlugin: 'running', carriedMac: carried } }))
+    assert.equal(s.memory?.kind, 'used')
+    assert.equal(s.memory?.mac?.pressureAgeMs, 5_000)
+    const stale = mergeMachine(base({ diag, beacon: { latest, fresh: false, ageMs: 30_000, pluginKey: 'k', remotePlugin: 'running', carriedMac: carried } }))
+    assert.equal(stale.memory?.source, 'orca', 'never on a stale beacon')
+  })
+
+  test('a lost machine says so in its health: after "offline" when offline, first and at its level when Orca still answers', () => {
+    const lost = { how: 'unanswered' as const, since: 1_000, lastReadingAt: 900, level: 'critical' as const, summary: 'memory pressure critical, 15.8 of 16 GB used' }
+    const off = mergeMachine(base({ status: 'offline', diag, lost }))
+    assert.deepEqual(off.health.reasons, ['offline', 'stopped answering; last reading: memory pressure critical, 15.8 of 16 GB used'])
+    assert.equal(off.lost?.level, 'critical')
+    const on = mergeMachine(base({ diag, lost: { ...lost, how: 'stale', level: 'ok' } }))
+    assert.equal(on.health.level, 'strained', 'never below strained')
+    assert.equal(on.health.reasons[0], 'readings stopped; last reading: memory pressure critical, 15.8 of 16 GB used')
+    assert.equal(mergeMachine(base({ kind: 'local', diag, lost })).lost, undefined, 'never this computer')
+  })
+})
+

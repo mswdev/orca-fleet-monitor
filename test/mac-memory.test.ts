@@ -2,8 +2,11 @@
 // formula, swap rates, and the reader with a fake exec, so no command runs. Every value is invented.
 import { assert, describe, test } from 'orca/testing'
 import {
+  createRunBounded,
   MacMemoryReader,
+  MAX_LINGERING,
   macMemoryOf,
+  runBounded,
   parseSysctl,
   parseVmStat,
   SUSTAINED_SWAP,
@@ -215,7 +218,55 @@ describe('MacMemoryReader', () => {
     }
   })
 
-  test('vm_stat failing is no reading; sysctl exiting 1 over an unknown name still counts', async () => {
+  test('vm_stat failing keeps the kernel level sysctl read, beside the last RAM figures marked with their age', async () => {
+    let clock = 0
+    let vmFails = false
+    const exec: ExecFile = async (file) =>
+      file === VM_STAT_PATH
+        ? vmFails
+          ? { error: Object.assign(new Error('timed out'), { killed: true, code: null }), stdout: '' }
+          : { error: null, stdout: fixtureText('vm_stat-16k.txt') }
+        : { error: null, stdout: vmFails ? SYSCTL_16G.replace(/\n2\n18\n$/, '\n4\n6\n') : SYSCTL_16G }
+    const reader = new MacMemoryReader({ exec, platform: 'darwin', mono: () => clock })
+    const first = (await reader.read())!
+    assert.equal(first.pressure, 'warning')
+    vmFails = true
+    clock = 5_000
+    const m = await reader.read()
+    assert.equal(m?.pressure, 'critical', 'the kernel level sysctl did return is kept')
+    assert.equal(m?.availablePercent, 6)
+    assert.equal(m?.used, first.used, 'RAM figures from the last read')
+    assert.equal(m?.ageMs, 5_000, 'marked with their age')
+    assert.equal(m?.pressureAgeMs, undefined, 'the kernel figures are this read’s')
+  })
+
+  test('sysctl failing keeps the RAM figures, with the last kernel level standing in for up to 12 s', async () => {
+    let clock = 0
+    let sysFails = false
+    const exec: ExecFile = async (file) =>
+      file === VM_STAT_PATH
+        ? { error: null, stdout: fixtureText('vm_stat-16k.txt') }
+        : sysFails
+          ? { error: Object.assign(new Error('timed out'), { killed: true, code: null }), stdout: SYSCTL_16G }
+          : { error: null, stdout: SYSCTL_16G }
+    const reader = new MacMemoryReader({ exec, platform: 'darwin', mono: () => clock, osTotal: () => 16 * GIB })
+    await reader.read()
+    sysFails = true
+    clock = 12_000
+    const carried = await reader.read()
+    assert.deepEqual([carried?.pressure, carried?.pressureAgeMs, carried?.ageMs], ['warning', 12_000, undefined])
+    clock = 12_001
+    const late = await reader.read()
+    assert.deepEqual([late?.pressure, late?.availablePercent, late?.pressureAgeMs], [null, null, undefined], 'unknown once older than 12 s')
+  })
+
+  test("a killed sysctl's output is never used, even when it printed everything", async () => {
+    const { exec } = fakeExec({ sys: { error: Object.assign(new Error('killed'), { killed: true, code: null, signal: 'SIGKILL' }), stdout: SYSCTL_16G } })
+    const m = await new MacMemoryReader({ exec, platform: 'darwin', osTotal: () => 16 * GIB }).read()
+    assert.deepEqual([m?.pressure, m?.availablePercent, m?.swapUsed], [null, null, null])
+  })
+
+  test('vm_stat failing with nothing to carry is no reading; sysctl exiting 1 over an unknown name still counts', async () => {
     const failed = fakeExec({ vm: { error: Object.assign(new Error('boom'), { code: 1 }), stdout: '' } })
     assert.equal(await new MacMemoryReader({ exec: failed.exec, platform: 'darwin' }).read(), null)
     const partial = fakeExec({
@@ -252,5 +303,49 @@ describe('MacMemoryReader', () => {
     swapOuts = 10 // the counter went back (it cannot, short of a restart): rates start over
     clock += 5_000
     assert.equal((await reader.read())?.swapOutsPerSec, null)
+  })
+})
+
+describe('runBounded', () => {
+  test('a child that never exits is answered for at its timeout, killed, and at most 4 are left waiting', async () => {
+    const children: { kills: string[]; exitListeners: (() => void)[] }[] = []
+    let spawned = 0
+    const run = createRunBounded((() => {
+      spawned += 1
+      const child = { kills: [] as string[], exitListeners: [] as (() => void)[] }
+      children.push(child)
+      return {
+        exitCode: null,
+        signalCode: null,
+        kill: (signal?: string) => {
+          child.kills.push(String(signal))
+          return true
+        },
+        once: (_event: 'exit', listener: () => void) => child.exitListeners.push(listener)
+      }
+    }) as never)
+    const started = Date.now()
+    const results = await Promise.all(Array.from({ length: MAX_LINGERING }, () => run('/usr/bin/vm_stat', [], { timeout: 50, maxBuffer: 1024 })))
+    const took = Date.now() - started
+    assert.ok(took >= 290 && took < 1_500, `answered after ${took} ms (timeout + 250 ms)`)
+    assert.ok(results.every((r) => r.error?.killed === true), 'as timed out')
+    assert.deepEqual(children.map((c) => c.kills), [['SIGKILL'], ['SIGKILL'], ['SIGKILL'], ['SIGKILL']])
+    const busy = await run('/usr/bin/vm_stat', [], { timeout: 50, maxBuffer: 1024 })
+    assert.equal(spawned, 4, 'no fifth child while four have not exited')
+    assert.equal((busy.error as { code?: unknown } | null)?.code, 'EBUSY')
+    children[0]!.exitListeners.forEach((l) => l())
+    await run('/usr/bin/vm_stat', [], { timeout: 50, maxBuffer: 1024 })
+    assert.equal(spawned, 5, 'one exited: room for one more')
+  })
+
+  test('a real command that answers in time is read as usual, and one that does not is killed on time', async () => {
+    if (process.platform === 'win32') return
+    const ok = await runBounded('/bin/echo', ['ok'], { timeout: 2_000, maxBuffer: 1024 })
+    assert.equal(ok.error, null)
+    assert.equal(ok.stdout, 'ok\n')
+    const started = Date.now()
+    const slow = await runBounded('/bin/sleep', ['5'], { timeout: 200, maxBuffer: 1024 })
+    assert.ok(Date.now() - started < 1_500)
+    assert.equal(slow.error?.killed, true)
   })
 })

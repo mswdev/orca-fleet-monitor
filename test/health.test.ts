@@ -1,5 +1,5 @@
 import { assert, describe, test } from 'orca/testing'
-import { assessHealth, DEFAULT_HEALTH, DEFAULT_MEMORY_RULES, levelFor, memoryReasons, orderedThresholds, worstMachine } from '../src/health.ts'
+import { assessHealth, DEFAULT_HEALTH, DEFAULT_MEMORY_RULES, levelFor, memoryElevated, memoryReasons, memorySummary, orderedThresholds, worstMachine } from '../src/health.ts'
 import { mergeMachine } from '../src/merge.ts'
 import { localSample, macMemory } from './helpers.ts'
 
@@ -161,6 +161,41 @@ describe('memory on a machine that reports RAM in use (a Mac with Fleet Monitor 
     assert.deepEqual([h.level, h.reasons], ['busy', ['RAM 91% used (14.5 of 16 GB) ≥ 90%']])
     assert.equal(judge(full, { ramUsedBusyPercent: 95 }).memory, 'ok')
     assert.equal(judge(mac(), { ramUsedBusyPercent: 70 }).memory, 'busy', '78% used')
+  })
+
+  test('RAM in use at exactly 90% is busy; just under is not', () => {
+    const at = (fraction: number) => judge({ ...mac(), percent: fraction * 100, used: fraction * 16 * GIB })
+    assert.equal(at(0.9).memory, 'busy')
+    assert.equal(at(0.899).memory, 'ok')
+  })
+
+  test('figures carried over a failed read for more than 12 s are not judged', () => {
+    const stale = mac({ pressure: 'critical', availablePercent: 4, pressureAgeMs: 12_001 }, 96)
+    assert.equal(judge(stale).memory, 'ok', 'only RAM in use is left, and it is fine')
+    assert.equal(judge(mac({ pressure: 'critical', availablePercent: 4, pressureAgeMs: 12_000 }, 96)).memory, 'critical', '12 s is still judged')
+    const ram = mac({ used: 15 * GIB, ageMs: 12_001 })
+    assert.equal(judge({ ...ram, percent: 94 }).memory, 'ok', 'RAM in use from long ago is not')
+  })
+
+  test('elevated: pressure above normal, RAM at 80% or more, 30% or less available, any swap-outs', () => {
+    const e = (memory: ReturnType<typeof mac>) => memoryElevated(memory, DEFAULT_HEALTH)
+    assert.equal(e(mac()), false, '78% used, 55% available, no swap-outs')
+    assert.equal(e(mac({ pressure: 'warning' })), true)
+    assert.equal(e({ ...mac(), percent: 80 }), true)
+    assert.equal(e({ ...mac(), percent: 79.9 }), false)
+    assert.equal(e(mac({ availablePercent: 30 })), true)
+    assert.equal(e(mac({ availablePercent: 31 })), false)
+    assert.equal(e(mac({ swapOutsPerSec: 0.2 })), true)
+    assert.equal(memoryElevated({ percent: 70, reliable: true, kind: 'pressure' }, DEFAULT_HEALTH), true, "Orca's 70% pressure: 30% available")
+    assert.equal(memoryElevated({ percent: 69, reliable: true, kind: 'pressure' }, DEFAULT_HEALTH), false)
+    assert.equal(memoryElevated({ percent: 99, reliable: false, kind: 'unavailable' }, DEFAULT_HEALTH), false, 'never on an unavailable figure')
+  })
+
+  test('a reading in words, as alerts and "stopped answering" give it', () => {
+    assert.equal(memorySummary(mac({ used: 15.8 * GIB, pressure: 'critical', availablePercent: 4, swapUsed: 9.1 * GIB, swapTotal: 10 * GIB })), 'memory pressure critical, 15.8 of 16 GB used, swap 9.1 GB')
+    assert.equal(memorySummary(mac()), 'memory pressure 45%, 12.5 of 16 GB used, swap 1 GB')
+    assert.equal(memorySummary({ percent: 72, reliable: true, kind: 'pressure', total: 32 * GIB }), 'memory pressure 72% of 32 GB')
+    assert.equal(memorySummary({ percent: 99, reliable: false, kind: 'unavailable' }), 'memory unknown')
   })
 
   test('sustained swap-outs with a quarter of RAM in swap are busy; less swap, or no sustained activity, is not', () => {

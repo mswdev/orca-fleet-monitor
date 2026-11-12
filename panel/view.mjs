@@ -9,6 +9,8 @@ import { ago, duration, gb, loads, pct, share, size } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
 export const PAIR_PATH = 'Settings → Remote Orca servers → Add server'
+/** The one address the panel opens: its source, from the quiet "Star on GitHub" link. */
+export const REPOSITORY_URL = 'https://github.com/mswdev/orca-fleet-monitor'
 const COPIED_MS = 2_000
 const RETRY_SETTLE_MS = 1_500
 
@@ -195,10 +197,19 @@ function spark(values, tone) {
   )
 }
 
+/** "Last reading 2 min ago: memory pressure critical, …", kept current. */
+function lostNote(tagName, className, m, now) {
+  const lost = m.lost
+  const template = lost.lastReadingAt === null ? `Last reading: ${lost.summary}` : `Last reading {ago}: ${lost.summary}`
+  const props = { class: className, data: { health: lost.level } }
+  return lost.lastReadingAt === null ? h(tagName, props, template) : since(tagName, props, template, lost.lastReadingAt, now)
+}
+
 /** `now` is the worker's clock, as the card's own "Last seen" text uses. */
 function cardAria(m, now) {
   if (m.status === 'connecting') return `${m.name}, connecting. Open details.`
-  if (!m.online) return `${m.name}, offline.${m.lastSeenAt === null ? '' : ` Last seen ${ago(m.lastSeenAt, now)}.`} Open details.`
+  const lost = m.lost ? ` ${m.lost.label} while its memory was elevated. Last reading${m.lost.lastReadingAt === null ? '' : ` ${ago(m.lost.lastReadingAt, now)}`}: ${m.lost.summary}.` : ''
+  if (!m.online) return `${m.name}, offline.${lost}${m.lastSeenAt === null ? '' : ` Last seen ${ago(m.lastSeenAt, now)}.`} Open details.`
   const cpu = m.cpu.estimated
     ? m.cpu.pct === null
       ? 'no CPU estimate'
@@ -209,6 +220,16 @@ function cardAria(m, now) {
   const mem = memAria(m)
   const why = m.reasons.length > 0 ? ` (${m.reasons.join('; ')})` : ''
   return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}${why}. ${cpu}, ${mem}. Open details.`
+}
+
+/** The card of a machine that stopped answering while its memory was elevated. */
+function lostCard(m, now, props) {
+  return h(
+    'button',
+    { ...props, class: 'fm-card fm-card--offline fm-card--lost', data: { health: m.lost.level } },
+    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), level(m.lost.level, m.lost.label, m.reasons)),
+    lostNote('span', 'fm-card-note fm-lost-note', m, now)
+  )
 }
 
 function metric(label, value, sub, tone, history, marker = null) {
@@ -243,6 +264,7 @@ function card(m, now) {
       h('span', { class: 'fm-skel', 'aria-hidden': 'true' }, skeletonMetrics())
     )
   }
+  if (!m.online && m.lost) return lostCard(m, now, props)
   if (!m.online) {
     const seen = lastSeenText(m)
     return h(
@@ -258,6 +280,7 @@ function card(m, now) {
     'button',
     { ...props, class: 'fm-card' },
     h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), level(m.health, m.healthLabel, m.reasons)),
+    m.lost ? h('span', { class: 'fm-lost-line', data: { health: m.lost.level } }, m.lost.label, ' · ', lostNote('span', 'fm-lost-note', m, now)) : null,
     h(
       'span',
       { class: 'fm-metrics' },
@@ -346,6 +369,10 @@ function overview(fleet, ui, now) {
       h('p', { class: 'fm-notice', 'data-key': 'omitted' }, `${n} paired ${n === 1 ? 'machine is' : 'machines are'} not shown: their readings would not fit in one answer to this panel.`)
     )
   }
+  // Only where the frame can open it (the desktop app): small and muted, below everything.
+  if (ui.canOpenExternal) {
+    nodes.push(h('footer', { class: 'fm-foot', 'data-key': 'foot' }, h('button', { type: 'button', class: 'fm-foot-link', 'data-action': 'star' }, 'Star on GitHub')))
+  }
   return nodes
 }
 
@@ -375,7 +402,25 @@ function detailHeader(m, now) {
       subtitle,
       reasons
     ),
-    m.online ? level(m.health, m.healthLabel) : h('span', { class: 'fm-state' }, m.status === 'connecting' ? 'Connecting…' : 'Offline')
+    m.online ? level(m.health, m.healthLabel) : m.lost ? level(m.lost.level, m.lost.label) : h('span', { class: 'fm-state' }, m.status === 'connecting' ? 'Connecting…' : 'Offline')
+  )
+}
+
+/** At the top of a detail screen: this machine stopped answering, or its readings stopped, while
+ *  its memory was elevated, with its last reading. */
+function lostSection(m, now) {
+  const lost = m.lost
+  const heading = lost.how === 'stale' ? `${m.name}’s readings stopped` : `${m.name} stopped answering`
+  const why =
+    lost.how === 'stale'
+      ? 'Orca still reaches it, but Fleet Monitor’s readings from it stopped arriving while its memory was short. It may be running out of memory.'
+      : 'It stopped answering while its memory was short. It may have run out of memory and locked up.'
+  return h(
+    'section',
+    { class: 'fm-section fm-lost', role: 'status', data: { health: lost.level }, 'data-key': 'lost' },
+    h('h2', {}, heading),
+    lostNote('p', 'fm-lost-note', m, now),
+    h('p', {}, why)
   )
 }
 
@@ -545,6 +590,12 @@ function memorySection(m) {
     h('div', { class: 'fm-section-head' }, h('h2', {}, m.mem.label), h('span', { class: 'fm-sub' }, memSub(m, true))),
     h('div', { class: 'fm-reading' }, big(value, true), used ? h('span', { class: 'fm-sub' }, 'used') : null, h('span', { class: 'fm-sub' }, statsText(m.mem.stats))),
     note !== null ? h('p', { class: 'fm-note', 'data-key': 'pressure-note' }, `Memory pressure as Orca reads it, not RAM in use.${note ? ` ${note}` : ''}`) : null,
+    m.mem.kind === 'unavailable'
+      ? h('p', { class: 'fm-note', 'data-key': 'unavailable-note' }, 'Memory unavailable: Orca reports only free memory for this machine right now, which is neither RAM in use nor memory pressure, so it is not shown or judged.')
+      : null,
+    used && m.mem.carriedSec !== null
+      ? h('p', { class: 'fm-note', 'data-key': 'carried-note' }, `Some of these figures are ${m.mem.carriedSec} s old: reading them on that Mac failed.`)
+      : null,
     chart(m.mem.history, m.mem.tone, chartLabel(used ? 'RAM used' : m.mem.label, value, m.mem.stats)),
     used && m.mem.mac ? macRows(m) : null
   )
@@ -748,10 +799,12 @@ function detail(m, ui, now) {
   if (m.status === 'connecting') {
     sections.push(h('section', { class: 'fm-section fm-skel', 'aria-label': 'Connecting', 'data-key': 'waiting' }, skeletonMetrics()))
   } else if (!m.online) {
+    if (m.lost) sections.push(lostSection(m, now))
     sections.push(offlineSection(m, ui, now))
     const facts = lastKnownFacts(m)
     if (facts.length > 0) sections.push(factsSection('Last known', facts))
   } else {
+    if (m.lost) sections.push(lostSection(m, now))
     sections.push(cpuSection(m), memorySection(m))
     if (m.workspaces.length > 0) sections.push(workspacesSection(m))
     if (m.install) sections.push(installRow(m, ui))
@@ -769,9 +822,10 @@ function detail(m, ui, now) {
  */
 export function mountFleetView(
   root,
-  { binding, now = () => Date.now(), setInterval: every = setInterval, clearInterval: stop = clearInterval, setTimeout: later = setTimeout } = {}
+  { binding, now = () => Date.now(), setInterval: every = setInterval, clearInterval: stop = clearInterval, setTimeout: later = setTimeout, openExternal = null } = {}
 ) {
   const ui = {
+    canOpenExternal: typeof openExternal === 'function',
     nav: { view: 'overview', id: null },
     pairOpen: false,
     installOpen: new Set(),
@@ -875,6 +929,16 @@ export function mountFleetView(
         break
       case 'reload':
         void binding.refresh()
+        break
+      case 'star':
+        // Within the click, as Orca requires; Orca asks before opening a host the first time.
+        if (typeof openExternal === 'function') {
+          try {
+            void Promise.resolve(openExternal(REPOSITORY_URL)).catch(() => {})
+          } catch {
+            // Not offered after all: nothing to open.
+          }
+        }
         break
     }
   })

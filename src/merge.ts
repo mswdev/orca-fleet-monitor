@@ -1,12 +1,13 @@
 // Merges what we know about one machine (local sample, Orca diagnostics, remote beacon) into
 // the single model the panel and status bar read.
-import { assessHealth, type HealthSettings, type MemoryRules } from './health.ts'
+import { assessHealth, rank, type HealthSettings, type MemoryRules } from './health.ts'
 import type {
   BeaconRecord,
   BeaconState,
   DiagnosticsSample,
   HistoryPoint,
   LocalSample,
+  LostReading,
   MacMemory,
   MachineState
 } from './model.ts'
@@ -32,7 +33,12 @@ export type MergeInput = {
     ageMs: number | null
     pluginKey: string | null
     remotePlugin: BeaconState['remotePlugin']
+    /** A Mac reading from one of the last two beacons, marked with its age, shown when the newest
+     *  fresh beacon has none (a 1.1 build that drops it on a failed read). Display only. */
+    carriedMac?: MacMemory | null
   } | null
+  /** The reading that carries its memory stopped arriving while memory was elevated. */
+  lost?: LostReading | null
   health: HealthSettings
   /** RAM used busy threshold, for a machine that reports RAM in use; the default when absent. */
   memoryRules?: MemoryRules
@@ -85,20 +91,25 @@ export function mergeMachine(input: MergeInput): MachineState {
   // with Fleet Monitor 1.1), which is RAM in use as Activity Monitor counts it; then Orca's
   // diagnostics, which on a Mac are memory pressure; then os.freemem().
   let memory: MachineState['memory'] = null
-  const mac = local ? (local.macMemory ?? null) : (fresh?.macMemory ?? null)
+  const mac = local ? (local.macMemory ?? null) : (fresh?.macMemory ?? (fresh ? (beacon?.carriedMac ?? null) : null))
   if (mac && mac.total > 0) {
     memory = macMemoryState(mac, local ? 'sampler' : 'beacon', diag)
   } else if (diag) {
     const pressure = diag.host.availableMemorySource === 'memory-pressure'
+    // Orca falls back to free memory on a Mac for the rest of its run after one slow
+    // `memory_pressure` call (and on Linux when /proc/meminfo fails). Free memory is neither RAM in
+    // use nor pressure, so it is shown as unavailable and never judged; only on Windows is it
+    // Orca's usual figure.
+    const unavailable = diag.host.availableMemorySource === 'free-memory' && !windowsHost(input, diag)
     memory = {
       total: diag.host.totalMemory,
       used: diag.host.usedMemory,
       available: diag.host.availableMemory,
       percent: diag.host.memoryPercent,
       source: 'orca',
-      reliable: true,
+      reliable: !unavailable,
       // On a Mac, Orca's figure is the kernel's memory pressure, not RAM in use.
-      ...(pressure ? { kind: 'pressure' as const, pressurePercent: diag.host.memoryPercent } : {})
+      ...(pressure ? { kind: 'pressure' as const, pressurePercent: diag.host.memoryPercent } : unavailable ? { kind: 'unavailable' as const } : {})
     }
   } else {
     const os = local
@@ -167,7 +178,49 @@ export function mergeMachine(input: MergeInput): MachineState {
     updatedAt: input.now
   }
   state.health = assessHealth({ online, cpu, memory }, input.health, input.memoryRules)
+  const lost = input.kind === 'remote' ? (input.lost ?? null) : null
+  if (lost) {
+    state.lost = lost
+    state.health = withLost(state.health, lost, online)
+  }
   return state
+}
+
+/** Is the machine Windows, where free memory is Orca's usual figure? Its own platform when known;
+ *  for a basic machine, whose diagnostics do not name one, a load average of exactly 0 (only
+ *  Windows has none). */
+function windowsHost(input: MergeInput, diag: DiagnosticsSample): boolean {
+  const platform = input.local?.platform || input.beacon?.latest?.platform || (input.kind === 'local' ? input.platform : null) || null
+  if (platform) return platform === 'win32'
+  return diag.host.load1 === 0
+}
+
+/** "Stopped answering; last reading: …", in words the status bar, the panel and the notification
+ *  share. */
+export function lostReason(lost: LostReading): string {
+  return `${lost.how === 'stale' ? 'readings stopped' : 'stopped answering'}; last reading: ${lost.summary}`
+}
+
+/** The level a machine that stopped answering while its memory was elevated is ranked at: its last
+ *  memory level, and never below strained. */
+export function lostLevel(lost: LostReading): MachineState['health']['level'] {
+  return rank(lost.level) >= rank('strained') ? lost.level : 'strained'
+}
+
+/** Health with a lost reading said in it. Offline, it stays unknown, with the reason after
+ *  "offline". Online (Orca still answers, the machine's own readings stopped), its level is at
+ *  least the lost one, and the reason comes first. */
+function withLost(health: MachineState['health'], lost: LostReading, online: boolean): MachineState['health'] {
+  const reason = lostReason(lost)
+  if (!online) return { ...health, reasons: [...health.reasons, reason] }
+  const lostAt = lostLevel(lost)
+  if (rank(lostAt) > rank(health.level)) return { ...health, level: lostAt, reasons: [reason] }
+  return { ...health, reasons: [reason, ...health.reasons] }
+}
+
+/** A beacon's own Mac reading as a machine's memory, for judging that one beacon; null without one. */
+export function beaconMemoryOf(r: BeaconRecord, diag: DiagnosticsSample | null | undefined): NonNullable<MachineState['memory']> | null {
+  return r.macMemory && r.macMemory.total > 0 ? macMemoryState(r.macMemory, 'beacon', diag) : null
 }
 
 /** Memory pressure from a Mac's own reading: 100 − the percent the kernel counts as available. */

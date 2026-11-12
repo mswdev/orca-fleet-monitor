@@ -1,7 +1,7 @@
 import { assert, test } from 'orca/testing'
 import type { MacMemory } from '../src/model.ts'
-import { cpuDelta, LocalSampler, MAC_MEMORY_MAX_AGE_MS, type CpuInfo, type OsSource } from '../src/sampler.ts'
-import { macMemory } from './helpers.ts'
+import { cpuDelta, LocalSampler, type CpuInfo, type OsSource } from '../src/sampler.ts'
+import { FakeTime, flush, macMemory } from './helpers.ts'
 
 const cpu = (user: number, sys: number, idle: number): CpuInfo => ({
   model: '  Example CPU  ',
@@ -92,6 +92,21 @@ test('LocalSampler survives os.cpus() returning nothing', () => {
   assert.equal(s.cores, 3)
 })
 
+function macSource(now: () => number): OsSource {
+  return {
+    cpus: () => [cpu(0, 0, 0)],
+    totalmem: () => 16 * 2 ** 30,
+    freemem: () => 2 ** 30,
+    loadavg: () => [1, 1, 1],
+    uptime: () => 1,
+    hostname: () => 'h',
+    platform: () => 'darwin',
+    arch: () => 'arm64',
+    release: () => 'r',
+    now
+  }
+}
+
 test('on a Mac, prepare() reads memory for the next sample; a reading too old is not attached', async () => {
   let clock = 0
   let reads = 0
@@ -102,28 +117,17 @@ test('on a Mac, prepare() reads memory for the next sample; a reading too old is
       return answer
     }
   }
-  const source: OsSource = {
-    cpus: () => [cpu(0, 0, 0)],
-    totalmem: () => 16 * 2 ** 30,
-    freemem: () => 2 ** 30,
-    loadavg: () => [1, 1, 1],
-    uptime: () => 1,
-    hostname: () => 'h',
-    platform: () => 'darwin',
-    arch: () => 'arm64',
-    release: () => 'r',
-    now: () => clock
-  }
+  const source = macSource(() => clock)
   const sampler = new LocalSampler(source, reader, () => clock)
   assert.equal(sampler.sample().macMemory, undefined, 'nothing read yet')
   await sampler.prepare()
   assert.deepEqual(sampler.sample().macMemory, macMemory())
   assert.deepEqual(sampler.sample().memory, { total: 16 * 2 ** 30, free: 2 ** 30 }, 'os memory is still there for older readers')
-  clock += MAC_MEMORY_MAX_AGE_MS + 1
+  clock += 12_001
   assert.equal(sampler.sample().macMemory, undefined, 'a reading older than two intervals is dropped')
   answer = null
   await sampler.prepare()
-  assert.equal(sampler.sample().macMemory, undefined, 'a failed read leaves none')
+  assert.equal(sampler.sample().macMemory, undefined, 'a failed read with nothing to carry leaves none')
   // Two prepares at once share one read.
   await Promise.all([sampler.prepare(), sampler.prepare()])
   assert.equal(reads, 3)
@@ -131,4 +135,64 @@ test('on a Mac, prepare() reads memory for the next sample; a reading too old is
   await failing.prepare()
   assert.equal(failing.sample().macMemory, undefined)
   await new LocalSampler(source).prepare() // no reader (not a Mac): resolves, reads nothing
+})
+
+test('a failed read carries the last reading, marked with its age, for up to 12 s: never dropped by one failure', async () => {
+  let clock = 0
+  let answer: MacMemory | null = macMemory({ pressure: 'warning', availablePercent: 20 })
+  const sampler = new LocalSampler(macSource(() => clock), { read: async () => answer }, () => clock)
+  await sampler.prepare()
+  const fresh = sampler.sample().macMemory!
+  assert.equal(fresh.ageMs, undefined, 'read with this sample')
+  assert.equal(fresh.pressureAgeMs, undefined)
+  answer = null // every read from now on fails
+  for (const at of [5_000, 10_000, 12_000]) {
+    clock = at
+    await sampler.prepare()
+    const carried = sampler.sample().macMemory
+    assert.equal(carried?.pressure, 'warning', `kept at ${at} ms`)
+    assert.equal(carried?.ageMs, at, 'marked with its age')
+    assert.equal(carried?.pressureAgeMs, at)
+  }
+  clock = 12_001
+  await sampler.prepare()
+  assert.equal(sampler.sample().macMemory, undefined, 'and dropped once older than 12 s')
+  // A reading the reader itself carried part of keeps its own age, plus the time since.
+  clock = 20_000
+  answer = macMemory({ pressureAgeMs: 4_000 })
+  await sampler.prepare()
+  assert.equal(sampler.sample().macMemory?.pressureAgeMs, 4_000)
+  answer = null
+  clock = 25_000
+  await sampler.prepare()
+  assert.equal(sampler.sample().macMemory?.pressureAgeMs, 9_000)
+})
+
+test('a read that never answers is given up on after 2.75 s, and the next sample starts a fresh one', async () => {
+  const time = new FakeTime(0)
+  let hang = true
+  let reads = 0
+  const reader = {
+    read: () => {
+      reads += 1
+      return hang ? new Promise<MacMemory | null>(() => {}) : Promise.resolve(macMemory({ used: 13 * 2 ** 30 }))
+    }
+  }
+  const sampler = new LocalSampler(macSource(time.now), reader, time.now, { setTimeout: time.setTimeout, clearTimeout: time.clearTimeout })
+  let settled = false
+  void sampler.prepare().then(() => {
+    settled = true
+  })
+  time.advance(2_749)
+  await flush()
+  assert.equal(settled, false, 'still waiting at 2.749 s')
+  time.advance(1)
+  await flush()
+  assert.equal(settled, true, 'given up on at 2.75 s')
+  hang = false
+  const next = sampler.prepare()
+  await flush()
+  await next
+  assert.equal(reads, 2, 'a fresh read, not the hung one joined')
+  assert.equal(sampler.sample().macMemory?.used, 13 * 2 ** 30)
 })
