@@ -8,7 +8,8 @@ import {
   encodeBeacon,
   readBeacons
 } from '../src/beacon.ts'
-import { localSample } from './helpers.ts'
+import * as released from './fixtures/beacon-1.0.0.ts'
+import { localSample, macMemory } from './helpers.ts'
 
 const meta = { run: 'run-a', seq: 7, intervalMs: 5_000 }
 
@@ -270,5 +271,92 @@ describe('assessBeacon', () => {
 
   test('nothing to assess is not fresh', () => {
     assert.equal(assessBeacon(null, emptyTracker(), { localNow: 0, remoteNow: 0 }).fresh, false)
+  })
+})
+
+describe('a Mac memory reading (added in 1.1)', () => {
+  const GIB = 2 ** 30
+  const reading = macMemory({
+    pressure: 'warning',
+    availablePercent: 12,
+    swapUsed: Math.round(6.2 * GIB),
+    swapTotal: 8 * GIB,
+    swapOutsPerSec: 310.5,
+    swapInsPerSec: 2,
+    sustainedSwapOutsPerSec: 250
+  })
+
+  test('travels under one optional key and comes back the same', () => {
+    const line = encodeBeacon(localSample({ platform: 'darwin', macMemory: reading }), meta)!
+    const wire = JSON.parse(line.slice(BEACON_PREFIX.length)) as Record<string, unknown>
+    assert.equal(wire.v, 1, 'still version 1')
+    assert.deepEqual(Object.keys(wire.mm as object).sort(), ['a', 'c', 'k', 'pa', 'pl', 'ps', 'si', 'so', 'ss', 'st', 'su', 't', 'u', 'w'])
+    assert.equal((wire.mm as { pl: number }).pl, 2, 'the kernel numbering: 2 is warning')
+    assert.deepEqual(decodeBeacon(line)?.macMemory, reading)
+  })
+
+  test('a figure that could not be read is left out, and comes back as unknown', () => {
+    const partial = macMemory({ swapUsed: null, swapTotal: null, pressure: null, availablePercent: null, swapInsPerSec: null, swapOutsPerSec: null })
+    const line = encodeBeacon(localSample({ platform: 'darwin', macMemory: partial }), meta)!
+    const wire = JSON.parse(line.slice(BEACON_PREFIX.length)) as { mm: Record<string, unknown> }
+    assert.deepEqual(Object.keys(wire.mm).sort(), ['a', 'c', 'k', 'ps', 't', 'u', 'w'])
+    assert.deepEqual(decodeBeacon(line)?.macMemory, partial)
+  })
+
+  test('elsewhere, or when the Mac reading failed, nothing is written', () => {
+    assert.ok(!encodeBeacon(localSample(), meta)!.includes('"mm"'))
+    assert.ok(!encodeBeacon(localSample({ platform: 'darwin', macMemory: null }), meta)!.includes('"mm"'))
+    assert.equal(decodeBeacon(encodeBeacon(localSample(), meta))?.macMemory, null)
+  })
+
+  test('stays when per-core values are dropped to fit a huge machine', () => {
+    const perCore = Array.from({ length: 1_500 }, () => 99)
+    const line = encodeBeacon(localSample({ cores: 1_500, cpu: { total: 99, perCore }, macMemory: reading }), meta)!
+    assert.ok(line.length <= BEACON_MAX_CHARS)
+    const back = decodeBeacon(line)!
+    assert.equal(back.perCore, null)
+    assert.deepEqual(back.macMemory, reading)
+  })
+
+  test('every figure from another machine is bounded', () => {
+    const wire = (mm: unknown) => decodeBeacon(`${BEACON_PREFIX}${JSON.stringify({ v: 1, r: 'r', q: 1, t: 1, iv: 5_000, n: 4, mt: 16 * GIB, mf: 1, mm })}`)?.macMemory
+    const good = { t: 16 * GIB, u: 8 * GIB, a: 4 * GIB, w: 2 * GIB, c: 2 * GIB, k: GIB, su: GIB, st: 2 * GIB, pl: 1, pa: 50, ps: 16_384, si: 0, so: 0 }
+    assert.equal(wire(good)?.used, 8 * GIB)
+    assert.equal(wire({ ...good, u: 99 * GIB })?.used, 16 * GIB, 'no more in use than there is')
+    assert.equal(wire({ ...good, su: 9 * GIB })?.swapUsed, 2 * GIB, 'no more swap used than there is swap')
+    assert.equal(wire({ ...good, pl: 3 })?.pressure, null, 'only 1, 2 and 4 are levels')
+    assert.equal(wire({ ...good, pl: 4 })?.pressure, 'critical')
+    assert.equal(wire({ ...good, pa: 140 })?.availablePercent, null)
+    assert.equal(wire({ ...good, so: -5 })?.swapOutsPerSec, null)
+    assert.equal(wire({ ...good, so: 1e20 })?.swapOutsPerSec, 1e9)
+    assert.equal(wire({ ...good, st: undefined })?.swapUsed, null, 'swap used without a swap total')
+    for (const broken of [{ ...good, u: undefined }, { ...good, t: 5 }, { ...good, ps: 0 }, { ...good, a: 'x' }, { ...good, w: -1 }, 'mm', [1, 2], null]) {
+      assert.equal(wire(broken), null, JSON.stringify(broken))
+    }
+    // JSON.parse makes "__proto__" an own key; only the known keys are ever read.
+    const mm = JSON.stringify({ ...good, constructor: 'x' }).replace('{', '{"__proto__":{"polluted":1},')
+    const hostile = decodeBeacon(`${BEACON_PREFIX}{"v":1,"r":"r","q":1,"t":1,"iv":5000,"n":4,"mt":1,"mf":1,"mm":${mm}}`)
+    assert.ok(hostile?.macMemory)
+    assert.equal((hostile.macMemory as unknown as Record<string, unknown>).polluted, undefined)
+    assert.equal(Object.getPrototypeOf(hostile.macMemory), Object.prototype)
+    assert.equal(({} as Record<string, unknown>).polluted, undefined)
+  })
+
+  test('the 1.0.0 reader reads what 1.1 writes, and 1.1 reads what 1.0.0 writes', () => {
+    const sample = localSample({ platform: 'darwin', macMemory: reading, coreGroups: [{ kind: 'performance', start: 1, count: 3 }, { kind: 'efficiency', start: 0, count: 1 }] })
+    const newLine = encodeBeacon(sample, meta)!
+    const byOld = released.decodeBeacon(newLine, 1_800_000_000_123)
+    const byNew = decodeBeacon(newLine, 1_800_000_000_123)
+    assert.ok(byOld && byNew)
+    const { macMemory: _mac, ...newWithoutMac } = byNew
+    assert.deepEqual(byOld, newWithoutMac, 'every field 1.0.0 knows reads the same')
+    assert.equal(released.assessBeacon(byOld, released.emptyTracker(), { localNow: 0, remoteNow: sample.t + 1_000 }).fresh, true)
+    assert.equal(released.readBeacons([{ ts: 1, level: 'info', line: newLine }]).length, 1)
+    // A remote still on 1.0.0 writes no memory reading: 1.1 reads it as before, with none.
+    const oldLine = released.encodeBeacon(localSample({ platform: 'darwin' }), meta)!
+    const fromOld = decodeBeacon(oldLine)
+    assert.ok(fromOld)
+    assert.equal(fromOld.macMemory, null)
+    assert.deepEqual({ ...fromOld, macMemory: undefined }, { ...released.decodeBeacon(oldLine)!, macMemory: undefined })
   })
 })

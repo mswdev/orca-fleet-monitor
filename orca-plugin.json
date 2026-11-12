@@ -4,8 +4,8 @@
   "execution": "trusted-worker",
   "id": "fleet-monitor",
   "name": "Fleet Monitor",
-  "version": "1.0.0",
-  "description": "Live CPU, memory, load and the busiest workspaces for this computer and every paired Orca server, in one sidebar panel.",
+  "version": "1.1.0",
+  "description": "A system monitor for your whole Orca fleet, like an activity monitor or task manager: live CPU, RAM and memory usage, per-core load and performance stats for this computer and every paired remote Orca server, in one sidebar panel.",
   "author": { "name": "mswdev" },
   "repository": "https://github.com/mswdev/orca-fleet-monitor",
   "license": "MIT",
@@ -129,6 +129,15 @@
         "maximum": 100
       },
       {
+        "key": "ramUsedBusyPercent",
+        "title": "RAM used busy at (%)",
+        "description": "For machines that report real RAM usage (Macs running Fleet Monitor 1.1 or later): RAM in use, as Activity Monitor counts it, at which the machine counts as busy.",
+        "type": "integer",
+        "default": 90,
+        "minimum": 1,
+        "maximum": 100
+      },
+      {
         "key": "cliPath",
         "title": "Orca CLI path",
         "description": "Leave empty to find the CLI that ships with this Orca.",
@@ -150,8 +159,15 @@
         "description": "Read machines on the slow interval while no Fleet Monitor panel is open, to keep the status bar current. Turn it off on a machine that is there to publish its readings: it then reads machines only while one of its own panels is open, and keeps publishing.",
         "type": "boolean",
         "default": true
+      },
+      {
+        "key": "memoryAlerts",
+        "title": "Alert when memory runs short",
+        "description": "Show a desktop notification when a machine's memory reaches strained or critical and stays there for two readings in a row, and again if it reaches critical.",
+        "type": "boolean",
+        "default": true
       }
     ]
   },
-  "capabilities": [{ "kind": "settings:own" }]
+  "capabilities": [{ "kind": "settings:own" }, { "kind": "notifications:show" }]
 }

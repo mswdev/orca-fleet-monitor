@@ -1,5 +1,7 @@
 import { assert, test } from 'orca/testing'
-import { cpuDelta, LocalSampler, type CpuInfo, type OsSource } from '../src/sampler.ts'
+import type { MacMemory } from '../src/model.ts'
+import { cpuDelta, LocalSampler, MAC_MEMORY_MAX_AGE_MS, type CpuInfo, type OsSource } from '../src/sampler.ts'
+import { macMemory } from './helpers.ts'
 
 const cpu = (user: number, sys: number, idle: number): CpuInfo => ({
   model: '  Example CPU  ',
@@ -88,4 +90,45 @@ test('LocalSampler survives os.cpus() returning nothing', () => {
   const s = new LocalSampler(source).sample()
   assert.equal(s.cpu, null)
   assert.equal(s.cores, 3)
+})
+
+test('on a Mac, prepare() reads memory for the next sample; a reading too old is not attached', async () => {
+  let clock = 0
+  let reads = 0
+  let answer: MacMemory | null = macMemory()
+  const reader = {
+    read: async () => {
+      reads += 1
+      return answer
+    }
+  }
+  const source: OsSource = {
+    cpus: () => [cpu(0, 0, 0)],
+    totalmem: () => 16 * 2 ** 30,
+    freemem: () => 2 ** 30,
+    loadavg: () => [1, 1, 1],
+    uptime: () => 1,
+    hostname: () => 'h',
+    platform: () => 'darwin',
+    arch: () => 'arm64',
+    release: () => 'r',
+    now: () => clock
+  }
+  const sampler = new LocalSampler(source, reader, () => clock)
+  assert.equal(sampler.sample().macMemory, undefined, 'nothing read yet')
+  await sampler.prepare()
+  assert.deepEqual(sampler.sample().macMemory, macMemory())
+  assert.deepEqual(sampler.sample().memory, { total: 16 * 2 ** 30, free: 2 ** 30 }, 'os memory is still there for older readers')
+  clock += MAC_MEMORY_MAX_AGE_MS + 1
+  assert.equal(sampler.sample().macMemory, undefined, 'a reading older than two intervals is dropped')
+  answer = null
+  await sampler.prepare()
+  assert.equal(sampler.sample().macMemory, undefined, 'a failed read leaves none')
+  // Two prepares at once share one read.
+  await Promise.all([sampler.prepare(), sampler.prepare()])
+  assert.equal(reads, 3)
+  const failing = new LocalSampler(source, { read: () => Promise.reject(new Error('boom')) }, () => clock)
+  await failing.prepare()
+  assert.equal(failing.sample().macMemory, undefined)
+  await new LocalSampler(source).prepare() // no reader (not a Mac): resolves, reads nothing
 })

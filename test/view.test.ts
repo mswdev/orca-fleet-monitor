@@ -346,3 +346,145 @@ test('morphing keeps a focused card focused across redraws', () => {
   v.handle.show(null)
   assert.ok(v.document.activeElement === card, 'still focused')
 })
+
+describe('memory (1.1)', () => {
+  const reading = {
+    total: 16 * GIB,
+    used: 15.1 * GIB,
+    app: 9.6 * GIB,
+    wired: 2.5 * GIB,
+    compressed: 3 * GIB,
+    cached: 1.2 * GIB,
+    swapUsed: 6.2 * GIB,
+    swapTotal: 7 * GIB,
+    pressure: 'warning' as const,
+    availablePercent: 12,
+    pageSize: 16_384,
+    swapInsPerSec: 2,
+    swapOutsPerSec: 120,
+    sustainedSwapOutsPerSec: 100
+  }
+  const history = { t: [NOW - 120_000, NOW - 60_000, NOW - 1_000], cpu: [20, 21, 22], mem: [80, 85, 88], ram: [90, 92, 94.4] }
+  /** A remote Mac with Fleet Monitor 1.1: RAM in use from its own reading. */
+  const mini = (over: Partial<MachineView> = {}): MachineView =>
+    machine({
+      id: 'env-mini',
+      name: 'Mac mini',
+      host: { ...machine().host, platform: 'darwin' },
+      memory: { total: 16 * GIB, used: 15.1 * GIB, available: 0.9 * GIB, percent: 94.4, source: 'beacon', reliable: true, kind: 'used', pressurePercent: 88, mac: reading },
+      health: { level: 'strained', reasons: ['macOS memory pressure warning, 12% available'], cpu: 'ok', memory: 'strained' },
+      history,
+      ...over
+    })
+  /** A Mac without Fleet Monitor: Orca's memory pressure reading. */
+  const pressureMac = (over: Partial<MachineView> = {}): MachineView =>
+    basic({
+      id: 'env-b',
+      name: 'Studio Two',
+      memory: { total: 32 * GIB, used: 28.8 * GIB, available: 3.2 * GIB, percent: 90, source: 'orca', reliable: true, kind: 'pressure', pressurePercent: 90 },
+      health: { level: 'strained', reasons: ['memory pressure 90% ≥ 88%'], cpu: null, memory: 'strained' },
+      history: { t: [NOW - 60_000, NOW - 1_000], cpu: [50, 60], mem: [89, 90] },
+      ...over
+    })
+
+  test('a card with RAM in use: used %, used / total GB, and a quiet pressure marker', () => {
+    const v = mount(viewOf([local(), mini()]))
+    const card = $(v.root, '[data-action="open"][data-id="env-mini"]')!
+    const memory = card.querySelectorAll('.fm-metric')[1]!
+    assert.equal(text($(memory, '.fm-metric-label')!), 'Memorypressure warning')
+    assert.equal($(memory, '.fm-pressure')?.getAttribute('data-health'), 'strained')
+    assert.equal(text($(memory, '.fm-big')!), '94%')
+    assert.equal(text($(memory, '.fm-sub')!), '15.1/16 GB')
+    assert.equal(memory.getAttribute('data-tone'), 'strained')
+    assert.match(card.getAttribute('aria-label') ?? '', /RAM 94% used \(15\.1 of 16 GB\), memory pressure warning/)
+    const fine = mount(viewOf([local(), mini({ memory: { ...mini().memory!, mac: { ...reading, pressure: 'normal' } } })]))
+    assert.equal($(fine.root, '.fm-pressure'), null, 'no marker while pressure is normal')
+  })
+
+  test("a card with only Orca's reading of a Mac: memory pressure, and nothing called used", () => {
+    const v = mount(viewOf([local(), pressureMac()]))
+    const card = $(v.root, '[data-action="open"][data-id="env-b"]')!
+    const memory = card.querySelectorAll('.fm-metric')[1]!
+    assert.equal(text($(memory, '.fm-metric-label')!), 'Memory pressure')
+    assert.equal(text($(memory, '.fm-big')!), '90%')
+    assert.equal(text($(memory, '.fm-sub')!), '32 GB', 'how much RAM there is, not a "used" figure')
+    assert.ok(!/used|28\.8/i.test(text(card) + (card.getAttribute('aria-label') ?? '')))
+    assert.match(card.getAttribute('aria-label') ?? '', /memory pressure 90%/)
+  })
+
+  test('the detail of a Mac with RAM in use: used % with average and peak, its chart, and the rows', () => {
+    const v = mount(viewOf([local(), mini()]))
+    v.handle.show('env-mini')
+    const section = $(v.root, '[data-key="memory"]')!
+    assert.equal(text($(section, 'h2')!), 'Memory')
+    assert.equal(text($(section, '.fm-section-head .fm-sub')!), '15.1 / 16 GB')
+    assert.equal(text($(section, '.fm-reading')!), '94%usedavg 92% · peak 94%')
+    assert.equal(
+      $(section, '.fm-plot svg')?.getAttribute('aria-label'),
+      'RAM used over the last 30 minutes: now 94%, average 92%, peak 94%',
+      'drawn from RAM in use, not from pressure'
+    )
+    const rows = $(section, '[data-key="mem-facts"]')!.querySelectorAll('.fm-fact').map((row) => [text($(row, 'dt')!), text($(row, 'dd')!)])
+    assert.deepEqual(rows, [
+      ['App memory', '9.6 GB'],
+      ['Wired', '2.5 GB'],
+      ['Compressed', '3 GB'],
+      ['Cached files', '1.2 GB'],
+      ['Swap used', '6.2 GBof 7 GB · 2 in · 120 out pages/s'],
+      ['Memory pressure', 'Warning · 12% available']
+    ])
+    assert.equal($(section, '.fm-pressure-value')?.getAttribute('data-health'), 'strained')
+    assert.equal(text($(v.root, '.fm-reasons')!), 'Strained: macOS memory pressure warning, 12% available')
+  })
+
+  test('the detail of a basic Mac: memory pressure, and what installing Fleet Monitor there adds', () => {
+    const v = mount(viewOf([local(), pressureMac()]))
+    v.handle.show('env-b')
+    const section = $(v.root, '[data-key="memory"]')!
+    assert.equal(text($(section, 'h2')!), 'Memory pressure')
+    // The install row says what installing adds; the note beside the figure does not repeat it.
+    assert.equal(text($(section, '[data-key="pressure-note"]')!), 'Memory pressure as Orca reads it, not RAM in use.')
+    assert.equal(text($(v.root, '.fm-install-text')!), 'Install Fleet Monitor on this machine for real RAM usage, swap and pressure')
+    assert.equal($(section, '[data-key="mem-facts"]'), null)
+    assert.ok(!/\bused\b/i.test(text(section).replace('not RAM in use', '')))
+    // Not known yet whether Fleet Monitor is there (no install row): the note says it instead.
+    const unknown = mount(viewOf([local(), pressureMac({ beacon: { state: 'absent', ageMs: null, seq: null, pluginKey: null, remotePlugin: 'unknown' } })]))
+    unknown.handle.show('env-b')
+    assert.equal($(unknown.root, '[data-action="install"]'), null)
+    assert.equal(
+      text($(unknown.root, '[data-key="pressure-note"]')!),
+      'Memory pressure as Orca reads it, not RAM in use. Installing Fleet Monitor on that machine adds real RAM usage, swap and pressure.'
+    )
+    const installed = mount(viewOf([local(), pressureMac({ beacon: { state: 'absent', ageMs: null, seq: null, pluginKey: null, remotePlugin: 'installed' } })]))
+    installed.handle.show('env-b')
+    assert.match(text($(installed.root, '[data-key="pressure-note"]')!), /Turning Fleet Monitor on there adds real RAM usage, swap and pressure\.$/)
+  })
+
+  test('a Mac still on 1.0.0 is full tier with only the pressure reading: updating there adds RAM in use', () => {
+    const old = machine({
+      id: 'env-old',
+      host: { ...machine().host, platform: 'darwin' },
+      memory: { total: 16 * GIB, used: 9 * GIB, available: 7 * GIB, percent: 56, source: 'orca', reliable: true, kind: 'pressure', pressurePercent: 56 }
+    })
+    const v = mount(viewOf([local(), old]))
+    v.handle.show('env-old')
+    assert.match(text($(v.root, '[data-key="pressure-note"]')!), /Updating Fleet Monitor there to 1\.1 or later adds real RAM usage, swap and pressure\.$/)
+  })
+
+  test('Linux and other machines keep their memory figure and its wording', () => {
+    const v = mount(viewOf([local(), machine(), basic({ id: 'env-l', name: 'Linux Box' })]))
+    const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
+    const memory = card.querySelectorAll('.fm-metric')[1]!
+    assert.deepEqual([text($(memory, '.fm-metric-label')!), text($(memory, '.fm-big')!), text($(memory, '.fm-sub')!)], ['Memory', '25%', '8/32 GB'])
+    v.handle.show('env-l')
+    assert.equal(text($(v.root, '.fm-install-text')!), 'Install Fleet Monitor on this machine for full detail')
+    assert.equal($(v.root, '[data-key="pressure-note"]'), null)
+  })
+
+  test('an offline Mac: its last known RAM in use comes from its own history column', () => {
+    const v = mount(viewOf([local(), mini({ online: false, status: 'offline', health: { level: 'unknown', reasons: ['offline'], cpu: null, memory: null } })]))
+    v.handle.show('env-mini')
+    const facts = $(v.root, '[data-key="facts:Last known"]')!.querySelectorAll('.fm-fact').map((row) => [text($(row, 'dt')!), text($(row, 'dd')!)])
+    assert.deepEqual(facts.find((f) => f[0] === 'Memory'), ['Memory', '94% · 15.1 / 16 GB'])
+  })
+})

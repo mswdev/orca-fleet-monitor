@@ -1,25 +1,32 @@
 // The person's settings (contributes.settings), read defensively: Orca checks types against the
 // manifest, but values can still be out of range or in the wrong order.
-import { DEFAULT_HEALTH, orderedThresholds, type HealthSettings } from './health.ts'
+import { DEFAULT_HEALTH, DEFAULT_MEMORY_RULES, orderedThresholds, type HealthSettings, type MemoryRules } from './health.ts'
 
 export type FleetSettings = {
   fastIntervalMs: number
   slowIntervalMs: number
+  /** CPU thresholds, and the memory ones, which judge memory pressure on every machine. */
   health: HealthSettings
+  /** For machines that report RAM in use (Macs with Fleet Monitor 1.1): when that counts as busy. */
+  memoryRules: MemoryRules
   cliPath: string | null
   beacon: boolean
   /** Read machines on the slow interval while no panel is open (for the status bar). Off, they
    *  are read only while a Fleet Monitor panel is open here; the beacon is not affected. */
   backgroundMonitoring: boolean
+  /** A desktop notification when a machine's memory reaches strained or critical. */
+  memoryAlerts: boolean
 }
 
 export const DEFAULT_SETTINGS: FleetSettings = {
   fastIntervalMs: 5_000,
   slowIntervalMs: 60_000,
   health: DEFAULT_HEALTH,
+  memoryRules: DEFAULT_MEMORY_RULES,
   cliPath: null,
   beacon: true,
-  backgroundMonitoring: true
+  backgroundMonitoring: true,
+  memoryAlerts: true
 }
 
 const LIMITS = {
@@ -55,8 +62,10 @@ export function readSettings(raw: Record<string, unknown> | null | undefined): F
         critical: percent('memoryCriticalPercent', DEFAULT_HEALTH.memory.critical)
       })
     },
+    memoryRules: { ramUsedBusyPercent: percent('ramUsedBusyPercent', DEFAULT_MEMORY_RULES.ramUsedBusyPercent) },
     cliPath,
     beacon: r.beacon !== false,
-    backgroundMonitoring: r.backgroundMonitoring !== false
+    backgroundMonitoring: r.backgroundMonitoring !== false,
+    memoryAlerts: r.memoryAlerts !== false
   }
 }

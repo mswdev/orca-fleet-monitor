@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fleet Monitor README images</title>
+    <!-- The still images in README.md (media/readme/), drawn from real panels fed with the invented
+         sample fleet. tools/preview/shoot-readme.mjs saves every element that has a data-shot
+         attribute as <data-shot>-<theme>.png, with a transparent page behind its rounded corners.
+
+         ?scene=hero     hero: the overview beside one machine's detail, on a backdrop
+         ?scene=levels   level-basic and level-full: the top of a basic and of a full machine's
+                         detail, down to the end of the CPU section, each under a caption
+         ?scene=memory   memory: a full machine's memory section
+         ?scene=install  install: a basic machine's install row, open
+         ?theme=light|dark
+
+         Nothing here depends on how tall a section is: sizes are measured from what the panel
+         drew. A section that is not there is an error (data-error on <html>), which the capture
+         script reports, so a renamed data-key cannot quietly produce a wrong picture. -->
+    <style>
+      html, body { margin: 0; background: transparent; }
+      body { display: flex; align-items: flex-start; }
+      #stage { position: relative; flex: none; display: flex; align-items: flex-start; gap: 24px; }
+      iframe { display: block; border: 0; }
+
+      /* hero: two panels on a backdrop */
+      #stage.hero {
+        align-items: center;
+        justify-content: center;
+        gap: 28px;
+        overflow: hidden;
+        border-radius: 22px;
+        background:
+          radial-gradient(760px 520px at 76% 30%, rgb(42 98 224 / 0.11), transparent 70%),
+          radial-gradient(560px 420px at 6% 98%, rgb(21 128 61 / 0.08), transparent 70%),
+          #e8e9ee;
+      }
+      .dark #stage.hero {
+        background:
+          radial-gradient(760px 520px at 76% 30%, rgb(122 162 255 / 0.2), transparent 70%),
+          radial-gradient(560px 420px at 6% 98%, rgb(74 222 128 / 0.09), transparent 70%),
+          #0b0b0d;
+      }
+      .window {
+        position: relative;
+        flex: none;
+        overflow: hidden;
+        border-radius: 14px;
+        box-shadow: 0 16px 48px rgb(22 24 44 / 0.16), 0 0 0 1px rgb(22 24 44 / 0.07);
+      }
+      .dark .window { box-shadow: 0 18px 60px rgb(0 0 0 / 0.65), 0 0 0 1px #2f3038; }
+
+      /* tile: part of one panel, on the panel's own background, inside a hairline */
+      .tile { position: relative; flex: none; overflow: hidden; border-radius: 14px; background: #f6f6f7; }
+      .dark .tile { background: #131316; }
+      .tile iframe { position: absolute; left: 0; }
+      .tile::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        border-radius: inherit;
+        box-shadow: inset 0 0 0 1px #dfe0e6;
+        pointer-events: none;
+      }
+      .dark .tile::after { box-shadow: inset 0 0 0 1px #2f3038; }
+      .caption {
+        position: absolute;
+        inset: 0 0 auto 0;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 38px;
+        padding: 0 16px;
+        box-sizing: border-box;
+        border-bottom: 1px solid #dfe0e6;
+        background: #ffffff;
+        color: #5f6370;
+        font: 13px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      }
+      .caption b { color: #1a1b1f; font-weight: 650; }
+      .dark .caption { border-color: #2f3038; background: #1b1c20; color: #a0a3ad; }
+      .dark .caption b { color: #ececf1; }
+      /* Where a panel goes on below what is shown, its last pixels fade into the background. */
+      .fade {
+        position: absolute;
+        inset: auto 0 0 0;
+        z-index: 1;
+        background: linear-gradient(to bottom, rgb(246 246 247 / 0), #f6f6f7 68%);
+        pointer-events: none;
+      }
+      .dark .fade { background: linear-gradient(to bottom, rgb(19 19 22 / 0), #131316 68%); }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <script type="module">
+      import { sampleSnapshot } from './sample-fleet.mjs'
+
+      const params = new URLSearchParams(location.search)
+      const theme = params.get('theme') === 'dark' ? 'dark' : 'light'
+      const scene = params.get('scene') ?? 'hero'
+      document.documentElement.classList.toggle('dark', theme === 'dark')
+      const stage = document.getElementById('stage')
+
+      const TILE_WIDTH = 400
+      const CAPTION = 38
+      /** Just under the gap between two sections, so a crop shows nothing of its neighbours. */
+      const PAD = 9
+
+      function fail(message) {
+        document.documentElement.setAttribute('data-error', message)
+        throw new Error(message)
+      }
+
+      // The machines to show, chosen by what they are and not by an id that the sample might
+      // rename: the busiest remote machine at the full level, and the first one at the basic level.
+      const remotes = sampleSnapshot('live').machines.filter((m) => m.kind === 'remote' && m.online)
+      const full = remotes.filter((m) => m.tier === 'full').sort((a, b) => (b.cpu?.percent ?? 0) - (a.cpu?.percent ?? 0))[0]
+      const basic = remotes.find((m) => m.tier === 'basic')
+      if (!full || !basic) fail('The sample fleet needs an online remote machine at the full level and one at the basic level.')
+      const detailOf = (machine, extra = '') => `state=live&machine=${encodeURIComponent(machine.id)}${extra}`
+
+      function panel(query, width, height) {
+        const frame = document.createElement('iframe')
+        frame.width = String(width)
+        frame.height = String(height)
+        frame.title = 'Fleet Monitor panel'
+        frame.src = `frame.html?${query}&theme=${theme}`
+        return frame
+      }
+      /** Resolves with the panel's document once it has drawn its first answer. */
+      function ready(frame) {
+        return new Promise((resolve) => {
+          const check = () => {
+            if (frame.contentDocument?.documentElement.hasAttribute('data-preview-ready')) resolve(frame.contentDocument)
+            else setTimeout(check, 30)
+          }
+          check()
+        })
+      }
+      /** Where `selector` is in a panel, or an error naming what was looked for. */
+      function rectOf(doc, selector, shot) {
+        const node = doc.querySelector(selector)
+        if (!node) fail(`${shot}: the panel has no ${selector}`)
+        return node.getBoundingClientRect()
+      }
+      function fade(parent, height) {
+        const node = document.createElement('div')
+        node.className = 'fade'
+        node.style.height = `${height}px`
+        parent.append(node)
+      }
+      function tile(shot) {
+        const node = document.createElement('div')
+        node.className = 'tile'
+        node.dataset.shot = shot
+        node.style.width = `${TILE_WIDTH}px`
+        stage.append(node)
+        return node
+      }
+      /** A tile holding exactly one section of a panel. */
+      async function section(shot, query, selector) {
+        const node = tile(shot)
+        const frame = panel(query, TILE_WIDTH, 2400)
+        node.append(frame)
+        const rect = rectOf(await ready(frame), selector, shot)
+        frame.style.top = `${PAD - rect.top}px`
+        node.style.height = `${Math.round(rect.height + PAD * 2)}px`
+      }
+
+      if (scene === 'hero') {
+        const size = { width: 1100, height: 724, margin: 25 }
+        stage.className = 'hero'
+        stage.dataset.shot = 'hero'
+        stage.style.width = `${size.width}px`
+        stage.style.height = `${size.height}px`
+        const frames = [panel('state=live', 360, 672), panel(detailOf(full), 632, 672)]
+        const windows = frames.map((frame) => {
+          const box = document.createElement('div')
+          box.className = 'window'
+          box.append(frame)
+          stage.append(box)
+          return box
+        })
+        const docs = await Promise.all(frames.map(ready))
+        // Each window is as tall as what its panel drew, less the panel's own bottom padding, and
+        // no taller than the backdrop allows. A panel that is cut by more than its padding fades
+        // out at the window's foot.
+        docs.forEach((doc, i) => {
+          const drawn = Math.ceil(doc.getElementById('app').getBoundingClientRect().height) - 8
+          const room = size.height - size.margin * 2
+          frames[i].height = String(Math.min(drawn, room))
+          if (drawn > room + 8) fade(windows[i], 44)
+        })
+      } else if (scene === 'levels') {
+        const specs = [
+          { shot: 'level-basic', machine: basic, caption: ['Basic', 'nothing installed on the remote'] },
+          { shot: 'level-full', machine: full, caption: ['Full', 'Fleet Monitor on the remote too'] }
+        ]
+        const tiles = await Promise.all(
+          specs.map(async (spec) => {
+            const node = tile(spec.shot)
+            const frame = panel(detailOf(spec.machine), TILE_WIDTH, 2400)
+            frame.style.top = `${CAPTION}px`
+            const caption = document.createElement('div')
+            caption.className = 'caption'
+            caption.append(Object.assign(document.createElement('b'), { textContent: spec.caption[0] }), Object.assign(document.createElement('span'), { textContent: spec.caption[1] }))
+            node.append(frame, caption)
+            return { node, cpuEnd: rectOf(await ready(frame), '[data-key="cpu"]', spec.shot).bottom }
+          })
+        )
+        // Both tiles are as tall as the longer CPU section needs. The shorter one shows the start
+        // of what comes next, faded out.
+        const height = Math.ceil(Math.max(...tiles.map((t) => t.cpuEnd))) + 8
+        for (const t of tiles) {
+          t.node.style.height = `${CAPTION + height}px`
+          const spare = Math.round(height - t.cpuEnd - 10)
+          if (spare > 12) fade(t.node, spare)
+        }
+      } else if (scene === 'memory') {
+        await section('memory', detailOf(full), '[data-key="memory"]')
+      } else if (scene === 'install') {
+        await section('install', detailOf(basic, '&install=open'), '[data-key="install"]')
+      } else {
+        fail(`No scene called ${scene}`)
+      }
+      requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.setAttribute('data-ready', '')))
+    </script>
+  </body>
+</html>

@@ -8,8 +8,9 @@ import { performance } from 'node:perf_hooks'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { createProcessRunner, resolveCli, workerCliEnvironment } from './cli.ts'
 import { readCoreGroups } from './core-groups.ts'
+import { MacMemoryReader } from './mac-memory.ts'
 import { startFleetMonitor, type FleetMonitor, type MonitorDeps } from './monitor.ts'
-import { LocalSampler } from './sampler.ts'
+import { LocalSampler, realOs } from './sampler.ts'
 
 /** What to call this computer until Orca's own name for it arrives (`orca host list`): the
  *  hostname up to its first dot (`build-box.local` and `desk.localdomain` lose their suffix). */
@@ -54,7 +55,9 @@ export function realDeps(): MonitorDeps {
     handle.unref?.()
     return handle
   }
-  const sampler = new LocalSampler()
+  // On a Mac, each sample also reads memory as Activity Monitor counts it (one vm_stat, one sysctl).
+  const memory = os.platform() === 'darwin' ? new MacMemoryReader({ osTotal: () => os.totalmem() }) : null
+  const sampler = new LocalSampler(realOs, memory)
   // Once per worker start; until it answers (and wherever there is no split) cores are one group.
   void readCoreGroups(os.platform(), os.cpus().length).then((groups) => sampler.setCoreGroups(groups))
   return {

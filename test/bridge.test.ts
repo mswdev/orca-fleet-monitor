@@ -1,5 +1,5 @@
 import { assert, describe, test } from 'orca/testing'
-import { BEACON_PREFIX, decodeBeacon } from '../src/beacon.ts'
+import { BEACON_PREFIX, decodeBeacon, encodeBeacon } from '../src/beacon.ts'
 import { estimateCloneBytes, PanelBridge, SNAPSHOT_MAX_BYTES, type BridgeSource } from '../src/bridge.ts'
 import { DEFAULT_HEALTH } from '../src/health.ts'
 import { HistoryRing } from '../src/history.ts'
@@ -8,7 +8,8 @@ import type { FleetMode, FleetUpdate, MachineState } from '../src/model.ts'
 import type { MachineEntry } from '../src/poller.ts'
 import { readSettings } from '../src/settings.ts'
 import { statusBarView } from '../src/status-bar.ts'
-import { FakeTime, localSample } from './helpers.ts'
+import { readFileSync } from 'node:fs'
+import { FakeTime, localSample, macMemory } from './helpers.ts'
 
 function machine(id: string, over: { status?: MachineState['status']; cpu?: number; name?: string } = {}): MachineState {
   return mergeMachine({
@@ -352,5 +353,86 @@ describe('readSettings', () => {
     assert.equal(s.beacon, false)
     assert.equal(readSettings({ fastIntervalSeconds: 40, slowIntervalSeconds: 20 }).slowIntervalMs, 40_000)
     assert.equal(readSettings(null).fastIntervalMs, 5_000)
+  })
+})
+
+describe('statusBarView and memory (1.1)', () => {
+  const GIB = 2 ** 30
+  /** A remote Mac with Fleet Monitor 1.1 (CPU 12%), merged from a fresh beacon carrying `reading`. */
+  const withMac = (reading: Parameters<typeof macMemory>[0]) =>
+    mergeMachine({
+      id: 'env-mini',
+      name: 'Mac mini',
+      kind: 'remote',
+      now: 0,
+      status: 'online',
+      lastSeenAt: 0,
+      latencyMs: 1,
+      error: null,
+      beacon: {
+        latest: decodeBeacon(encodeBeacon(localSample({ platform: 'darwin', cpu: { total: 12, perCore: [12] }, macMemory: macMemory(reading) }), { run: 'r', seq: 1, intervalMs: 5_000 }))!,
+        fresh: true,
+        ageMs: 0,
+        pluginKey: 'k',
+        remotePlugin: 'running'
+      },
+      health: DEFAULT_HEALTH
+    })
+
+  test('a Mac near its limit: the status bar says memory, the tooltip says why, with RAM, swap and pressure', () => {
+    const state = withMac({ used: 15.1 * GIB, app: 9.6 * GIB, pressure: 'warning', availablePercent: 12, swapUsed: 6.2 * GIB, swapTotal: 7 * GIB })
+    const v = statusBarView([machine('local'), state])
+    assert.equal(v.text, 'Mac mini memory strained')
+    assert.equal(v.tone, 'warning')
+    assert.match(
+      v.tooltip,
+      /\nMac mini: strained \(macOS memory pressure warning, 12% available; memory pressure 88% ≥ 88%\) · CPU 12% · RAM 94% used \(15\.1\/16 GB\) · swap 6\.2 GB · memory pressure warning$/
+    )
+  })
+
+  test('a Mac read only through Orca is memory pressure, never used', () => {
+    const state = mergeMachine({
+      id: 'env-b', name: 'Build Box', kind: 'remote', now: 0, status: 'online', lastSeenAt: 0, latencyMs: 1, error: null,
+      diag: {
+        collectedAt: 1, runtimeId: null,
+        host: { totalMemory: 16 * GIB, availableMemory: 0.1 * 16 * GIB, usedMemory: 0.9 * 16 * GIB, memoryPercent: 90, availableMemorySource: 'memory-pressure', cores: 4, load1: 1 },
+        app: { cpu: 0, memory: 0 }, totalCpu: 0, totalMemory: 0, workspaces: []
+      },
+      health: DEFAULT_HEALTH
+    })
+    const v = statusBarView([machine('local'), state])
+    assert.equal(v.text, 'Build Box memory strained')
+    assert.match(v.tooltip, /Build Box: strained \(memory pressure 90% ≥ 88%\) · CPU ~25% \(estimate\) · memory pressure 90%$/)
+    assert.ok(!/used/.test(v.tooltip.split('\n').find((l) => l.startsWith('Build Box'))!))
+  })
+
+  test('CPU and memory at the same level: the name and the level, as before', () => {
+    const both = withMac({ pressure: 'warning', availablePercent: 12 })
+    const hot = { ...both, cpu: { ...both.cpu, percent: 90 }, health: { ...both.health, cpu: 'strained' as const } }
+    assert.equal(statusBarView([hot]).text, 'Mac mini strained')
+  })
+})
+
+describe('readSettings (1.1)', () => {
+  test('RAM used busy at 90% unless set, clamped; alerts on unless turned off', () => {
+    const s = readSettings({})
+    assert.deepEqual([s.memoryRules.ramUsedBusyPercent, s.memoryAlerts], [90, true])
+    assert.deepEqual(s.health, DEFAULT_HEALTH, 'the memory thresholds stay where they were')
+    const set = readSettings({ ramUsedBusyPercent: 150, memoryAlerts: false })
+    assert.deepEqual([set.memoryRules.ramUsedBusyPercent, set.memoryAlerts], [100, false])
+    assert.equal(readSettings({ ramUsedBusyPercent: 'x' }).memoryRules.ramUsedBusyPercent, 90)
+  })
+
+  test('the manifest declares both settings, and the notifications capability', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../orca-plugin.json', import.meta.url), 'utf8')) as {
+      version: string
+      contributes: { settings: { key: string; type: string; default: unknown; minimum?: number; maximum?: number }[] }
+      capabilities: { kind: string }[]
+    }
+    const setting = (key: string) => manifest.contributes.settings.find((s) => s.key === key)
+    assert.deepEqual(setting('ramUsedBusyPercent') && [setting('ramUsedBusyPercent')!.type, setting('ramUsedBusyPercent')!.default, setting('ramUsedBusyPercent')!.minimum, setting('ramUsedBusyPercent')!.maximum], ['integer', 90, 1, 100])
+    assert.deepEqual(setting('memoryAlerts') && [setting('memoryAlerts')!.type, setting('memoryAlerts')!.default], ['boolean', true])
+    assert.deepEqual(manifest.capabilities.map((c) => c.kind), ['settings:own', 'notifications:show'])
+    assert.equal(manifest.version, '1.1.0')
   })
 })

@@ -339,3 +339,10 @@ test('mergeColumns keeps one point per time, in order, inside the window', () =>
   assert.deepEqual(merged, { t: [5, 9, 12], cpu: [55, 9, 12], mem: [1, null, 2] })
   assert.deepEqual(mergeColumns(undefined, undefined, 10), { t: [], cpu: [], mem: [] })
 })
+
+test('mergeColumns keeps RAM in use when either side has it, and leaves it out when neither does', () => {
+  const merged = mergeColumns({ t: [1, 2], cpu: [1, 2], mem: [3, 4] }, { t: [2, 3], cpu: [5, 6], mem: [7, 8], ram: [70, 80] }, 10)
+  assert.deepEqual(merged, { t: [1, 2, 3], cpu: [1, 5, 6], mem: [3, 7, 8], ram: [null, 70, 80] })
+  assert.deepEqual(mergeColumns({ t: [1], cpu: [1], mem: [1], ram: [50] }, { t: [2], cpu: [2], mem: [2] }, 10).ram, [50, null])
+  assert.equal('ram' in mergeColumns({ t: [1], cpu: [1], mem: [1] }, { t: [2], cpu: [2], mem: [2] }, 10), false)
+})

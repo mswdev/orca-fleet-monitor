@@ -3,7 +3,30 @@
 import { readFileSync } from 'node:fs'
 import { encodeBeacon } from '../src/beacon.ts'
 import type { CommandResult, CommandRunner } from '../src/cli.ts'
-import type { LocalSample } from '../src/model.ts'
+import type { LocalSample, MacMemory } from '../src/model.ts'
+
+const GIB = 2 ** 30
+
+/** An invented Mac's memory reading: 16 GB, 12.5 GB of it in use, 1 GB of swap, pressure normal. */
+export function macMemory(overrides: Partial<MacMemory> = {}): MacMemory {
+  return {
+    total: 16 * GIB,
+    used: 12.5 * GIB,
+    app: 7 * GIB,
+    wired: 2.5 * GIB,
+    compressed: 3 * GIB,
+    cached: 2 * GIB,
+    swapUsed: GIB,
+    swapTotal: 2 * GIB,
+    pressure: 'normal',
+    availablePercent: 55,
+    pageSize: 16_384,
+    swapInsPerSec: 0,
+    swapOutsPerSec: 0,
+    sustainedSwapOutsPerSec: null,
+    ...overrides
+  }
+}
 
 export function fixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'))
@@ -186,6 +209,8 @@ export function diagnosticsFor(options: {
   memoryPercent?: number
   runtimeId?: string
   workspaces?: { id: string; name: string; repo: string; cpu: number; memory: number }[]
+  /** How Orca measured available memory: `memory-pressure` on a Mac. `proc-meminfo` when not given. */
+  memorySource?: string
 }): string {
   const total = 32 * 2 ** 30
   const percent = options.memoryPercent ?? 40
@@ -207,7 +232,7 @@ export function diagnosticsFor(options: {
         totalMemory: total,
         freeMemory: 2 ** 30,
         availableMemory: total - used,
-        availableMemorySource: 'proc-meminfo',
+        availableMemorySource: options.memorySource ?? 'proc-meminfo',
         usedMemory: used,
         memoryUsagePercent: percent,
         cpuCoreCount: options.cores ?? 8,

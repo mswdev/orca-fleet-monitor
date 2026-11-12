@@ -95,18 +95,25 @@ export class HistoryRing {
   }
 }
 
+/** Columns of the points. `ram` (RAM in use, from a Mac's own reading) is there only when some
+ *  point has it, so a machine without it sends what it always did. */
 export function toColumns(points: readonly HistoryPoint[]): HistoryColumns {
-  const round = (value: number | null): number | null => (value === null ? null : Math.round(value * 10) / 10)
-  return {
+  const round = (value: number | null | undefined): number | null =>
+    value === null || value === undefined ? null : Math.round(value * 10) / 10
+  const columns: HistoryColumns = {
     t: points.map((p) => p.t),
     cpu: points.map((p) => round(p.cpu)),
     mem: points.map((p) => round(p.mem))
   }
+  if (points.some((p) => typeof p.ram === 'number')) columns.ram = points.map((p) => round(p.ram))
+  return columns
 }
 
 /** Every `step`-th point, newest kept, to shrink a snapshot that would be too large. */
 export function downsample(columns: HistoryColumns, step: number): HistoryColumns {
   if (step <= 1) return columns
   const keep = (_: unknown, i: number, arr: readonly unknown[]): boolean => (arr.length - 1 - i) % step === 0
-  return { t: columns.t.filter(keep), cpu: columns.cpu.filter(keep), mem: columns.mem.filter(keep) }
+  const out: HistoryColumns = { t: columns.t.filter(keep), cpu: columns.cpu.filter(keep), mem: columns.mem.filter(keep) }
+  if (columns.ram) out.ram = columns.ram.filter(keep)
+  return out
 }

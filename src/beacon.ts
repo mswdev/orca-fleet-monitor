@@ -2,11 +2,11 @@
 // `orca plugin logs <key> --environment <id> --json`.
 //
 // Compatibility: the version stays 1 for as long as fields are only added. A reader ignores keys
-// it does not know, and every key added after the first release (`cg`) is optional, so an older
-// Fleet Monitor on either side keeps working.
+// it does not know, and every key added after the first release (`cg`, and `mm` in 1.1) is
+// optional, so an older Fleet Monitor on either side keeps working.
 import { clipText, COUNT_LIMITS, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
-import type { BeaconRecord, CoreGroup, LocalSample } from './model.ts'
+import type { BeaconRecord, CoreGroup, LocalSample, MacMemory, PressureLevel } from './model.ts'
 
 export const BEACON_PREFIX = 'FLEETMON1 '
 export const BEACON_VERSION = 1
@@ -37,6 +37,103 @@ type Wire = {
   mt: number
   mf: number
   l: [number, number, number]
+  /** A Mac's memory as Activity Monitor counts it (1.1 and later). See WireMac. */
+  mm?: WireMac
+}
+
+/** `mm`: bytes, except `ps` (page size), the page rates and `pl`. Only `t` and `u` are always
+ *  there; a figure that could not be read is left out. */
+type WireMac = {
+  /** total, used, app, wired, compressed, cached */
+  t: number
+  u: number
+  a: number
+  w: number
+  c: number
+  k: number
+  /** swap used, swap total */
+  su?: number
+  st?: number
+  /** pressure level as the kernel numbers it: 1 normal, 2 warning, 4 critical */
+  pl?: number
+  /** percent of memory available */
+  pa?: number
+  ps: number
+  /** swap-ins and swap-outs per second since the previous reading; sustained swap-outs */
+  si?: number
+  so?: number
+  ss?: number
+}
+
+const WIRE_PRESSURE: Record<PressureLevel, number> = { normal: 1, warning: 2, critical: 4 }
+
+function encodeMac(m: MacMemory | null | undefined): WireMac | undefined {
+  if (!m) return undefined
+  const opt = <K extends string>(key: K, value: number | null): { [P in K]?: number } =>
+    (value === null ? {} : { [key]: value }) as { [P in K]?: number }
+  return {
+    t: m.total,
+    u: m.used,
+    a: m.app,
+    w: m.wired,
+    c: m.compressed,
+    k: m.cached,
+    ...opt('su', m.swapUsed),
+    ...opt('st', m.swapTotal),
+    ...opt('pl', m.pressure === null ? null : WIRE_PRESSURE[m.pressure]),
+    ...opt('pa', m.availablePercent),
+    ps: m.pageSize,
+    ...opt('si', m.swapInsPerSec),
+    ...opt('so', m.swapOutsPerSec),
+    ...opt('ss', m.sustainedSwapOutsPerSec)
+  }
+}
+
+/** Page rates beyond this are nonsense, not readings. */
+const MAX_PAGE_RATE = 1e9
+
+/** `mm` from another machine's beacon: every figure bounded (bytes within its total, a known
+ *  pressure level, a percentage, rates not below 0), or null when its core is missing. */
+function decodeMac(raw: unknown): MacMemory | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const w = raw as Record<string, unknown>
+  const total = num(w.t)
+  const pageSize = num(w.ps)
+  if (total === null || total < 2 ** 26 || total > MAX_MEMORY_BYTES || pageSize === null || pageSize < 1024 || pageSize > 1024 * 1024) return null
+  const bytes = (value: unknown, max = total): number | null => {
+    const n = num(value)
+    return n === null || n < 0 ? null : Math.min(max, n)
+  }
+  const used = bytes(w.u)
+  const app = bytes(w.a)
+  const wired = bytes(w.w)
+  const compressed = bytes(w.c)
+  const cached = bytes(w.k)
+  if (used === null || app === null || wired === null || compressed === null || cached === null) return null
+  const swapTotal = bytes(w.st, MAX_MEMORY_BYTES)
+  const swapUsed = swapTotal === null ? null : bytes(w.su, swapTotal)
+  const level = num(w.pl)
+  const available = num(w.pa)
+  const rate = (value: unknown): number | null => {
+    const n = num(value)
+    return n === null || n < 0 ? null : Math.min(MAX_PAGE_RATE, n)
+  }
+  return {
+    total,
+    used,
+    app,
+    wired,
+    compressed,
+    cached,
+    swapUsed,
+    swapTotal: swapUsed === null ? null : swapTotal,
+    pressure: level === 1 ? 'normal' : level === 2 ? 'warning' : level === 4 ? 'critical' : null,
+    availablePercent: available === null || available < 0 || available > 100 ? null : available,
+    pageSize: Math.round(pageSize),
+    swapInsPerSec: rate(w.si),
+    swapOutsPerSec: rate(w.so),
+    sustainedSwapOutsPerSec: rate(w.ss)
+  }
 }
 
 const WIRE_KIND: Record<CoreGroup['kind'], string> = { performance: 'P', efficiency: 'E' }
@@ -108,9 +205,12 @@ export function encodeBeacon(
     ...(sample.cpu ? { cg: encodeGroups(sample.coreGroups, sample.cpu.perCore.length) } : {}),
     mt: sample.memory.total,
     mf: sample.memory.free,
-    l: [round2(sample.load[0]), round2(sample.load[1]), round2(sample.load[2])]
+    l: [round2(sample.load[0]), round2(sample.load[1]), round2(sample.load[2])],
+    ...(sample.macMemory ? { mm: encodeMac(sample.macMemory) } : {})
   }
   // Degrade in steps: per-core values (and the groups over them) first, then long free-text fields.
+  // The Mac memory figures (about 200 characters) stay in every step: they are what health and
+  // alerts are judged on.
   const attempts: Wire[] = [
     wire,
     { ...wire, pc: undefined, cg: undefined },
@@ -200,6 +300,7 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
     memFree: Math.min(total, Math.max(0, memFree)),
     load: [load[0] ?? 0, load[1] ?? 0, load[2] ?? 0],
     coreGroups: perCore ? decodeGroups(w.cg, perCore.length) : null,
+    macMemory: decodeMac(w.mm),
     loggedAt: loggedAt ?? t
   }
 }

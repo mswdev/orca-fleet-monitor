@@ -28,10 +28,17 @@ export const FLEET = {
         ]
       },
       mem: {
+        // This Mac's own reading: RAM in use as Activity Monitor counts it.
+        kind: 'used',
         pct: 54,
         usedGb: 34.6,
         totalGb: 64,
-        history: [51, 51, 52, 52, 52, 53, 53, 53, 52, 52, 52, 53, 53, 53, 54, 55, 55, 55, 54, 54, 54, 54, 53, 53, 54, 54, 54, 54, 54, 54]
+        history: [51, 51, 52, 52, 52, 53, 53, 53, 52, 52, 52, 53, 53, 53, 54, 55, 55, 55, 54, 54, 54, 54, 53, 53, 54, 54, 54, 54, 54, 54],
+        pressure: 39,
+        pressureHistory: [37, 37, 37, 38, 38, 38, 38, 38, 38, 38, 38, 38, 39, 39, 39, 39, 40, 40, 39, 39, 39, 39, 39, 38, 39, 39, 39, 39, 39, 39],
+        mac: { appGb: 21.2, wiredGb: 5.1, compressedGb: 8.3, cachedGb: 14.8, swapUsedGb: 0.4, swapTotalGb: 2, level: 'normal', available: 61, swapIn: 0, swapOut: 0 },
+        level: 'ok',
+        reasons: []
       },
       workspaces: [
         { name: 'orca-desktop', cpu: 7, memGb: 6.4 },
@@ -58,10 +65,17 @@ export const FLEET = {
         ]
       },
       mem: {
-        pct: 71,
-        usedGb: 90.9,
+        // Fleet Monitor runs there: RAM in use, and macOS's memory pressure at warning.
+        kind: 'used',
+        pct: 90,
+        usedGb: 115.2,
         totalGb: 128,
-        history: [58, 58, 59, 60, 60, 61, 62, 62, 63, 64, 64, 65, 66, 66, 67, 68, 68, 69, 70, 70, 70, 71, 71, 72, 72, 71, 71, 71, 71, 71]
+        history: [70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 85, 86, 87, 87, 88, 88, 89, 89, 89, 90, 90, 90, 90, 90],
+        pressure: 91,
+        pressureHistory: [60, 62, 63, 65, 66, 68, 69, 71, 72, 74, 75, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 88, 88, 89, 89, 90, 90, 91, 91, 91],
+        mac: { appGb: 78.4, wiredGb: 12.6, compressedGb: 24.2, cachedGb: 6.1, swapUsedGb: 9.8, swapTotalGb: 11, level: 'warning', available: 9, swapIn: 14, swapOut: 220 },
+        level: 'strained',
+        reasons: ['macOS memory pressure warning, 9% available', 'memory pressure 91% ≥ 88%']
       },
       workspaces: [
         { name: 'ml-eval-harness', cpu: 38, memGb: 31.6 },
@@ -77,28 +91,35 @@ export const FLEET = {
       name: 'Mac mini',
       online: true,
       tier: 'full',
-      chip: 'Apple M4 Pro',
+      chip: 'Apple M4',
       uptimeSec: 41 * 86_400 + 11 * 3_600,
-      load: [10.36, 9.81, 8.94],
+      load: [7.36, 6.81, 6.14],
       cpu: {
         pct: 74,
         history: [68, 72, 77, 81, 74, 65, 59, 63, 70, 76, 82, 79, 71, 64, 60, 67, 73, 78, 83, 80, 72, 66, 62, 68, 75, 80, 84, 78, 71, 74],
         cores: [
-          { kind: 'performance', load: [98, 94, 89, 85, 81, 78, 74, 71, 67, 62] },
-          { kind: 'efficiency', load: [68, 62, 57, 51] }
+          { kind: 'performance', load: [98, 94, 89, 85] },
+          { kind: 'efficiency', load: [68, 62, 57, 51, 47, 44] }
         ]
       },
       mem: {
-        pct: 48,
-        usedGb: 23,
-        totalGb: 48,
-        history: [46, 46, 47, 47, 48, 47, 46, 46, 47, 47, 48, 48, 47, 46, 46, 47, 47, 48, 48, 48, 47, 47, 46, 47, 47, 48, 48, 48, 48, 48]
+        // 16 GB, a quarter of it in swap and swapping out: busy before pressure turns.
+        kind: 'used',
+        pct: 82,
+        usedGb: 13.1,
+        totalGb: 16,
+        history: [76, 76, 77, 77, 78, 78, 78, 79, 79, 79, 80, 80, 80, 80, 81, 81, 81, 81, 81, 82, 82, 81, 81, 82, 82, 82, 82, 82, 82, 82],
+        pressure: 58,
+        pressureHistory: [51, 51, 52, 52, 53, 53, 53, 54, 54, 54, 55, 55, 55, 55, 56, 56, 56, 56, 57, 57, 57, 57, 57, 58, 58, 58, 58, 58, 58, 58],
+        mac: { appGb: 7.9, wiredGb: 2.3, compressedGb: 2.9, cachedGb: 1.6, swapUsedGb: 4.6, swapTotalGb: 6, level: 'normal', available: 42, swapIn: 35, swapOut: 150 },
+        level: 'busy',
+        reasons: ['swapping out 2.3 MB/s for 30 s with 4.6 GB of swap in use (≥ 4 GB, a quarter of RAM)']
       },
       workspaces: [
-        { name: 'ci-runner-pool', cpu: 34, memGb: 9.8 },
-        { name: 'payments-api', cpu: 17, memGb: 5.2 },
-        { name: 'docs-site', cpu: 8, memGb: 2.4 },
-        { name: 'design-tokens', cpu: 3, memGb: 1.1 }
+        { name: 'ci-runner-pool', cpu: 34, memGb: 4.1 },
+        { name: 'payments-api', cpu: 17, memGb: 2.2 },
+        { name: 'docs-site', cpu: 8, memGb: 0.9 },
+        { name: 'design-tokens', cpu: 3, memGb: 0.4 }
       ],
       orca: { cpu: 2, memGb: 1.1 }
     },
@@ -114,6 +135,8 @@ export const FLEET = {
         history: [72, 78, 85, 91, 94, 96, 97, 95, 96, 98, 97, 96, 94, 95, 97, 98, 99, 97, 96, 95, 97, 98, 96, 95, 97, 98, 99, 98, 96, 97]
       },
       mem: {
+        // A Mac without Fleet Monitor: Orca's reading there is memory pressure.
+        kind: 'pressure',
         pct: 78,
         usedGb: 25,
         totalGb: 32,
@@ -130,7 +153,8 @@ export const FLEET = {
       chip: 'Apple M2',
       lastSeenAgoMs: (2 * 60 + 14) * MIN,
       cpu: { pct: 9, history: [] },
-      mem: { pct: 62, usedGb: 9.9, totalGb: 16, history: [] }
+      // Offline, its last readings are Orca's: memory pressure.
+      mem: { kind: 'pressure', pct: 62, usedGb: 9.9, totalGb: 16, history: [] }
     }
   ]
 }
@@ -159,9 +183,11 @@ function readings(perMinute, now, endAt = now) {
 const health = (pct, t) => (pct >= t.critical ? 'critical' : pct >= t.strained ? 'strained' : pct >= t.busy ? 'busy' : 'ok')
 const rank = { ok: 0, busy: 1, strained: 2, critical: 3 }
 
-/** Thresholds for the sample: the defaults (CPU 70/85/95, memory 75/88/95), as a person who has
- *  changed nothing sees them. Under them the sample is ok, strained, busy, busy (a basic machine,
- *  on its memory) and offline. */
+/** Thresholds for the sample: the defaults (CPU 70/85/95, memory 75/88/95, RAM used busy at 90),
+ *  as a person who has changed nothing sees them. Under them the sample is ok; strained (CPU, and
+ *  macOS memory pressure at warning); busy (CPU, and swapping with a quarter of RAM in swap); busy
+ *  (a basic machine, on its memory pressure); and offline. A machine with its own memory reading
+ *  (`kind: 'used'`) carries the memory level and reasons the worker gives it (src/health.ts). */
 export const SAMPLE_THRESHOLDS = {
   cpu: { ...DEFAULT_THRESHOLDS.cpu },
   memory: { ...DEFAULT_THRESHOLDS.memory }
@@ -183,6 +209,9 @@ function toMachineView(m, now, thresholds) {
   const lastSeenAt = m.online ? now - 2_000 : now - m.lastSeenAgoMs
   const cpuHistory = readings(m.cpu.history, now, m.online ? now : lastSeenAt)
   const memHistory = readings(m.mem.history, now, m.online ? now : lastSeenAt)
+  const used = m.mem.kind === 'used'
+  // History's `mem` is memory pressure; RAM in use has its own column (`ram`).
+  const pressureHistory = used ? readings(m.mem.pressureHistory, now, m.online ? now : lastSeenAt) : null
   if (!m.online) {
     cpuHistory.t.push(lastSeenAt)
     cpuHistory.v.push(m.cpu.pct)
@@ -192,13 +221,32 @@ function toMachineView(m, now, thresholds) {
   const basic = m.tier === 'basic'
   // As the worker judges it: a basic machine's CPU is an estimate, which never sets a level.
   const cpuLevel = basic ? null : health(m.cpu.pct, thresholds.cpu)
-  const memLevel = health(m.mem.pct, thresholds.memory)
-  const level = cpuLevel !== null && rank[cpuLevel] >= rank[memLevel] ? cpuLevel : memLevel
   const threshold = (lvl, t) => (lvl === 'critical' ? t.critical : lvl === 'strained' ? t.strained : t.busy)
+  const memLevel = used ? m.mem.level : health(m.mem.pct, thresholds.memory)
+  const memReasons = used ? m.mem.reasons : memLevel === 'ok' ? [] : [`memory pressure ${Math.round(m.mem.pct)}% ≥ ${threshold(memLevel, thresholds.memory)}%`]
+  const level = cpuLevel !== null && rank[cpuLevel] >= rank[memLevel] ? cpuLevel : memLevel
   const reasons = level === 'ok' ? [] : [
     ...(cpuLevel === level ? [`CPU ${Math.round(m.cpu.pct)}% ≥ ${threshold(level, thresholds.cpu)}%`] : []),
-    ...(memLevel === level ? [`memory ${Math.round(m.mem.pct)}% ≥ ${threshold(level, thresholds.memory)}%`] : [])
+    ...(memLevel === level ? memReasons : [])
   ]
+  const mac = used
+    ? {
+        total: m.mem.totalGb * GIB,
+        used: m.mem.usedGb * GIB,
+        app: m.mem.mac.appGb * GIB,
+        wired: m.mem.mac.wiredGb * GIB,
+        compressed: m.mem.mac.compressedGb * GIB,
+        cached: m.mem.mac.cachedGb * GIB,
+        swapUsed: m.mem.mac.swapUsedGb * GIB,
+        swapTotal: m.mem.mac.swapTotalGb * GIB,
+        pressure: m.mem.mac.level,
+        availablePercent: m.mem.mac.available,
+        pageSize: 16_384,
+        swapInsPerSec: m.mem.mac.swapIn,
+        swapOutsPerSec: m.mem.mac.swapOut,
+        sustainedSwapOutsPerSec: m.mem.mac.swapOut > 0 ? m.mem.mac.swapOut : null
+      }
+    : null
   return {
     id: m.id,
     name: m.name,
@@ -220,14 +268,28 @@ function toMachineView(m, now, thresholds) {
     cpu: m.online
       ? { percent: m.cpu.pct, source: basic ? 'load' : local ? 'sampler' : 'beacon', perCore, groups }
       : { percent: null, source: null, perCore: null, groups: null },
-    memory: {
-      total: m.mem.totalGb * GIB,
-      used: m.mem.usedGb * GIB,
-      available: (m.mem.totalGb - m.mem.usedGb) * GIB,
-      percent: m.mem.pct,
-      source: 'orca',
-      reliable: true
-    },
+    memory: used
+      ? {
+          total: mac.total,
+          used: mac.used,
+          available: mac.total - mac.used,
+          percent: m.mem.pct,
+          source: local ? 'sampler' : 'beacon',
+          reliable: true,
+          kind: 'used',
+          pressurePercent: m.mem.pressure,
+          mac
+        }
+      : {
+          total: m.mem.totalGb * GIB,
+          used: m.mem.usedGb * GIB,
+          available: (m.mem.totalGb - m.mem.usedGb) * GIB,
+          percent: m.mem.pct,
+          source: 'orca',
+          reliable: true,
+          kind: 'pressure',
+          pressurePercent: m.mem.pct
+        },
     load: m.load ? { one: m.load[0], five: m.load[1] ?? null, fifteen: m.load[2] ?? null } : null,
     orca: m.orca ? { cpu: m.orca.cpu * cores, memory: m.orca.memGb * GIB, totalCpu: m.orca.cpu * cores * 3, totalMemory: m.orca.memGb * 3 * GIB } : null,
     workspaces: {
@@ -245,7 +307,9 @@ function toMachineView(m, now, thresholds) {
       remotePlugin: local ? 'running' : basic ? 'absent' : 'running'
     },
     updatedAt: now,
-    history: { t: cpuHistory.t, cpu: cpuHistory.v, mem: memHistory.v }
+    history: pressureHistory
+      ? { t: cpuHistory.t, cpu: cpuHistory.v, mem: pressureHistory.v, ram: memHistory.v }
+      : { t: cpuHistory.t, cpu: cpuHistory.v, mem: memHistory.v }
   }
 }
 

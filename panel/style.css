@@ -378,6 +378,14 @@ body {
   font-size: 11px;
   color: var(--fm-muted-fg);
 }
+/* macOS memory pressure when it is not normal: one quiet word beside the memory label. */
+.fm-pressure {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--fm-level);
+}
 .fm-metric-row {
   display: flex;
   flex-wrap: wrap;
@@ -947,4 +955,14 @@ body {
   margin-top: 2px;
   font-size: 10px;
   color: var(--fm-muted-fg);
+}
+/* What a Mac's RAM in use is made of, under its chart. */
+.fm-mem-facts {
+  padding-top: 10px;
+  border-top: 1px solid var(--fm-border);
+}
+.fm-pressure-value[data-health='strained'],
+.fm-pressure-value[data-health='critical'] {
+  font-weight: 600;
+  color: var(--fm-level);
 }

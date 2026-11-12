@@ -24,9 +24,9 @@ import {
 } from './beacon.ts'
 import { clipText, isPluginKey, TEXT_LIMITS } from './bounds.ts'
 import type { CommandResult, CommandRunner } from './cli.ts'
-import type { HealthSettings } from './health.ts'
+import type { HealthSettings, MemoryRules } from './health.ts'
 import { HistoryRing } from './history.ts'
-import { beaconMemoryPercent, historyPointOf, mergeMachine } from './merge.ts'
+import { beaconPoint, historyPointOf, mergeMachine } from './merge.ts'
 import type { BeaconRecord, DiagnosticsSample, FleetMode, LocalSample, MachineState } from './model.ts'
 import {
   findPluginKeys,
@@ -75,8 +75,12 @@ const MAX_QUEUE_WAIT_MS = 60_000
 /** A remote's clock offset that moves by more than a beacon's staleness limit means its clock was
  *  set: its log is read again at once, so its beacon is judged on the new clock. */
 const CLOCK_STEP_MS = BEACON_INTERVAL_MS * BEACON_STALE_INTERVALS
+/** While no panel is open, a machine whose memory is strained or critical has the read that
+ *  carries its memory (its beacon, or its diagnostics) made about this often, so an alert can be
+ *  confirmed, or escalate, without waiting for the slow interval. */
+export const ALERT_READ_MS = 15_000
 
-export type PollerSettings = { fastIntervalMs: number; slowIntervalMs: number; health: HealthSettings }
+export type PollerSettings = { fastIntervalMs: number; slowIntervalMs: number; health: HealthSettings; memoryRules?: MemoryRules }
 
 export type PollerDeps = {
   run: CommandRunner
@@ -94,6 +98,9 @@ export type PollerDeps = {
    *  no CLI calls then until a panel heartbeats. */
   idleWhenSlow?: () => boolean
   onChange?: () => void
+  /** A machine's memory was read anew (a new sample, beacon or diagnostics that its memory comes
+   *  from), with the state it gave. Re-merges that bring no new reading do not call it. */
+  onMemoryReading?: (state: MachineState) => void
   log?: (message: string) => void
 }
 
@@ -145,9 +152,17 @@ type Slot = {
   history: HistoryRing
   state: MachineState
   lastLocalT: number | null
+  /** Which reading the memory last handed to `onMemoryReading` came from. */
+  memoryKey: string | null
 }
 
 export type MachineEntry = { state: MachineState; history: HistoryRing }
+
+/** Memory at strained or critical: alerts watch it, and its reads come faster with no panel open. */
+function strainedMemory(state: MachineState | null | undefined): boolean {
+  const level = state?.online ? state.health.memory : null
+  return level === 'strained' || level === 'critical'
+}
 
 /** The next read on the schedule's own beat (`dueAt` plus the interval), so neither the call's
  *  length nor the tick it started on adds up; but never sooner than half an interval after this
@@ -363,9 +378,25 @@ export class FleetPoller {
 
   private diagInterval(slot: Slot, now: number): number {
     const interval = this.intervalMs(now)
-    if (this.mode(now) === 'slow') return interval
+    if (this.mode(now) === 'slow') return this.alertFeed(slot) === 'diag' ? Math.min(interval, ALERT_READ_MS) : interval
     const full = slot.kind === 'local' || slot.beaconFresh
     return full ? Math.max(3 * interval, FULL_TIER_DIAG_MIN_MS) : interval
+  }
+
+  private beaconInterval(slot: Slot, now: number): number {
+    const interval = this.intervalMs(now)
+    return this.mode(now) === 'slow' && this.alertFeed(slot) === 'beacon' ? Math.min(interval, ALERT_READ_MS) : interval
+  }
+
+  /** The read that carries a machine's memory, while that memory is strained or critical: its
+   *  beacon (a Mac with Fleet Monitor 1.1) or its diagnostics. None for this computer's own
+   *  sampler, which reads every 5 s anyway, or while memory is fine. */
+  private alertFeed(slot: Slot): 'diag' | 'beacon' | null {
+    const memory = slot.state?.memory
+    if (!memory || !strainedMemory(slot.state)) return null
+    if (memory.source === 'beacon') return 'beacon'
+    if (memory.source === 'orca') return 'diag'
+    return null
   }
 
   private backoff(failures: number, now: number): number {
@@ -590,7 +621,7 @@ export class FleetPoller {
     const { result, envelope } = await this.callCli(['plugin', 'logs', key, '--environment', slot.id, '--json'])
     if (this.stopped || !this.slots.has(slot.id)) return
     const now = this.deps.now()
-    slot.due.beacon = nextDue(dueAt, this.intervalMs(now), now)
+    slot.due.beacon = nextDue(dueAt, this.beaconInterval(slot, now), now)
     const logs = parseLogs(envelope)
     if (!logs) {
       // The log cannot be read just now: the last beacon must be within three intervals again
@@ -654,17 +685,20 @@ export class FleetPoller {
   private recordBeacons(slot: Slot, records: readonly BeaconRecord[], latest: BeaconRecord, now: number): void {
     const offset = slot.offsetMs ?? 0
     const after = slot.pointRun === latest.run ? slot.pointSeq : Number.NEGATIVE_INFINITY
-    const diagMemory = slot.state.memory?.reliable ? slot.state.memory.percent : null
+    const memory = slot.state.memory?.reliable ? slot.state.memory : null
+    // The pressure figure history's `mem` holds (for a Mac's own reading, not its RAM in use).
+    const diagMemory = memory ? (memory.kind === 'used' ? (memory.pressurePercent ?? null) : memory.percent) : null
     let rewritten = false
     for (const r of records) {
       if (r.run !== latest.run || r.seq <= after || r.seq >= latest.seq || r.cpu === null) continue
       const t = r.t - offset
       // Written before the remote's clock was set back: it would land in the future here.
       if (t > now) continue
-      // Memory: the beacon's own where it can be trusted (not on a Mac); for a beacon just missed
-      // between two reads, the diagnostics reading, which is at most that old; else none.
-      const mem = beaconMemoryPercent(r) ?? (now - t <= FULL_TIER_DIAG_MIN_MS ? diagMemory : null)
-      if (slot.history.insertMissing({ t, cpu: r.cpu, mem }, now, BEACON_POINT_SPACING_MS) && t < now - POSTED_WINDOW_MS) {
+      // Memory: the beacon's own where it can be trusted (a Mac's own reading from 1.1, or
+      // os.freemem() on other systems); for a beacon just missed between two reads, the
+      // diagnostics reading, which is at most that old; else none. RAM in use only from a Mac's.
+      const point = beaconPoint(r, offset, now - t <= FULL_TIER_DIAG_MIN_MS ? diagMemory : null)
+      if (slot.history.insertMissing(point, now, BEACON_POINT_SPACING_MS) && t < now - POSTED_WINDOW_MS) {
         rewritten = true
       }
     }
@@ -766,10 +800,20 @@ export class FleetPoller {
       pointSeq: 0,
       history: new HistoryRing(),
       state: null as unknown as MachineState,
-      lastLocalT: null
+      lastLocalT: null,
+      memoryKey: null
     }
     this.remerge(slot, false)
     return slot
+  }
+
+  /** Which reading a state's memory came from, so the same one is never counted twice. */
+  private memoryKeyOf(slot: Slot, state: MachineState, local: LocalSample | null): string | null {
+    const memory = state.memory
+    if (!memory || !state.online) return null
+    if (memory.source === 'sampler' || (memory.source === 'os' && slot.kind === 'local')) return local ? `local:${local.t}` : null
+    if (memory.source === 'beacon' || memory.source === 'os') return slot.latest ? `beacon:${slot.latest.run}:${slot.latest.seq}` : null
+    return slot.diagAt === null ? null : `diag:${slot.diagAt}`
   }
 
   private remerge(slot: Slot, addPoint: boolean): void {
@@ -787,6 +831,7 @@ export class FleetPoller {
       pointAt = slot.beaconFresh && slot.latest && slot.offsetMs !== null ? Math.min(now, slot.latest.t - slot.offsetMs) : now
     }
     const staleLocalDiag = slot.kind === 'local' && slot.diagAt !== null && now - slot.diagAt > this.localDiagMaxAge(now)
+    const wasStrained = slot.state ? strainedMemory(slot.state) : false
     slot.state = mergeMachine({
       id: slot.id,
       name: slot.name,
@@ -809,13 +854,30 @@ export class FleetPoller {
             }
           : null,
       health: this.settings.health,
+      memoryRules: this.settings.memoryRules,
       platform: slot.kind === 'local' ? (this.deps.localPlatform ?? null) : null
     })
     if (pointAt !== null) {
       const point = historyPointOf(slot.state, pointAt)
       if (point) slot.history.add(point, now, Math.min(1_000, this.settings.fastIntervalMs / 2))
+      // Only when a reading arrives (as with history points), and only a new one.
+      const key = this.memoryKeyOf(slot, slot.state, local)
+      if (key !== null && key !== slot.memoryKey) {
+        slot.memoryKey = key
+        this.deps.onMemoryReading?.(slot.state)
+      }
     }
+    if (!wasStrained && strainedMemory(slot.state)) this.hurryAlertFeed(slot, now)
     slot.history.trim(now)
+  }
+
+  /** Memory just became strained or critical: with no panel open, the read that carries it comes
+   *  about every ALERT_READ_MS from its last one, starting now rather than at the slow interval. */
+  private hurryAlertFeed(slot: Slot, now: number): void {
+    if (this.mode(now) !== 'slow' || slot.failures > 0) return
+    const feed = this.alertFeed(slot)
+    if (feed === 'diag') slot.due.diag = Math.min(slot.due.diag, (slot.diagAt ?? now) + ALERT_READ_MS)
+    else if (feed === 'beacon' && slot.logFailures === 0) slot.due.beacon = Math.min(slot.due.beacon, (slot.logReadAt ?? now) + ALERT_READ_MS)
   }
 
   private changed(): void {

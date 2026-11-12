@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fleet Monitor README demo</title>
+    <!-- The animation in README.md (media/readme/demo-*.gif): the real panel, fed with the invented
+         sample fleet, with a drawn pointer over it. Nothing moves by itself: readme-demo.mjs draws
+         frame n when tools/preview/shoot-readme.mjs asks for it.  ?theme=light|dark -->
+    <style id="orca-design-tokens"></style>
+    <link rel="stylesheet" href="../../panel/style.css" />
+    <style>
+      /* A hairline round the panel, so its edge shows on a page of nearly the same colour. */
+      #edge { position: fixed; inset: 0; z-index: 9; box-shadow: inset 0 0 0 1px #dfe0e6; pointer-events: none; }
+      .dark #edge { box-shadow: inset 0 0 0 1px #2f3038; }
+      #pointer, #ring { position: fixed; left: 0; top: 0; z-index: 10; pointer-events: none; }
+      #pointer { width: 20px; height: 24px; fill: #1a1b1f; stroke: #ffffff; }
+      .dark #pointer { fill: #ffffff; stroke: #131316; }
+      #ring { width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%; border: 2px solid #2a62e0; opacity: 0; }
+      .dark #ring { border-color: #7aa2ff; }
+    </style>
+  </head>
+  <body>
+    <main id="app" class="fm"></main>
+    <div id="edge"></div>
+    <div id="ring"></div>
+    <svg id="pointer" viewBox="0 0 20 24" aria-hidden="true">
+      <path d="M2 1.5v17.2l4.6-4.1 3 7 3.1-1.3-3-6.9h6.4z" stroke-width="1.5" stroke-linejoin="round" />
+    </svg>
+    <script type="module" src="readme-demo.mjs"></script>
+  </body>
+</html>

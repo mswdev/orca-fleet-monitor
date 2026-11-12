@@ -18,23 +18,29 @@ const REQUEST_TIMEOUT_MS = 10_000
 export const REWRITE_REFRESH_MS = 15_000
 
 /** Merges `extra` history columns into `base` by time (same time: extra wins), oldest first,
- *  keeping only points within `windowMs` of the newest. */
+ *  keeping only points within `windowMs` of the newest. `ram` (RAM in use, from a Mac's own
+ *  reading) is kept when either side has it, and left out when neither does. */
 export function mergeColumns(base, extra, windowMs) {
   const byTime = new Map()
+  let withRam = false
   for (const cols of [base, extra]) {
     if (!cols || !Array.isArray(cols.t)) continue
+    const ram = Array.isArray(cols.ram) ? cols.ram : null
+    if (ram) withRam = true
     for (let i = 0; i < cols.t.length; i += 1) {
-      byTime.set(cols.t[i], [cols.cpu?.[i] ?? null, cols.mem?.[i] ?? null])
+      byTime.set(cols.t[i], [cols.cpu?.[i] ?? null, cols.mem?.[i] ?? null, ram?.[i] ?? null])
     }
   }
   const times = [...byTime.keys()].sort((a, b) => a - b)
   const newest = times[times.length - 1] ?? 0
   const kept = times.filter((t) => t >= newest - windowMs)
-  return {
+  const merged = {
     t: kept,
     cpu: kept.map((t) => byTime.get(t)[0]),
     mem: kept.map((t) => byTime.get(t)[1])
   }
+  if (withRam) merged.ram = kept.map((t) => byTime.get(t)[2])
+  return merged
 }
 
 const emptyColumns = () => ({ t: [], cpu: [], mem: [] })
@@ -522,14 +528,17 @@ function workspacesOf(lists, cores) {
   return [...seen.values()].sort((a, b) => b.cpuPct - a.cpuPct || b.memBytes - a.memBytes).slice(0, TOP_WORKSPACES)
 }
 
-/** What the basic-tier row should say: install it there, enable it there, or check its beacon. */
-function installHintOf(machine, context) {
+/** What the basic-tier row should say: install it there, enable it there, or check its beacon.
+ *  `mac: true` on the install hint says the machine is a Mac, where installing Fleet Monitor also
+ *  adds RAM in use, swap and pressure. */
+function installHintOf(machine, context, mac) {
   switch (machine.beacon?.remotePlugin) {
     case 'absent':
       return {
         reason: 'absent',
         command: installCommand(machine, { launcher: context.launcher, ambiguous: context.ambiguous.has(machine.id) }),
-        launcher: context.launcher
+        launcher: context.launcher,
+        ...(mac ? { mac: true } : {})
       }
     case 'installed':
       return { reason: 'installed', command: null }
@@ -538,6 +547,52 @@ function installHintOf(machine, context) {
     default:
       return null
   }
+}
+
+const PRESSURE_LEVELS = ['normal', 'warning', 'critical']
+const bytesOrNull = (value) => (finite(value) && value >= 0 ? value : null)
+const rateOrNull = (value) => (finite(value) && value >= 0 ? value : null)
+
+/**
+ * How a machine's memory is to be shown:
+ *   used      a Mac's own reading (Fleet Monitor 1.1 there, or this Mac): RAM in use as Activity
+ *             Monitor counts it, with its parts, swap and macOS's pressure level
+ *   pressure  Orca's reading of a Mac: memory pressure, never to be called "used"
+ *   orca      Orca's figure elsewhere (Linux MemAvailable, Windows), shown as it always was
+ */
+function memoryKindOf(memory) {
+  if (memory?.kind === 'used' && memory.mac && typeof memory.mac === 'object') return 'used'
+  if (memory?.kind === 'pressure') return 'pressure'
+  return 'orca'
+}
+
+/** A Mac's own reading, as the detail rows show it; null for any other machine. */
+function macDetailOf(mac) {
+  if (!mac || typeof mac !== 'object') return null
+  const level = PRESSURE_LEVELS.includes(mac.pressure) ? mac.pressure : null
+  const available = finite(mac.availablePercent) ? Math.min(100, Math.max(0, mac.availablePercent)) : null
+  return {
+    appBytes: bytesOrNull(mac.app),
+    wiredBytes: bytesOrNull(mac.wired),
+    compressedBytes: bytesOrNull(mac.compressed),
+    cachedBytes: bytesOrNull(mac.cached),
+    swapUsedBytes: bytesOrNull(mac.swapUsed),
+    swapTotalBytes: bytesOrNull(mac.swapTotal),
+    swapInsPerSec: rateOrNull(mac.swapInsPerSec),
+    swapOutsPerSec: rateOrNull(mac.swapOutsPerSec),
+    pressure: level,
+    availablePct: available
+  }
+}
+
+/** Why a memory pressure reading is all there is for a Mac, and what would add RAM in use. */
+function pressureNoteOf(m, local, basic) {
+  if (local) return 'own'
+  if (basic) {
+    const plugin = m.beacon?.remotePlugin
+    return plugin === 'installed' ? 'enable' : plugin === 'running' ? 'quiet' : 'install'
+  }
+  return 'update'
 }
 
 function toMachine(m, thresholds, now, context) {
@@ -554,8 +609,14 @@ function toMachine(m, thresholds, now, context) {
   const estimated = m.cpu?.source === 'load'
   const memReliable = Boolean(m.memory) && m.memory.reliable !== false
   const memPct = m.memory ? percent(m.memory.percent) : null
+  const memKind = memoryKindOf(m.memory)
+  // Each kind has its own history column, so RAM in use and pressure never share a chart.
+  const memKey = memKind === 'used' ? 'ram' : 'mem'
+  const mac = memKind === 'used' ? macDetailOf(m.memory.mac) : null
+  // A Mac: its own reading, Orca's pressure reading of it, or its beacon says so.
+  const isMac = memKind !== 'orca' || platform === 'darwin'
   const newestCpu = newestReading(history, 'cpu')
-  const newestMem = newestReading(history, 'mem')
+  const newestMem = newestReading(history, memKey)
   const seen = [m.lastSeenAt, newestCpu?.t, newestMem?.t].filter(finite)
   const health = online ? (levelOrNull(m.health?.level) ?? 'unknown') : 'unknown'
   const perCoreCount = Array.isArray(m.cpu?.perCore) ? m.cpu.perCore.length : 0
@@ -590,17 +651,25 @@ function toMachine(m, thresholds, now, context) {
       coresHidden: online && perCoreCount > MAX_CORES_DRAWN ? perCoreCount : 0
     },
     mem: {
+      kind: memKind,
+      /** What the figure is called: never "used" for Orca's pressure reading of a Mac. */
+      label: memKind === 'pressure' ? 'Memory pressure' : 'Memory',
       pct: memPct,
       reliable: memReliable,
-      usedBytes: m.memory && finite(m.memory.used) ? m.memory.used : null,
+      // Orca's "used" on a Mac is pressure, not RAM in use, so it is not shown as such.
+      usedBytes: memKind !== 'pressure' && m.memory && finite(m.memory.used) ? m.memory.used : null,
       totalBytes: m.memory && finite(m.memory.total) ? m.memory.total : null,
       tone: levelOrNull(m.health?.memory) ?? (memReliable && memPct !== null ? levelFor(memPct, thresholds.memory) : 'ok'),
-      history: bucketHistory(history, 'mem', now),
-      stats: windowStats(history, 'mem', now)
+      history: bucketHistory(history, memKey, now),
+      stats: windowStats(history, memKey, now),
+      mac,
+      /** Memory pressure (100 − available) beside RAM in use, for a Mac's own reading. */
+      pressurePct: memKind === 'used' ? percent(m.memory.pressurePercent) : null,
+      pressureNote: memKind === 'pressure' ? pressureNoteOf(m, local, basic) : null
     },
     orca: m.orca && finite(m.orca.cpu) ? { cpuPct: m.orca.cpu / Math.max(1, cores ?? 1), memBytes: finite(m.orca.memory) ? m.orca.memory : null } : null,
     workspaces: online ? workspacesOf(m.workspaces, cores) : [],
-    install: !local && online && basic ? installHintOf(m, context) : null,
+    install: !local && online && basic ? installHintOf(m, context, isMac) : null,
     lastKnown: { cpuPct: newestCpu?.value ?? cpuPct, memPct: newestMem?.value ?? (memReliable ? memPct : null) }
   }
 }

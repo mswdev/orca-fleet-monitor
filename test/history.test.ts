@@ -68,3 +68,15 @@ test('insertMissing fills gaps only: it never replaces or crowds a point already
     [25_000, 25, null]
   ])
 })
+
+test('RAM in use travels in its own column, only when some point has it, and thins with the rest', () => {
+  assert.deepEqual(toColumns([{ t: 1, cpu: 1, mem: 50, ram: 91.26 }, { t: 2, cpu: 2, mem: 51 }]), {
+    t: [1, 2],
+    cpu: [1, 2],
+    mem: [50, 51],
+    ram: [91.3, null]
+  })
+  assert.equal('ram' in toColumns([{ t: 1, cpu: 1, mem: 50 }]), false)
+  const cols = toColumns([1, 2, 3, 4, 5].map((t) => ({ t, cpu: t, mem: t, ram: t * 10 })))
+  assert.deepEqual(downsample(cols, 2), { t: [1, 3, 5], cpu: [1, 3, 5], mem: [1, 3, 5], ram: [10, 30, 50] })
+})

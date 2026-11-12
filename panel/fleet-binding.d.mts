@@ -63,9 +63,23 @@ export type FleetOrca = {
 export type Level = HealthLevel
 export type CoreGroupModel = { label: string; short: 'P' | 'E' | null; values: number[]; tones: Level[] }
 export type WorkspaceModel = { id: string; name: string; repo: string; cpuPct: number; memBytes: number }
-/** `command` is null when neither the machine's name nor its id can go into a command safely. */
-export type InstallHint = { reason: 'absent' | 'installed' | 'quiet'; command: string | null; launcher?: 'orca' | 'orca-ide' }
+/** `command` is null when neither the machine's name nor its id can go into a command safely.
+ *  `mac`: the machine is a Mac, where Fleet Monitor also adds RAM in use, swap and pressure. */
+export type InstallHint = { reason: 'absent' | 'installed' | 'quiet'; command: string | null; launcher?: 'orca' | 'orca-ide'; mac?: boolean }
 export type Stats = { avg: number; peak: number }
+/** A Mac's own memory reading, as the detail rows show it. Bytes unless named otherwise. */
+export type MacDetail = {
+  appBytes: number | null
+  wiredBytes: number | null
+  compressedBytes: number | null
+  cachedBytes: number | null
+  swapUsedBytes: number | null
+  swapTotalBytes: number | null
+  swapInsPerSec: number | null
+  swapOutsPerSec: number | null
+  pressure: 'normal' | 'warning' | 'critical' | null
+  availablePct: number | null
+}
 
 export type MachineModel = {
   id: string
@@ -103,13 +117,27 @@ export type MachineModel = {
     coresHidden: number
   }
   mem: {
+    /** `used`: RAM in use from a Mac's own reading. `pressure`: Orca's memory pressure reading of a
+     *  Mac. `orca`: Orca's figure elsewhere, shown as before. */
+    kind: 'used' | 'pressure' | 'orca'
+    /** `Memory pressure` for the `pressure` kind, else `Memory`. */
+    label: string
+    /** RAM used % (`used`), memory pressure % (`pressure`), or Orca's figure. */
     pct: number | null
     reliable: boolean
+    /** Null for the `pressure` kind: Orca's "used" there is not RAM in use. */
     usedBytes: number | null
     totalBytes: number | null
     tone: Level
+    /** From history's `ram` column for the `used` kind, its `mem` column otherwise. */
     history: (number | null)[]
     stats: Stats | null
+    mac: MacDetail | null
+    /** Memory pressure % beside RAM in use, for the `used` kind. */
+    pressurePct: number | null
+    /** For the `pressure` kind, what would add RAM in use: install, enable or update Fleet
+     *  Monitor there, wait for its readings, or (this Mac) its own reading is missing. */
+    pressureNote: 'install' | 'enable' | 'quiet' | 'update' | 'own' | null
   }
   orca: { cpuPct: number; memBytes: number | null } | null
   workspaces: WorkspaceModel[]
@@ -143,18 +171,18 @@ export function createFleetBinding(orca: FleetOrca, options?: FleetBindingOption
 export function levelFor(value: number | null | undefined, thresholds: HealthThresholds): Level
 export function bucketHistory(
   columns: HistoryColumns | null | undefined,
-  key: 'cpu' | 'mem',
+  key: 'cpu' | 'mem' | 'ram',
   end: number,
   slots?: number,
   slotMs?: number
 ): (number | null)[]
 export function windowStats(
   columns: HistoryColumns | null | undefined,
-  key: 'cpu' | 'mem',
+  key: 'cpu' | 'mem' | 'ram',
   end: number,
   windowMs?: number
 ): Stats | null
-export function newestReading(columns: HistoryColumns | null | undefined, key: 'cpu' | 'mem'): { value: number; t: number } | null
+export function newestReading(columns: HistoryColumns | null | undefined, key: 'cpu' | 'mem' | 'ram'): { value: number; t: number } | null
 export function safeMachineName(name: unknown): boolean
 /** A server name as Orca's CLI compares it: trimmed, unquoted, case ignored. */
 export function typedName(name: unknown): string

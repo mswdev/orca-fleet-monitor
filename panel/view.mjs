@@ -103,6 +103,33 @@ function memText(m, spaced) {
   return `${gb(m.mem.usedBytes)}${spaced ? ' / ' : '/'}${gb(m.mem.totalBytes)} GB`
 }
 
+/** Beside the memory figure: used / total, or for a pressure reading only how much RAM there is
+ *  (Orca's "used" on a Mac is pressure, not RAM in use). */
+function memSub(m, spaced) {
+  if (m.mem.kind === 'pressure') return m.mem.totalBytes === null ? '' : `${gb(m.mem.totalBytes)} GB`
+  return memText(m, spaced)
+}
+
+const PRESSURE_WORD = { warning: 'Warning', critical: 'Critical', normal: 'Normal' }
+
+/** A quiet word when macOS's memory pressure is not normal: yellow (warning) or red (critical). */
+function pressureMarker(m) {
+  const level = m.mem.mac?.pressure
+  if (level !== 'warning' && level !== 'critical') return null
+  return h('span', { class: 'fm-pressure', data: { health: level === 'critical' ? 'critical' : 'strained' } }, `pressure ${level}`)
+}
+
+/** Memory for a screen reader, named as the panel names it. */
+function memAria(m) {
+  if (m.mem.pct === null || !m.mem.reliable) return 'memory unknown'
+  if (m.mem.kind === 'used') {
+    const pressure = m.mem.mac?.pressure && m.mem.mac.pressure !== 'normal' ? `, memory pressure ${m.mem.mac.pressure}` : ''
+    return `RAM ${pct(m.mem.pct)}% used (${gb(m.mem.usedBytes)} of ${gb(m.mem.totalBytes)} GB)${pressure}`
+  }
+  if (m.mem.kind === 'pressure') return `memory pressure ${pct(m.mem.pct)}%`
+  return `memory ${pct(m.mem.pct)}%`
+}
+
 function lastSeenText(m) {
   return m.lastSeenAt === null ? null : 'Last seen {ago}'
 }
@@ -179,16 +206,16 @@ function cardAria(m, now) {
     : m.cpu.pct === null
       ? 'CPU unknown'
       : `CPU ${pct(m.cpu.pct)}%`
-  const mem = m.mem.pct === null || !m.mem.reliable ? 'memory unknown' : `memory ${pct(m.mem.pct)}%`
+  const mem = memAria(m)
   const why = m.reasons.length > 0 ? ` (${m.reasons.join('; ')})` : ''
   return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}${why}. ${cpu}, ${mem}. Open details.`
 }
 
-function metric(label, value, sub, tone, history) {
+function metric(label, value, sub, tone, history, marker = null) {
   return h(
     'span',
     { class: 'fm-metric', data: { tone } },
-    h('span', { class: 'fm-metric-label' }, label),
+    h('span', { class: 'fm-metric-label' }, label, marker),
     h('span', { class: 'fm-metric-row' }, big(value), sub ? h('span', { class: 'fm-sub' }, sub) : null),
     spark(history, tone)
   )
@@ -235,7 +262,7 @@ function card(m, now) {
       'span',
       { class: 'fm-metrics' },
       metric('CPU', m.cpu.pct, m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : coresText(m), m.cpu.tone, m.cpu.history),
-      metric('Memory', m.mem.reliable ? m.mem.pct : null, memText(m, false), m.mem.tone, m.mem.history)
+      metric(m.mem.label, m.mem.reliable ? m.mem.pct : null, memSub(m, false), m.mem.tone, m.mem.history, pressureMarker(m))
     )
   )
 }
@@ -465,14 +492,61 @@ function cpuSection(m) {
   )
 }
 
+/** Page rates as a person reads them: "12", "0.4", "<0.1". */
+function rate(value) {
+  if (value === null || value === undefined) return '–'
+  if (value > 0 && value < 0.1) return '<0.1'
+  return value >= 10 ? String(Math.round(value)) : String(Math.round(value * 10) / 10)
+}
+
+/** Rows under a Mac's own reading: what the RAM in use is made of, swap, and macOS's pressure. */
+function macRows(m) {
+  const mac = m.mem.mac
+  const swapNote = [
+    mac.swapTotalBytes !== null ? `of ${size(mac.swapTotalBytes)}` : '',
+    mac.swapInsPerSec || mac.swapOutsPerSec ? `${rate(mac.swapInsPerSec)} in · ${rate(mac.swapOutsPerSec)} out pages/s` : ''
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const level = mac.pressure
+  const pressureValue = [
+    level ? h('span', { class: 'fm-pressure-value', data: { health: level === 'critical' ? 'critical' : level === 'warning' ? 'strained' : 'ok' } }, PRESSURE_WORD[level]) : null,
+    level && mac.availablePct !== null ? ' · ' : null,
+    mac.availablePct !== null ? `${pct(mac.availablePct)}% available` : null
+  ]
+  const rows = [
+    { k: 'App memory', v: size(mac.appBytes) },
+    { k: 'Wired', v: size(mac.wiredBytes) },
+    { k: 'Compressed', v: size(mac.compressedBytes) },
+    { k: 'Cached files', v: size(mac.cachedBytes) },
+    { k: 'Swap used', v: size(mac.swapUsedBytes), note: swapNote },
+    { k: 'Memory pressure', v: level || mac.availablePct !== null ? pressureValue : '–' }
+  ]
+  return h('dl', { class: 'fm-facts fm-mem-facts', 'data-key': 'mem-facts' }, rows.map(factRow))
+}
+
+const PRESSURE_NOTES = {
+  install: 'Installing Fleet Monitor on that machine adds real RAM usage, swap and pressure.',
+  enable: 'Turning Fleet Monitor on there adds real RAM usage, swap and pressure.',
+  quiet: 'Real RAM usage, swap and pressure show here once Fleet Monitor’s readings arrive from there.',
+  update: 'Updating Fleet Monitor there to 1.1 or later adds real RAM usage, swap and pressure.',
+  own: 'This Mac’s own memory reading is not available right now.'
+}
+
 function memorySection(m) {
   const value = m.mem.reliable ? m.mem.pct : null
+  const used = m.mem.kind === 'used'
+  // With the install row on screen, it says what installing adds; the note does not repeat it.
+  const note =
+    m.mem.kind === 'pressure' && m.mem.pressureNote ? (m.mem.pressureNote === 'install' && m.install ? '' : PRESSURE_NOTES[m.mem.pressureNote]) : null
   return h(
     'section',
-    { class: 'fm-section', data: { tone: m.mem.tone }, 'aria-label': 'Memory', 'data-key': 'memory' },
-    h('div', { class: 'fm-section-head' }, h('h2', {}, 'Memory'), h('span', { class: 'fm-sub' }, memText(m, true))),
-    h('div', { class: 'fm-reading' }, big(value, true), h('span', { class: 'fm-sub' }, statsText(m.mem.stats))),
-    chart(m.mem.history, m.mem.tone, chartLabel('Memory', value, m.mem.stats))
+    { class: 'fm-section', data: { tone: m.mem.tone }, 'aria-label': m.mem.label, 'data-key': 'memory' },
+    h('div', { class: 'fm-section-head' }, h('h2', {}, m.mem.label), h('span', { class: 'fm-sub' }, memSub(m, true))),
+    h('div', { class: 'fm-reading' }, big(value, true), used ? h('span', { class: 'fm-sub' }, 'used') : null, h('span', { class: 'fm-sub' }, statsText(m.mem.stats))),
+    note !== null ? h('p', { class: 'fm-note', 'data-key': 'pressure-note' }, `Memory pressure as Orca reads it, not RAM in use.${note ? ` ${note}` : ''}`) : null,
+    chart(m.mem.history, m.mem.tone, chartLabel(used ? 'RAM used' : m.mem.label, value, m.mem.stats)),
+    used && m.mem.mac ? macRows(m) : null
   )
 }
 
@@ -503,6 +577,11 @@ const INSTALL_TEXT = {
   absent: 'Install Fleet Monitor on this machine for full detail',
   installed: 'Fleet Monitor is installed on this machine but not running',
   quiet: 'Fleet Monitor runs on this machine, but its readings are not arriving'
+}
+/** On a Mac, what installing it adds is said in so many words. */
+const INSTALL_TEXT_MAC = {
+  ...INSTALL_TEXT,
+  absent: 'Install Fleet Monitor on this machine for real RAM usage, swap and pressure'
 }
 
 /** The install row's body, drawn closed too (hidden) so the toggle's aria-controls names it. One
@@ -586,11 +665,15 @@ function installRow(m, ui) {
         'aria-controls': INSTALL_BODY_ID
       },
       iconDownload(),
-      h('span', { class: 'fm-install-text' }, INSTALL_TEXT[m.install.reason]),
+      h('span', { class: 'fm-install-text' }, (m.install.mac ? INSTALL_TEXT_MAC : INSTALL_TEXT)[m.install.reason]),
       iconChevron()
     ),
     installBody(m, ui, open)
   )
+}
+
+function factRow(f) {
+  return h('div', { class: 'fm-fact' }, h('dt', {}, f.k), h('dd', {}, f.v, f.note ? h('span', { class: 'fm-fact-note' }, f.note) : null))
 }
 
 function factsSection(title, facts) {
@@ -598,13 +681,7 @@ function factsSection(title, facts) {
     'section',
     { class: 'fm-section', 'aria-label': title, 'data-key': `facts:${title}` },
     h('h2', {}, title),
-    h(
-      'dl',
-      { class: 'fm-facts' },
-      facts.map((f) =>
-        h('div', { class: 'fm-fact' }, h('dt', {}, f.k), h('dd', {}, f.v, f.note ? h('span', { class: 'fm-fact-note' }, f.note) : null))
-      )
-    )
+    h('dl', { class: 'fm-facts' }, facts.map(factRow))
   )
 }
 
@@ -659,8 +736,8 @@ function lastKnownFacts(m) {
   const facts = []
   if (m.lastKnown.cpuPct !== null) facts.push({ k: 'CPU', v: `${pct(m.lastKnown.cpuPct)}%` })
   if (m.lastKnown.memPct !== null) {
-    const mem = memText(m, true)
-    facts.push({ k: 'Memory', v: mem ? `${pct(m.lastKnown.memPct)}% · ${mem}` : `${pct(m.lastKnown.memPct)}%` })
+    const mem = memSub(m, true)
+    facts.push({ k: m.mem.label, v: mem ? `${pct(m.lastKnown.memPct)}% · ${mem}` : `${pct(m.lastKnown.memPct)}%` })
   }
   if (m.chip) facts.push({ k: chipLabel(m), v: m.chip })
   return facts

@@ -3,7 +3,7 @@ import { decodeBeacon, encodeBeacon } from '../src/beacon.ts'
 import { DEFAULT_HEALTH } from '../src/health.ts'
 import { backfillPoints, historyPointOf, loadEstimate, mergeMachine, type MergeInput } from '../src/merge.ts'
 import { parseDiagnostics, parseEnvelope } from '../src/parse.ts'
-import { fixtureText, localSample } from './helpers.ts'
+import { fixtureText, localSample, macMemory } from './helpers.ts'
 
 const diag = parseDiagnostics(parseEnvelope(fixtureText('diagnostics-remote.json')))!
 const base = (over: Partial<MergeInput>): MergeInput => ({
@@ -103,7 +103,9 @@ describe('remote machine', () => {
     const full = { ...diag, host: { ...diag.host, load1: 0.5, memoryPercent: 96 } }
     const m = mergeMachine(base({ diag: full }))
     assert.equal(m.health.level, 'critical')
-    assert.deepEqual(m.health.reasons, ['memory 96% ≥ 95%'])
+    // The fixture is a Mac (availableMemorySource memory-pressure): Orca's figure is memory
+    // pressure there, and 1.1 says so.
+    assert.deepEqual(m.health.reasons, ['memory pressure 96% ≥ 95%'])
   })
 
   test('a machine that reports no load average (Windows) has no estimate rather than 0%', () => {
@@ -167,4 +169,73 @@ test('backfill moves beacon times onto the local clock and drops macOS os memory
     { t: 8_000, cpu: 42.5, mem: 75 },
     { t: 13_000, cpu: 42.5, mem: null }
   ])
+})
+
+describe('memory from a Mac’s own reading (1.1)', () => {
+  const GIB = 2 ** 30
+  const reading = macMemory({ used: 15.1 * GIB, app: 9.6 * GIB, availablePercent: 12, pressure: 'warning', swapUsed: 6.2 * GIB, swapTotal: 7 * GIB })
+  const macBeacon = (over: Parameters<typeof localSample>[0] = {}) => beaconOf({ platform: 'darwin', macMemory: reading, ...over })
+
+  test("this Mac: the sampler's reading wins over Orca's diagnostics, as RAM in use", () => {
+    const m = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin', macMemory: reading }), diag }))
+    assert.equal(m.memory?.source, 'sampler')
+    assert.equal(m.memory?.kind, 'used')
+    assert.equal(m.memory?.used, 15.1 * GIB)
+    assert.equal(m.memory?.total, 16 * GIB)
+    assert.equal(Math.round((m.memory?.percent ?? 0) * 10) / 10, 94.4)
+    assert.equal(m.memory?.pressurePercent, 88)
+    assert.deepEqual(m.memory?.mac, reading)
+    assert.equal(m.health.memory, 'strained')
+    assert.deepEqual(m.health.reasons, ['macOS memory pressure warning, 12% available', 'memory pressure 88% ≥ 88%'])
+  })
+
+  test('a remote Mac: a fresh beacon’s reading wins over diagnostics; a stale one never does', () => {
+    const fresh = mergeMachine(base({ diag, beacon: { latest: macBeacon(), fresh: true, ageMs: 1_000, pluginKey: 'k', remotePlugin: 'running' } }))
+    assert.deepEqual([fresh.memory?.source, fresh.memory?.kind, fresh.memory?.used], ['beacon', 'used', 15.1 * GIB])
+    const stale = mergeMachine(base({ diag, beacon: { latest: macBeacon(), fresh: false, ageMs: 60_000, pluginKey: 'k', remotePlugin: 'running' } }))
+    assert.deepEqual([stale.memory?.source, stale.memory?.kind, stale.memory?.percent], ['orca', 'pressure', 50])
+    assert.equal(stale.memory?.mac, undefined)
+  })
+
+  test('a remote still on 1.0.0, and the basic tier, show Orca’s figure: memory pressure on a Mac, as before elsewhere', () => {
+    const old = mergeMachine(base({ diag, beacon: { latest: beaconOf({ platform: 'darwin' }), fresh: true, ageMs: 1_000, pluginKey: 'k', remotePlugin: 'running' } }))
+    assert.deepEqual([old.tier, old.memory?.source, old.memory?.kind, old.memory?.pressurePercent], ['full', 'orca', 'pressure', 50])
+    const basicMac = mergeMachine(base({ diag }))
+    assert.deepEqual([basicMac.tier, basicMac.memory?.kind], ['basic', 'pressure'])
+    const linux = mergeMachine(base({ diag: { ...diag, host: { ...diag.host, availableMemorySource: 'proc-meminfo' } } }))
+    assert.equal(linux.memory?.kind, undefined, 'Linux keeps its figure and its wording')
+    assert.equal('pressurePercent' in (linux.memory ?? {}), false)
+  })
+
+  test("pressure falls back on Orca's figure when the kernel's percentage could not be read", () => {
+    const noLevel = macMemory({ availablePercent: null })
+    const m = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin', macMemory: noLevel }), diag }))
+    assert.equal(m.memory?.pressurePercent, 50)
+    const alone = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin', macMemory: noLevel }) }))
+    assert.equal(alone.memory?.pressurePercent, null)
+    assert.equal(alone.memory?.reliable, true, 'RAM in use is still known')
+  })
+
+  test('the RAM used threshold comes from the settings', () => {
+    const busy = macMemory({ used: 14.6 * GIB, app: 9.1 * GIB })
+    const at = (ramUsedBusyPercent: number) =>
+      mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin', macMemory: busy }), memoryRules: { ramUsedBusyPercent } })).health.memory
+    assert.deepEqual([at(90), at(95)], ['busy', 'ok'])
+  })
+
+  test('history: RAM in use in its own column, pressure in mem, so the two never mix', () => {
+    const mac = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin', macMemory: reading }) }))
+    const point = historyPointOf(mac, 7)!
+    assert.deepEqual([point.t, point.cpu, point.mem, Math.round(point.ram! * 10) / 10], [7, 42.5, 88, 94.4])
+    const orca = mergeMachine(base({ diag }))
+    assert.deepEqual(historyPointOf(orca, 8), { t: 8, cpu: 75, mem: 50 }, 'no ram key without a Mac reading')
+  })
+
+  test('back-fill from a Mac’s beacons carries RAM in use and pressure', () => {
+    const points = backfillPoints([macBeacon({ t: 10_000 }), beaconOf({ t: 15_000, platform: 'darwin' })], 2_000)
+    assert.deepEqual(points.map((p) => [p.t, p.mem, typeof p.ram === 'number' ? Math.round(p.ram * 10) / 10 : 'none']), [
+      [8_000, 88, 94.4],
+      [13_000, null, 'none']
+    ])
+  })
 })

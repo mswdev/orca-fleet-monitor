@@ -1,6 +1,7 @@
 // Wires the pieces together inside a worker. Everything that touches the outside world comes in
 // through `MonitorDeps`, so tests run the real wiring with a fake CLI and a fake clock.
 import type { OrcaWorkerApi } from 'orca/worker'
+import { MemoryAlerts, type AlertNotice } from './alerts.ts'
 import { BEACON_INTERVAL_MS, encodeBeacon } from './beacon.ts'
 import { PanelBridge } from './bridge.ts'
 import { cliLauncherName, type CliResolution, type CommandRunner } from './cli.ts'
@@ -22,6 +23,8 @@ const HEADLESS_AFTER_MS = 2 * 60_000
 /** While judged headless, the status bar is still tried this often. */
 const HEADLESS_RETRY_MS = 60_000
 const LOG_REPEAT_MS = 10 * 60_000
+/** Longest wait for the sampler's own reads (a Mac's memory) before a sample is taken anyway. */
+const PREPARE_WAIT_MS = 3_000
 
 export type WorkerOrca = Pick<OrcaWorkerApi, 'settings' | 'panels' | 'host' | 'log' | 'commands'>
 
@@ -31,7 +34,9 @@ export type MonitorDeps = {
   clearInterval: (handle: unknown) => void
   setTimeout: (fn: () => void, ms: number) => unknown
   clearTimeout: (handle: unknown) => void
-  sampler: { sample(): LocalSample; latest(): LocalSample | null }
+  /** `prepare`, when there is one, reads what a sample needs that takes a child process (a Mac's
+   *  memory) and is awaited before each `sample()`. */
+  sampler: { sample(): LocalSample; latest(): LocalSample | null; prepare?(): Promise<void> }
   resolveCli: (override: string | null) => CliResolution
   createRunner: (cliPath: () => string | null) => { run: CommandRunner; stop(): void }
   localName: () => string
@@ -54,8 +59,10 @@ export type FleetMonitor = {
   headless: () => boolean
   /** True while slow-mode polling is off: background monitoring turned off, or no status bar. */
   idleWhenSlow: () => boolean
-  /** Runs the sampler and beacon once, as the 5 s timer does. */
-  sampleNow: () => void
+  /** Runs the sampler and beacon once, as the 5 s timer does; with a sampler that prepares, the
+   *  promise settles once the beacon is written. */
+  sampleNow: () => void | Promise<void>
+  alerts: MemoryAlerts
   stop: () => Promise<void>
 }
 
@@ -116,6 +123,24 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     if (statusTimer === null) statusTimer = deps.setTimeout(() => void pushStatus(), STATUS_BAR_DEBOUNCE_MS)
   }
 
+  // Memory alerts, on every new memory reading of a machine.
+  const alerts = new MemoryAlerts({
+    now: deps.now,
+    enabled: () => settings.memoryAlerts,
+    health: () => settings.health,
+    memoryRules: () => settings.memoryRules
+  })
+  const showAlert = async (notice: AlertNotice): Promise<void> => {
+    try {
+      // Only `title` and `body`: Orca refuses a field it does not know.
+      const result = (await orca.host.call('notifications.show', { title: notice.title, body: notice.body })) as { delivered?: unknown } | null
+      if (result?.delivered !== true) logOnce('notify-undelivered', 'a memory alert was not shown as a desktop notification here')
+    } catch (error) {
+      const code = (error as { code?: unknown }).code
+      logOnce('notify', `memory alert failed: ${String(code ?? error)}`)
+    }
+  }
+
   // One id per worker run: the beacon carries it, and so do the panel posts.
   const runId = deps.runId()
   let bridge: PanelBridge | null = null
@@ -131,6 +156,10 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       onChange: () => {
         bridge?.notify()
         scheduleStatus()
+      },
+      onMemoryReading: (state) => {
+        const notice = alerts.observe(state)
+        if (notice) void showAlert(notice)
       },
       log: (message) => logOnce(message.split(':')[0] ?? message, message)
     },
@@ -190,7 +219,10 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
 
   // The beacon has its own timer so a slow or hung CLI call never delays it.
   let seq = 0
-  const sampleNow = (): void => {
+  let stopped = false
+  let preparing = false
+  const takeSample = (): void => {
+    if (stopped) return
     const sample = deps.sampler.sample()
     if (settings.beacon) {
       seq += 1
@@ -199,7 +231,32 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     }
     activePoller.onLocalSample()
   }
-  const sampleTimer = deps.setInterval(sampleNow, BEACON_INTERVAL_MS)
+  const sampleNow = (): void | Promise<void> => {
+    const prepare = deps.sampler.prepare
+    if (!prepare) {
+      takeSample()
+      return
+    }
+    // One sample per read. A read still running (each command has a 2 s timeout) takes this
+    // tick's sample when it ends; one that somehow never ends is not waited for past
+    // PREPARE_WAIT_MS, so the beacon never stops.
+    if (preparing) return
+    preparing = true
+    return new Promise<void>((resolve) => {
+      let done = false
+      const finish = (): void => {
+        if (done) return
+        done = true
+        preparing = false
+        deps.clearTimeout(timer)
+        takeSample()
+        resolve()
+      }
+      const timer = deps.setTimeout(finish, PREPARE_WAIT_MS)
+      prepare.call(deps.sampler).then(finish, finish)
+    })
+  }
+  const sampleTimer = deps.setInterval(() => void sampleNow(), BEACON_INTERVAL_MS)
   const tickTimer = deps.setInterval(() => activePoller.tick(), TICK_MS)
   activePoller.tick()
   scheduleStatus()
@@ -212,7 +269,9 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     headless,
     idleWhenSlow,
     sampleNow,
+    alerts,
     stop: async () => {
+      stopped = true
       deps.clearInterval(sampleTimer)
       deps.clearInterval(tickTimer)
       if (statusTimer !== null) deps.clearTimeout(statusTimer)

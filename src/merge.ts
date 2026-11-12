@@ -1,12 +1,13 @@
 // Merges what we know about one machine (local sample, Orca diagnostics, remote beacon) into
 // the single model the panel and status bar read.
-import { assessHealth, type HealthSettings } from './health.ts'
+import { assessHealth, type HealthSettings, type MemoryRules } from './health.ts'
 import type {
   BeaconRecord,
   BeaconState,
   DiagnosticsSample,
   HistoryPoint,
   LocalSample,
+  MacMemory,
   MachineState
 } from './model.ts'
 import { topWorkspaces } from './parse.ts'
@@ -33,6 +34,8 @@ export type MergeInput = {
     remotePlugin: BeaconState['remotePlugin']
   } | null
   health: HealthSettings
+  /** RAM used busy threshold, for a machine that reports RAM in use; the default when absent. */
+  memoryRules?: MemoryRules
   topLimit?: number
   /** This computer's platform, which is known before its first sample (only for the local
    *  machine), so it is tagged "This Mac" or "This PC" from the first answer on. */
@@ -78,15 +81,24 @@ export function mergeMachine(input: MergeInput): MachineState {
     cpu = { percent: reported ? loadEstimate(diag.host.load1, diag.host.cores) : null, source: 'load', perCore: null, groups: null }
   }
 
+  // Memory, best first: a Mac's own reading (this computer's sampler, or a fresh beacon from a Mac
+  // with Fleet Monitor 1.1), which is RAM in use as Activity Monitor counts it; then Orca's
+  // diagnostics, which on a Mac are memory pressure; then os.freemem().
   let memory: MachineState['memory'] = null
-  if (diag) {
+  const mac = local ? (local.macMemory ?? null) : (fresh?.macMemory ?? null)
+  if (mac && mac.total > 0) {
+    memory = macMemoryState(mac, local ? 'sampler' : 'beacon', diag)
+  } else if (diag) {
+    const pressure = diag.host.availableMemorySource === 'memory-pressure'
     memory = {
       total: diag.host.totalMemory,
       used: diag.host.usedMemory,
       available: diag.host.availableMemory,
       percent: diag.host.memoryPercent,
       source: 'orca',
-      reliable: true
+      reliable: true,
+      // On a Mac, Orca's figure is the kernel's memory pressure, not RAM in use.
+      ...(pressure ? { kind: 'pressure' as const, pressurePercent: diag.host.memoryPercent } : {})
     }
   } else {
     const os = local
@@ -154,27 +166,65 @@ export function mergeMachine(input: MergeInput): MachineState {
     },
     updatedAt: input.now
   }
-  state.health = assessHealth({ online, cpu, memory }, input.health)
+  state.health = assessHealth({ online, cpu, memory }, input.health, input.memoryRules)
   return state
 }
 
-/** The history point a merged state contributes; memory only when it can be trusted. */
-export function historyPointOf(state: MachineState, t: number): HistoryPoint | null {
-  if (!state.online) return null
-  const mem = state.memory && state.memory.reliable ? state.memory.percent : null
-  if (state.cpu.percent === null && mem === null) return null
-  return { t, cpu: state.cpu.percent, mem }
+/** Memory pressure from a Mac's own reading: 100 − the percent the kernel counts as available. */
+function macPressure(mac: MacMemory): number | null {
+  return mac.availablePercent === null ? null : clampPercent(100 - mac.availablePercent)
 }
 
-/** Memory from a beacon itself, when it can be trusted: `os.freemem()` on macOS leaves out
- *  reclaimable cache, so a Mac's beacon carries none. */
+/** A Mac's own reading as the machine's memory. Pressure falls back on Orca's figure (the same
+ *  measure) when the kernel's percentage could not be read. */
+function macMemoryState(mac: MacMemory, source: 'sampler' | 'beacon', diag: DiagnosticsSample | null | undefined): NonNullable<MachineState['memory']> {
+  const orcaPressure = diag && diag.host.availableMemorySource === 'memory-pressure' ? diag.host.memoryPercent : null
+  return {
+    total: mac.total,
+    used: mac.used,
+    available: Math.max(0, mac.total - mac.used),
+    percent: clampPercent((mac.used / mac.total) * 100),
+    source,
+    reliable: true,
+    kind: 'used',
+    pressurePercent: macPressure(mac) ?? orcaPressure,
+    mac
+  }
+}
+
+/** The history point a merged state contributes; memory only when it can be trusted. `mem` is
+ *  memory pressure (or Orca's figure); `ram` is RAM in use, only where a Mac reported it. */
+export function historyPointOf(state: MachineState, t: number): HistoryPoint | null {
+  if (!state.online) return null
+  const memory = state.memory && state.memory.reliable ? state.memory : null
+  const used = memory?.kind === 'used'
+  const mem = memory ? (used ? (memory.pressurePercent ?? null) : memory.percent) : null
+  const ram = used ? memory!.percent : null
+  if (state.cpu.percent === null && mem === null && ram === null) return null
+  return ram === null ? { t, cpu: state.cpu.percent, mem } : { t, cpu: state.cpu.percent, mem, ram }
+}
+
+/** Memory from a beacon itself, when it can be trusted: a Mac's own pressure reading (1.1), or
+ *  `os.freemem()` elsewhere; on macOS that leaves out reclaimable cache, so it is never used. */
 export function beaconMemoryPercent(r: BeaconRecord): number | null {
+  if (r.macMemory) return macPressure(r.macMemory)
   return r.platform === 'darwin' || r.memTotal <= 0 ? null : clampPercent(((r.memTotal - r.memFree) / r.memTotal) * 100)
+}
+
+/** RAM in use from a Mac's beacon (1.1), as a percentage; null for any other beacon. */
+export function beaconRamPercent(r: BeaconRecord): number | null {
+  const mac = r.macMemory
+  return mac && mac.total > 0 ? clampPercent((mac.used / mac.total) * 100) : null
+}
+
+/** A history point from an older beacon, on the local clock (`offsetMs` = remote minus local). */
+export function beaconPoint(r: BeaconRecord, offsetMs: number, fallbackMem: number | null = null): HistoryPoint {
+  const ram = beaconRamPercent(r)
+  const mem = beaconMemoryPercent(r) ?? fallbackMem
+  return ram === null ? { t: r.t - offsetMs, cpu: r.cpu, mem } : { t: r.t - offsetMs, cpu: r.cpu, mem, ram }
 }
 
 /** Older beacons as history points on the local clock (`offsetMs` = remote minus local). */
 export function backfillPoints(records: readonly BeaconRecord[], offsetMs: number): HistoryPoint[] {
-  return records
-    .filter((r) => r.cpu !== null)
-    .map((r) => ({ t: r.t - offsetMs, cpu: r.cpu, mem: beaconMemoryPercent(r) }))
+  return records.filter((r) => r.cpu !== null).map((r) => beaconPoint(r, offsetMs))
 }

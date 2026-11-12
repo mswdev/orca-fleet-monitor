@@ -1,7 +1,7 @@
-import { assert, test } from 'orca/testing'
-import { assessHealth, DEFAULT_HEALTH, levelFor, orderedThresholds, worstMachine } from '../src/health.ts'
+import { assert, describe, test } from 'orca/testing'
+import { assessHealth, DEFAULT_HEALTH, DEFAULT_MEMORY_RULES, levelFor, memoryReasons, orderedThresholds, worstMachine } from '../src/health.ts'
 import { mergeMachine } from '../src/merge.ts'
-import { localSample } from './helpers.ts'
+import { localSample, macMemory } from './helpers.ts'
 
 const memory = (percent: number, reliable = true) => ({ percent, reliable })
 
@@ -128,4 +128,65 @@ test('worstMachine never ranks a machine by an estimate', () => {
     health: DEFAULT_HEALTH
   })
   assert.equal(worstMachine([memoryOnly('estimated', 16), measured])?.id, 'measured', 'a 100% estimate does not outrank 30% measured')
+})
+
+describe('memory on a machine that reports RAM in use (a Mac with Fleet Monitor 1.1)', () => {
+  const GIB = 2 ** 30
+  /** What src/merge.ts makes of a Mac's own reading. */
+  const mac = (over: Parameters<typeof macMemory>[0] = {}, pressurePercent: number | null = 100 - (over.availablePercent ?? 55)) => {
+    const m = macMemory(over)
+    return { percent: (m.used / m.total) * 100, reliable: true, kind: 'used' as const, pressurePercent, total: m.total, used: m.used, mac: m }
+  }
+  const judge = (memory: ReturnType<typeof mac>, rules = DEFAULT_MEMORY_RULES) =>
+    assessHealth({ online: true, cpu: { percent: 10, source: 'sampler' }, memory }, DEFAULT_HEALTH, rules)
+
+  test('macOS critical pressure is critical, warning is strained, each said with what is left', () => {
+    const critical = judge(mac({ pressure: 'critical', availablePercent: 4 }, null))
+    assert.deepEqual([critical.level, critical.memory, critical.reasons], ['critical', 'critical', ['macOS memory pressure critical, 4% available']])
+    const warning = judge(mac({ pressure: 'warning', availablePercent: 30 }, null))
+    assert.deepEqual([warning.level, warning.reasons], ['strained', ['macOS memory pressure warning, 30% available']])
+    assert.equal(judge(mac({ pressure: 'normal' })).memory, 'ok')
+  })
+
+  test('the memory thresholds judge memory pressure (100 − available), as on every machine', () => {
+    const h = judge(mac({ availablePercent: 10 }))
+    assert.deepEqual([h.level, h.reasons], ['strained', ['memory pressure 90% ≥ 88%']])
+    assert.equal(judge(mac({ availablePercent: 24 })).memory, 'busy')
+    assert.equal(judge(mac({ availablePercent: 26 })).memory, 'ok', '74% pressure, and 78% RAM used, is fine')
+  })
+
+  test('RAM in use at 90% or more is busy, and the setting moves it', () => {
+    const full = mac({ used: 14.5 * GIB, app: 9 * GIB })
+    const h = judge(full)
+    assert.deepEqual([h.level, h.reasons], ['busy', ['RAM 91% used (14.5 of 16 GB) ≥ 90%']])
+    assert.equal(judge(full, { ramUsedBusyPercent: 95 }).memory, 'ok')
+    assert.equal(judge(mac(), { ramUsedBusyPercent: 70 }).memory, 'busy', '78% used')
+  })
+
+  test('sustained swap-outs with a quarter of RAM in swap are busy; less swap, or no sustained activity, is not', () => {
+    const swapping = mac({ swapUsed: 4.2 * GIB, swapTotal: 5 * GIB, sustainedSwapOutsPerSec: 320 })
+    const h = judge(swapping)
+    assert.deepEqual([h.level, h.reasons], ['busy', ['swapping out 5 MB/s for 30 s with 4.2 GB of swap in use (≥ 4 GB, a quarter of RAM)']])
+    assert.equal(judge(mac({ swapUsed: 3.9 * GIB, sustainedSwapOutsPerSec: 320 })).memory, 'ok', 'under a quarter of RAM in swap')
+    assert.equal(judge(mac({ swapUsed: 6 * GIB, swapTotal: 7 * GIB, sustainedSwapOutsPerSec: null, swapOutsPerSec: 900 })).memory, 'ok', 'one busy interval is not sustained')
+  })
+
+  test('the level is the worst rule, and the reasons are the rules at that level', () => {
+    const many = judge(mac({ used: 15.1 * GIB, app: 9.6 * GIB, pressure: 'warning', availablePercent: 8, swapUsed: 6.2 * GIB, swapTotal: 7 * GIB, sustainedSwapOutsPerSec: 500 }))
+    assert.equal(many.level, 'strained')
+    assert.deepEqual(many.reasons, ['macOS memory pressure warning, 8% available', 'memory pressure 92% ≥ 88%'])
+    const both = memoryReasons(mac({ used: 15.1 * GIB, app: 9.6 * GIB, swapUsed: 6.2 * GIB, swapTotal: 7 * GIB, sustainedSwapOutsPerSec: 500 }), DEFAULT_HEALTH)
+    assert.deepEqual(both, {
+      level: 'busy',
+      reasons: ['RAM 94% used (15.1 of 16 GB) ≥ 90%', 'swapping out 7.8 MB/s for 30 s with 6.2 GB of swap in use (≥ 4 GB, a quarter of RAM)']
+    })
+    assert.deepEqual(memoryReasons(null, DEFAULT_HEALTH), { level: null, reasons: [] })
+  })
+
+  test("Orca's reading of a Mac is called memory pressure; elsewhere it is worded as before", () => {
+    const pressure = assessHealth({ online: true, cpu: { percent: 10, source: 'sampler' }, memory: { percent: 90, reliable: true, kind: 'pressure' } }, DEFAULT_HEALTH)
+    assert.deepEqual(pressure.reasons, ['memory pressure 90% ≥ 88%'])
+    const linux = assessHealth({ online: true, cpu: { percent: 10, source: 'sampler' }, memory: { percent: 90, reliable: true } }, DEFAULT_HEALTH)
+    assert.deepEqual(linux.reasons, ['memory 90% ≥ 88%'])
+  })
 })

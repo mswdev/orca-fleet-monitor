@@ -8,6 +8,44 @@ export type FleetMode = 'fast' | 'slow'
  *  silicon Macs report a split (see src/core-groups.ts); everywhere else there is none. */
 export type CoreGroup = { kind: 'performance' | 'efficiency'; start: number; count: number }
 
+/** macOS's own memory pressure (`kern.memorystatus_vm_pressure_level`): the green, yellow and red of
+ *  Activity Monitor's pressure graph. */
+export type PressureLevel = 'normal' | 'warning' | 'critical'
+
+/**
+ * One reading of a Mac's memory from `vm_stat` and `sysctl` (src/mac-memory.ts), counted as
+ * Activity Monitor counts it. Bytes, except where it says pages.
+ */
+export type MacMemory = {
+  /** `hw.memsize`. */
+  total: number
+  /** Activity Monitor's "Memory Used": app memory, wired (with what no page count accounts for)
+   *  and compressed. */
+  used: number
+  /** Anonymous pages. */
+  app: number
+  /** Pages wired down, plus physical memory no page count accounts for. */
+  wired: number
+  /** Pages occupied by the compressor. */
+  compressed: number
+  /** Activity Monitor's "Cached Files": file-backed plus purgeable pages. */
+  cached: number
+  /** `vm.swapusage`; null when it could not be read. */
+  swapUsed: number | null
+  swapTotal: number | null
+  pressure: PressureLevel | null
+  /** `kern.memorystatus_level`: percent of memory the kernel counts as still available. */
+  availablePercent: number | null
+  /** `vm_stat`'s page size, for the page rates below. */
+  pageSize: number
+  /** Pages per second since the previous reading; null on the first one. */
+  swapInsPerSec: number | null
+  swapOutsPerSec: number | null
+  /** Average swap-outs, pages per second, over about the last 30 s, when every reading in that
+   *  time saw some (see SUSTAINED_SWAP in src/mac-memory.ts); null otherwise. */
+  sustainedSwapOutsPerSec: number | null
+}
+
 /** One reading of the machine this worker runs on, from `node:os` only. */
 export type LocalSample = {
   /** Epoch ms on this machine's clock. */
@@ -26,6 +64,8 @@ export type LocalSample = {
   load: [number, number, number]
   /** How `cpu.perCore` splits into performance and efficiency cores; absent when unknown. */
   coreGroups?: CoreGroup[] | null
+  /** On a Mac, its memory as Activity Monitor counts it; absent elsewhere or when it could not be read. */
+  macMemory?: MacMemory | null
 }
 
 /** A beacon read back from a remote worker's log. Times are on the remote's clock. */
@@ -49,6 +89,8 @@ export type BeaconRecord = {
   load: [number, number, number]
   /** Only from beacons written by a Fleet Monitor that knows its core split; older ones have none. */
   coreGroups: CoreGroup[] | null
+  /** Only from a Mac running Fleet Monitor 1.1 or later; absent or null otherwise. */
+  macMemory?: MacMemory | null
   /** When the remote Orca appended the log line (remote clock). */
   loggedAt: number
 }
@@ -84,10 +126,14 @@ export type DiagnosticsSample = {
   workspaces: WorkspaceUsage[]
 }
 
-export type HistoryPoint = { t: number; cpu: number | null; mem: number | null }
+/** `mem` is the memory figure Orca measures (memory pressure on a Mac, MemAvailable on Linux), or
+ *  the same pressure from a Mac's own reading. `ram` is RAM in use as Activity Monitor counts it,
+ *  present only where a Mac reported it, so the two never mix on one chart. */
+export type HistoryPoint = { t: number; cpu: number | null; mem: number | null; ram?: number | null }
 
-/** Column form of a history ring, which is what crosses the panel bridge. */
-export type HistoryColumns = { t: number[]; cpu: (number | null)[]; mem: (number | null)[] }
+/** Column form of a history ring, which is what crosses the panel bridge. `ram` is there only
+ *  when some point has it. */
+export type HistoryColumns = { t: number[]; cpu: (number | null)[]; mem: (number | null)[]; ram?: (number | null)[] }
 
 export type HealthThresholds = { busy: number; strained: number; critical: number }
 
@@ -141,13 +187,24 @@ export type MachineState = {
   }
   memory: {
     total: number
+    /** With `kind: 'used'`, RAM in use as Activity Monitor counts it. Otherwise what Orca reports,
+     *  which on a Mac is memory pressure (`total × (1 − available %)`), not RAM in use. */
     used: number
     available: number
+    /** `used` as a percentage of `total`: the figure shown for the machine. */
     percent: number
-    /** `orca`: Orca's own measure (memory pressure / MemAvailable). `os`: `os.freemem()`. */
-    source: 'orca' | 'os'
+    /** `orca`: Orca's own measure (memory pressure / MemAvailable). `os`: `os.freemem()`.
+     *  `sampler` / `beacon`: a Mac's own reading (`mac`), here or in a remote's beacon. */
+    source: 'orca' | 'os' | 'sampler' | 'beacon'
     /** False for `os` memory on macOS, which counts reclaimable cache as used. */
     reliable: boolean
+    /** `used`: a Mac's own reading (`mac` is set). `pressure`: Orca's memory pressure reading of a
+     *  Mac (its `availableMemorySource` is `memory-pressure`), never to be called "used".
+     *  Absent: as before 1.1 (Linux MemAvailable, Windows free memory, `os.freemem()`). */
+    kind?: 'used' | 'pressure'
+    /** Memory pressure, 100 − percent available, which the memory thresholds judge. */
+    pressurePercent?: number | null
+    mac?: MacMemory | null
   } | null
   load: { one: number; five: number | null; fifteen: number | null } | null
   /** Orca's own usage on that machine. cpu is percent of one core. */
