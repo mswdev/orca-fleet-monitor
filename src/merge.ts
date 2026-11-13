@@ -134,9 +134,18 @@ export function mergeMachine(input: MergeInput): MachineState {
   // diagnostics, which on a Mac are memory pressure; then os.freemem().
   let memory: MachineState['memory'] = null
   const mac = local ? (local.macMemory ?? null) : (fresh?.macMemory ?? (fresh ? (beacon?.carriedMac ?? null) : null))
+  // Off a Mac, this computer's sampler reads the same figure Orca's diagnostics do (memory
+  // available, as the system counts it), but every 5 seconds instead of once an interval, so it
+  // comes first: the diagnostics can be minutes old with no panel open, too far apart for an alert.
+  // Not when Orca says only free memory could be read on Linux, which the sampler would share.
+  const ownReading =
+    !!local &&
+    local.platform !== 'darwin' &&
+    local.memory.total > 0 &&
+    !(diag && diag.host.availableMemorySource === 'free-memory' && local.platform !== 'win32')
   if (mac && mac.total > 0) {
     memory = macMemoryState(mac, local ? 'sampler' : 'beacon', diag)
-  } else if (diag) {
+  } else if (diag && !ownReading) {
     const pressure = diag.host.availableMemorySource === 'memory-pressure'
     // Orca falls back to free memory on a Mac for the rest of its run after one slow
     // `memory_pressure` call (and on Linux when /proc/meminfo fails). Free memory is neither RAM in

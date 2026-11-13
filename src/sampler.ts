@@ -58,17 +58,31 @@ function finite(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-function busyAndTotal(times: CpuTimes): { busy: number; total: number } {
+function busyAndTotal(times: CpuTimes, platform: string): { busy: number; total: number } {
   const idle = finite(times.idle)
-  const total = finite(times.user) + finite(times.nice) + finite(times.sys) + finite(times.irq) + idle
-  return { busy: total - idle, total }
+  // On Windows Node's `sys` is kernel time less idle time, which already holds interrupt time
+  // (libuv: KernelTime - IdleTime), so adding `irq` would count it twice.
+  const irq = platform === 'win32' ? 0 : finite(times.irq)
+  const busy = finite(times.user) + finite(times.nice) + finite(times.sys) + irq
+  return { busy, total: busy + idle }
 }
 
-/** Percent busy per core between two `os.cpus()` readings; null when they cannot be compared. */
+/**
+ * Percent busy per core between two `os.cpus()` readings; null when they cannot be compared.
+ *
+ * `elapsedMs` is the time between the two readings. Only Linux uses it: Node leaves a core's time
+ * waiting for disk, serving soft interrupts and taken by a hypervisor out of `os.cpus()` there, so
+ * the times it does give can add up to much less than the time that passed, and dividing by their
+ * sum alone would read a core that mostly waited for disk as busy. A core's total is never taken
+ * as less than the time that passed.
+ */
 export function cpuDelta(
   previous: readonly CpuInfo[],
-  current: readonly CpuInfo[]
+  current: readonly CpuInfo[],
+  options: { platform?: string; elapsedMs?: number | null } = {}
 ): { total: number; perCore: number[] } | null {
+  const platform = options.platform ?? ''
+  const elapsed = platform === 'linux' && typeof options.elapsedMs === 'number' && Number.isFinite(options.elapsedMs) ? options.elapsedMs : 0
   if (previous.length === 0 || previous.length !== current.length) {
     return null
   }
@@ -76,9 +90,9 @@ export function cpuDelta(
   let busySum = 0
   let totalSum = 0
   for (let i = 0; i < current.length; i += 1) {
-    const before = busyAndTotal(previous[i]!.times)
-    const after = busyAndTotal(current[i]!.times)
-    const total = after.total - before.total
+    const before = busyAndTotal(previous[i]!.times, platform)
+    const after = busyAndTotal(current[i]!.times, platform)
+    const total = Math.max(after.total - before.total, elapsed)
     const busy = after.busy - before.busy
     if (total <= 0 || busy < 0) {
       perCore.push(0)
@@ -107,6 +121,8 @@ export class LocalSampler {
   private readonly later: (fn: () => void, ms: number) => unknown
   private readonly cancel: (handle: unknown) => void
   private previous: CpuInfo[] = []
+  /** When `previous` was read, on the monotonic clock. */
+  private previousAt = 0
   private last: LocalSample | null = null
   private coreGroups: CoreGroup[] | null = null
   /** The last good reading, and whether the next sample is the first to carry it. */
@@ -132,6 +148,7 @@ export class LocalSampler {
     this.later = timers.setTimeout ?? ((fn, ms) => setTimeout(fn, ms).unref?.())
     this.cancel = timers.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
     this.previous = this.readCpus()
+    this.previousAt = this.mono()
   }
 
   latest(): LocalSample | null {
@@ -193,8 +210,10 @@ export class LocalSampler {
   sample(): LocalSample {
     const src = this.source
     const cpus = this.readCpus()
-    const delta = cpuDelta(this.previous, cpus)
+    const readAt = this.mono()
+    const delta = cpuDelta(this.previous, cpus, { platform: String(src.platform() ?? ''), elapsedMs: readAt - this.previousAt })
     this.previous = cpus
+    this.previousAt = readAt
     const load = src.loadavg()
     const total = Math.max(0, finite(src.totalmem()))
     const cores = cpus.length > 0 ? cpus.length : Math.max(1, finite(src.availableParallelism?.(), 1))

@@ -27,6 +27,54 @@ test('cpuDelta treats a counter that went backwards as idle', () => {
   assert.deepEqual(d, { total: 0, perCore: [0] })
 })
 
+// Node on Windows gives `sys` as kernel time less idle, which already holds interrupt time.
+test('cpuDelta on Windows does not count interrupt time twice', () => {
+  const at = (user: number, sys: number, idle: number, irq: number): CpuInfo => ({ model: 'x', times: { user, nice: 0, sys, idle, irq } })
+  const before = [at(0, 0, 0, 0)]
+  const after = [at(100, 100, 800, 80)] // 80 ms of interrupts, inside the 100 ms of sys
+  assert.deepEqual(cpuDelta(before, after, { platform: 'win32' }), { total: 20, perCore: [20] })
+  // Elsewhere `irq` is its own slice of the time.
+  assert.equal(Math.round(cpuDelta(before, after, { platform: 'linux' })!.total * 10) / 10, 25.9)
+  assert.equal(Math.round(cpuDelta(before, after)!.total * 10) / 10, 25.9)
+})
+
+// Node on Linux leaves out time waiting for disk (and soft interrupts, and time a hypervisor took).
+test('cpuDelta on Linux does not read a core waiting for disk as busy', () => {
+  const before = [cpu(0, 0, 0), cpu(0, 0, 0)]
+  const after = [cpu(1_200, 300, 500), cpu(250, 0, 4_750)] // core 0: 3 s of its 5 s waited for disk
+  const blind = cpuDelta(before, after, { platform: 'linux' })!
+  assert.deepEqual(blind.perCore, [75, 5], 'without the time that passed, the wait is missing from the total')
+  const timed = cpuDelta(before, after, { platform: 'linux', elapsedMs: 5_000 })!
+  assert.deepEqual(timed.perCore, [30, 5])
+  assert.equal(timed.total, 17.5)
+  // A clock a little behind the counters never shrinks a core's total, and only Linux uses it.
+  assert.deepEqual(cpuDelta(before, after, { platform: 'linux', elapsedMs: 1_000 })!.perCore, [75, 5])
+  assert.deepEqual(cpuDelta(before, after, { platform: 'darwin', elapsedMs: 5_000 })!.perCore, [75, 5])
+  assert.deepEqual(cpuDelta(before, after, { platform: 'linux', elapsedMs: Number.NaN })!.perCore, [75, 5])
+})
+
+test('LocalSampler times its own readings, for Linux', () => {
+  const readings = [[cpu(0, 0, 0)], [cpu(1_500, 0, 500)]] // 3 s of the 5 s waited for disk
+  let i = 0
+  let clock = 0
+  const source: OsSource = {
+    cpus: () => readings[i]!,
+    totalmem: () => 8_000,
+    freemem: () => 2_000,
+    loadavg: () => [0, 0, 0],
+    uptime: () => 1,
+    hostname: () => 'h',
+    platform: () => 'linux',
+    arch: () => 'x64',
+    release: () => 'r',
+    now: () => 1_000
+  }
+  const sampler = new LocalSampler(source, null, () => clock)
+  i = 1
+  clock = 5_000
+  assert.deepEqual(sampler.sample().cpu, { total: 30, perCore: [30] })
+})
+
 test('LocalSampler reports CPU since its previous reading', () => {
   const readings = [
     [cpu(0, 0, 0), cpu(0, 0, 0)],

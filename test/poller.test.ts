@@ -565,7 +565,8 @@ describe('discovery', () => {
     const local = t.machine(LOCAL_ID)!
     assert.equal(local.history.size, before + 1)
     assert.equal(local.state.cpu.percent, 12)
-    assert.equal(local.state.memory?.source, 'orca')
+    // Linux: its own reading, new with each sample, ahead of diagnostics an interval old.
+    assert.equal(local.state.memory?.source, 'os')
   })
 })
 

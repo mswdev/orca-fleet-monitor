@@ -44,6 +44,25 @@ describe('local machine', () => {
     const linux = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'linux' }) }))
     assert.equal(linux.memory?.reliable, true)
   })
+
+  // Off a Mac the sampler reads what Orca's diagnostics read, but every 5 seconds: the diagnostics
+  // can be minutes old with no panel open, too far apart for a memory alert to count them.
+  test('Linux and Windows: memory from the sampler, ahead of Orca diagnostics', () => {
+    for (const platform of ['linux', 'win32']) {
+      const m = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform }), diag }))
+      assert.deepEqual([m.memory?.source, m.memory?.reliable, m.memory?.percent], ['os', true, 75], platform)
+      assert.equal(m.memory?.used, 12 * 2 ** 30)
+      assert.equal(m.orca?.memory, 780_000_000, "Orca's own CPU and memory still come from the diagnostics")
+    }
+  })
+
+  test('Linux: when Orca could read only free memory, so could the sampler, and neither is judged', () => {
+    const free = { ...diag, host: { ...diag.host, load1: 2, availableMemorySource: 'free-memory' as const } }
+    const linux = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'linux' }), diag: free }))
+    assert.deepEqual([linux.memory?.source, linux.memory?.kind, linux.memory?.reliable], ['orca', 'unavailable', false])
+    const windows = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'win32' }), diag: free }))
+    assert.deepEqual([windows.memory?.source, windows.memory?.reliable], ['os', true], 'on Windows free memory is the figure')
+  })
 })
 
 describe('remote machine', () => {

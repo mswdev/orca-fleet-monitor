@@ -819,7 +819,7 @@ function toMachine(m, thresholds, now, context) {
   const memKey = memKind === 'used' ? 'ram' : 'mem'
   const mac = memKind === 'used' ? macDetailOf(m.memory.mac) : null
   // A Mac: its own reading, Orca's pressure reading of it, or its beacon says so.
-  const isMac = memKind !== 'orca' || platform === 'darwin'
+  const isMac = memKind === 'used' || memKind === 'pressure' || platform === 'darwin'
   const newestCpu = newestReading(history, 'cpu')
   const newestMem = newestReading(history, memKey)
   const seen = [m.lastSeenAt, newestCpu?.t, newestMem?.t].filter(finite)

@@ -1,5 +1,5 @@
 import { assert, describe, test } from 'orca/testing'
-import { appDataFromPluginFile, cliCandidates, cliProcessEnv, createProcessRunner, resolveCli } from '../src/cli.ts'
+import { cliCandidates, cliProcessEnv, createProcessRunner, orcaDataDirFromPluginFile, resolveCli } from '../src/cli.ts'
 
 // Invented install locations; nothing here is read from this machine.
 describe('cliCandidates', () => {
@@ -73,6 +73,13 @@ describe('cliCandidates', () => {
     assert.equal(first('C:\\Tools\\other.cmd')?.path, 'C:\\Tools\\other.cmd')
     assert.equal(first('/opt/bin/orca.cmd', 'linux')?.path, '/opt/bin/orca.cmd')
   })
+
+  test('a setting pasted with quotes round it is read without them', () => {
+    const first = (override: string, platform = 'win32') => cliCandidates({ platform, override })[0]?.path
+    assert.equal(first(' "C:\\Program Files\\Orca\\resources\\bin\\orca.cmd" '), 'C:\\Program Files\\Orca\\resources\\bin\\orca.exe')
+    assert.equal(first("'/opt/my tools/orca'", 'darwin'), '/opt/my tools/orca')
+    assert.equal(first('"', 'darwin'), '"', 'a lone quote is not a pair')
+  })
 })
 
 describe('resolveCli', () => {
@@ -90,6 +97,18 @@ describe('resolveCli', () => {
     const r = resolveCli({ platform: 'darwin', override: '/nope/orca', resourcesPath: '/A/Resources' }, () => false)
     assert.equal(r.path, null)
     assert.match(r.error ?? '', /settings cannot be run/)
+  })
+
+  test('Windows: a setting that names a script is refused, since only an .exe runs without a shell', () => {
+    for (const script of ['C:\\Tools\\run-orca.cmd', 'C:\\Tools\\ORCA.BAT']) {
+      const r = resolveCli({ platform: 'win32', override: script, resourcesPath: 'C:\\Orca\\resources' }, () => true)
+      assert.equal(r.path, null)
+      assert.match(r.error ?? '', /must be an \.exe on Windows/)
+      assert.ok(r.error?.includes(script))
+    }
+    // orca.cmd itself means the orca.exe beside it, and elsewhere a .cmd is only a name.
+    assert.equal(resolveCli({ platform: 'win32', override: 'C:\\Orca\\bin\\orca.cmd' }, () => true).path, 'C:\\Orca\\bin\\orca.exe')
+    assert.equal(resolveCli({ platform: 'linux', override: '/opt/orca.cmd' }, () => true).path, '/opt/orca.cmd')
   })
 
   test('nothing found says how to fix it', () => {
@@ -120,24 +139,47 @@ describe('cliProcessEnv', () => {
     assert.equal(cliProcessEnv(bare, 'win32'), bare)
   })
 
-  test('macOS and Linux: untouched', () => {
+  test('macOS: untouched, and Linux without a plugin path', () => {
     assert.equal(cliProcessEnv(worker, 'darwin'), worker)
     assert.equal(cliProcessEnv(worker, 'linux'), worker)
   })
 
-  test('Windows: where the plugin is installed says where APPDATA is, ahead of the default', () => {
-    const installed = 'D:\\Redirected\\Roaming\\orca\\plugins\\mswdev.fleet-monitor\\src\\worker.ts'
-    assert.equal(appDataFromPluginFile(installed), 'D:\\Redirected\\Roaming')
-    assert.equal(cliProcessEnv(worker, 'win32', installed).APPDATA, 'D:\\Redirected\\Roaming')
-    assert.equal(appDataFromPluginFile('C:/Users/tester/AppData/Roaming/Orca/Plugins/x/src/worker.ts'), 'C:\\Users\\tester\\AppData\\Roaming')
+  const installed = (dataDir: string, sep: string) => [dataDir, 'plugins', 'mswdev.fleet-monitor', 'current', 'src', 'worker.ts'].join(sep)
+
+  test('where the plugin is installed says where Orca keeps its data', () => {
+    assert.equal(orcaDataDirFromPluginFile(installed('D:\\Redirected\\Roaming\\orca', '\\')), 'D:\\Redirected\\Roaming\\orca')
+    assert.equal(orcaDataDirFromPluginFile(installed('/home/tester/.config/orca', '/')), '/home/tester/.config/orca')
+    const hashed = '/home/tester/.config/orca/plugins/mswdev.fleet-monitor/c05a01b9699401457ad7a25e8772ef89/src/worker.ts'
+    assert.equal(orcaDataDirFromPluginFile(hashed), '/home/tester/.config/orca')
   })
 
-  test('Windows: a plugin run from a dev folder falls back to the default', () => {
-    const dev = 'C:\\Code\\orca-fleet-monitor\\src\\worker.ts'
-    assert.equal(appDataFromPluginFile(dev), null)
-    assert.equal(appDataFromPluginFile('orca\\plugins\\x\\worker.ts'), null) // nothing above `orca`
-    assert.equal(appDataFromPluginFile(null), null)
-    assert.equal(cliProcessEnv(worker, 'win32', dev).APPDATA, 'C:\\Users\\tester\\AppData\\Roaming')
+  test('a plugin run from a dev folder says nothing, even one with orca\\plugins in its path', () => {
+    assert.equal(orcaDataDirFromPluginFile('C:\\Code\\orca-fleet-monitor\\src\\worker.ts'), null)
+    assert.equal(orcaDataDirFromPluginFile('C:\\dev\\orca\\plugins\\orca-fleet-monitor\\src\\worker.ts'), null)
+    assert.equal(orcaDataDirFromPluginFile('/work/orca/plugins/mswdev.fleet-monitor/src/worker.ts'), null)
+    assert.equal(orcaDataDirFromPluginFile(null), null)
+  })
+
+  test('Windows: APPDATA comes from where the plugin is installed, ahead of the default', () => {
+    assert.equal(cliProcessEnv(worker, 'win32', installed('D:\\Redirected\\Roaming\\orca', '\\')).APPDATA, 'D:\\Redirected\\Roaming')
+    assert.equal(cliProcessEnv(worker, 'win32', installed('C:\\Users\\tester\\AppData\\Roaming\\Orca', '\\')).APPDATA, 'C:\\Users\\tester\\AppData\\Roaming')
+    // A dev copy, or a data folder that is not called orca, leaves the default.
+    const fallback = 'C:\\Users\\tester\\AppData\\Roaming'
+    assert.equal(cliProcessEnv(worker, 'win32', 'C:\\dev\\orca\\plugins\\orca-fleet-monitor\\src\\worker.ts').APPDATA, fallback)
+    assert.equal(cliProcessEnv(worker, 'win32', installed('D:\\Profiles\\testing', '\\')).APPDATA, fallback)
+  })
+
+  test('Linux: XDG_CONFIG_HOME is put back only when Orca\'s data is not in ~/.config', () => {
+    const linux = { PATH: '/usr/bin', HOME: '/home/tester', ELECTRON_RUN_AS_NODE: '1' }
+    const usual = installed('/home/tester/.config/orca', '/')
+    const moved = installed('/home/tester/.cfg/orca', '/')
+    assert.equal(cliProcessEnv(linux, 'linux', usual), linux)
+    assert.deepEqual(cliProcessEnv(linux, 'linux', moved), { ...linux, XDG_CONFIG_HOME: '/home/tester/.cfg' })
+    const set = { ...linux, XDG_CONFIG_HOME: '/elsewhere' }
+    assert.equal(cliProcessEnv(set, 'linux', moved), set)
+    assert.equal(cliProcessEnv(linux, 'linux', '/work/fleet-monitor/src/worker.ts'), linux)
+    assert.equal(cliProcessEnv(linux, 'linux', installed('/home/tester/.cfg/Orca', '/')), linux, 'a folder not called orca is not Orca\'s default')
+    assert.equal(cliProcessEnv(linux, 'darwin', moved), linux)
   })
 
   test('the runner hands that environment to the CLI on Windows', async () => {
@@ -153,6 +195,9 @@ describe('cliProcessEnv', () => {
     const result = await run(['environment', 'list', '--json'])
     assert.equal(result.spawnError, 'stop here')
     assert.equal(seen?.APPDATA, 'C:\\Users\\tester\\AppData\\Roaming')
+    const first = seen
+    await run(['host', 'list', '--json'])
+    assert.equal(seen, first, 'worked out once, not for every call')
   })
 })
 

@@ -69,6 +69,7 @@ export function realDeps(): MonitorDeps {
   const processes = mac ? new ProcessSampler({ cores: () => os.cpus().length }) : null
   // Once per worker start; until it answers (and wherever there is no split) cores are one group.
   void readCoreGroups(os.platform(), os.cpus().length).then((groups) => sampler.setCoreGroups(groups))
+  const ownFile = workerFile()
   return {
     now: steadyClock(),
     setInterval: (fn, ms) => unref(setInterval(fn, ms)),
@@ -77,10 +78,10 @@ export function realDeps(): MonitorDeps {
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     sampler,
     resolveCli: (override) => resolveCli(workerCliEnvironment(override)),
-    createRunner: (cliPath) => createProcessRunner(cliPath, { pluginFile: workerFile() }),
+    createRunner: (cliPath) => createProcessRunner(cliPath, { pluginFile: ownFile }),
     localName: () => localMachineName(),
     runId: () => randomBytes(4).toString('hex'),
-    workerFile: workerFile(),
+    workerFile: ownFile,
     declaredCommands: declaredCommands(),
     processes,
     wall: Date.now

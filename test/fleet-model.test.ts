@@ -160,6 +160,15 @@ describe('toFleet', () => {
     assert.deepEqual(m.install, { reason: 'absent', command: `orca plugin install ${INSTALL_SOURCE} --environment "Build Box"`, launcher: 'orca' })
   })
 
+  test('only a machine known to be a Mac gets the Mac install pitch', () => {
+    const absent = { state: 'absent' as const, ageMs: null, seq: null, pluginKey: null, remotePlugin: 'absent' as const }
+    const basic = (memory: Record<string, unknown>) => only(machine({ tier: 'basic', beacon: absent, host: { hostname: null, platform: null, arch: null, cpuModel: null, cores: 4, uptimeSec: null }, memory: { total: 16 * GIB, used: 8 * GIB, available: 8 * GIB, percent: 50, source: 'orca', reliable: true, ...memory } as never }))
+    assert.equal(basic({ kind: 'pressure', pressurePercent: 50 }).install?.mac, true, "Orca's pressure reading is a Mac's")
+    assert.equal(basic({}).install?.mac, undefined)
+    // "Only free memory" is what Orca says of a Mac after a slow reading, and of Linux without /proc/meminfo.
+    assert.equal(basic({ kind: 'unavailable', reliable: false }).install?.mac, undefined)
+  })
+
   test('an estimate is never coloured by the CPU thresholds, even if a worker sent a CPU level', () => {
     const m = only(
       machine({

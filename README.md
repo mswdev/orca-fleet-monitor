@@ -14,8 +14,8 @@ Live CPU, memory, per-core load and the busiest workspaces for this computer and
 <a href="https://github.com/mswdev/orca-fleet-monitor/actions/workflows/ci.yml?query=branch%3Amain"><img alt="Tests on main" src="https://img.shields.io/github/actions/workflow/status/mswdev/orca-fleet-monitor/ci.yml?branch=main&style=flat-square&label=tests"></a>
 <a href="https://github.com/mswdev/orca-fleet-monitor/actions/workflows/ci.yml?query=branch%3Amain"><img alt="Line coverage of src and panel" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmswdev%2Forca-fleet-monitor%2Fbadges%2Fcoverage-summary.json&query=%24.total.lines.pct&suffix=%25&label=coverage&color=2ea043&style=flat-square"></a>
 <img alt="Requires Orca 1.4.248 or later" src="https://img.shields.io/badge/Orca-1.4.248%2B-3b82f6?style=flat-square">
-<img alt="macOS is the only tested and supported platform" src="https://img.shields.io/badge/macOS-supported-2ea043?style=flat-square">
-<img alt="Linux and Windows are implemented but untested" src="https://img.shields.io/badge/Linux%20and%20Windows-untested-b7791f?style=flat-square">
+<img alt="Fleet Monitor is built and tested on macOS" src="https://img.shields.io/badge/macOS-supported-2ea043?style=flat-square">
+<img alt="Linux and Windows work as of 1.2.1, confirmed by a user" src="https://img.shields.io/badge/Linux%20and%20Windows-working-2ea043?style=flat-square">
 <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-6e7781?style=flat-square"></a>
 </p>
 
@@ -53,7 +53,7 @@ orca plugin install mswdev.fleet-monitor
 [Install](#install) has the command for a paired server.
 
 > [!NOTE]
-> Fleet Monitor is tested on macOS only, and in practice macOS is the only platform it supports. Linux and Windows are implemented but untested. It needs the Orca desktop app, version 1.4.248 or later.
+> Fleet Monitor is built and tested on macOS. It also runs on Linux and Windows: a user confirmed both on 1.2.1, each as this computer and as a paired server. Some readings are a Mac's only, and [Requirements and limits](#requirements-and-limits) lists them. It needs the Orca desktop app, version 1.4.248 or later.
 
 ## What it shows
 
@@ -248,7 +248,7 @@ On a Linux desktop, type `orca-ide` where these commands say `orca`.
 | Memory busy, strained, critical at | 75,&nbsp;88,&nbsp;95&nbsp;% | The thresholds for memory pressure, the share of memory the system no longer has available. |
 | RAM used busy at | 90&nbsp;% | A machine whose RAM used passes this counts as Busy. [Memory](#memory) has the other memory rules. |
 | Alert when memory runs short | On | Sends a desktop notification when a machine's memory reaches Strained or Critical, or when it stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details. |
-| Orca CLI path | Empty | Leave it empty to find the CLI that ships with this Orca. |
+| Orca CLI path | Empty | Leave it empty to find the CLI that ships with this Orca. On Windows that is `orca.exe`; a path to `orca.cmd` uses the `orca.exe` beside it. |
 | Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. On a Mac it also writes the names and owners of its top processes about every 30 seconds. |
 | Monitor in the background | On | Reads machines on the slow interval while no panel is open, to keep the status bar current and to send memory alerts for paired machines. Off, paired machines alert only while a panel is open. |
 
@@ -319,7 +319,8 @@ Fleet Monitor treats a paired server, the CLI's answers about it and the lines i
 
 - Orca 1.4.248 or later.
 - The Orca desktop app. The panel is not made for Orca's browser client (`orca serve` opened in a web browser).
-- macOS, both for this computer and for paired servers. It is the only platform Fleet Monitor is tested on and, in practice, the only one it supports. Linux and Windows are implemented but untested. That covers the launcher names, ending a timed-out CLI call's process tree, and Windows having no load average.
+- macOS, Linux or Windows, for this computer and for paired servers. Fleet Monitor is built and tested on macOS. On Linux and Windows it has had one user's check so far: a Windows desktop and a Linux machine on 1.2.1, each showing the other at the full level. Windows needs 1.2.1 or later, because earlier versions could not run the Orca CLI there.
+- A Linux or Windows machine shows CPU, per-core load and memory used out of the total. The Mac-only readings below are missing, and Windows has no load average.
 - History covers the last 30 minutes. The worker keeps it in memory, so it starts again whenever Orca or the plugin restarts. So does what it has already alerted about: after a restart, a machine that is still short of memory alerts again.
 - When a machine reaches the full level, the readings still in its log, about the last 14 minutes on a Mac that also publishes its processes (16 otherwise), fill the gaps in its history. They are added only where there is no reading yet.
 - The Activity tab (network, disk, GPU, battery and processes) is a Mac's only: this computer when it is a Mac, and paired Macs running Fleet Monitor 1.2 or later.
