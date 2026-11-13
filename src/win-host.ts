@@ -332,7 +332,9 @@ export class PowerShellHost {
   private buffer = ''
   /** Whether this process has answered anything: until it has, it may still be starting. */
   private answered = false
-  private active: (Waiting & { id: number; timer: unknown }) | null = null
+  private active: (Waiting & { id: number; timer: unknown; sentAt: number }) | null = null
+  /** Whether any PowerShell process has answered anything, ever: it can run here. */
+  private worked = false
   private queue: Waiting[] = []
   /** Ids go on across processes, so an answer from one is never taken for another's. */
   private nextId = 1
@@ -369,9 +371,10 @@ export class PowerShellHost {
 
   /**
    * Asks for one reading: the parsed JSON of the answer, or null when there is none (the read
-   * failed, PowerShell did not answer within `timeoutMs` of being asked, it ended, or it is not
-   * running and may not be started yet). The time a request waits for the ones before it does not
-   * count towards `timeoutMs`.
+   * failed, PowerShell did not answer in time, it ended, it is not running and may not be started
+   * yet, or the command is being left alone). "In time" is `timeoutMs` from when the request is
+   * sent, and HOST_START_MS more for a command's first run in a process. The time a request waits
+   * for the ones before it does not count, so a caller with a deadline of its own keeps its own.
    */
   request(command: string, timeoutMs: number): Promise<unknown | null> {
     return this.ask(command, timeoutMs).then((answer) => answer.value)
@@ -393,6 +396,13 @@ export class PowerShellHost {
       this.queue.push({ command, timeoutMs: Math.min(timeoutMs, TIMEOUT_MAX_MS), resolve })
       this.send()
     })
+  }
+
+  /** Whether `command` is being left alone for now: it ran out of time HOST_STALL_LIMIT times in
+   *  a row. A caller can then say that its reading cannot be had, not that it failed just now. */
+  refusing(command: string): boolean {
+    const until = this.refusedUntil.get(command)
+    return until !== undefined && this.mono() < until
   }
 
   /** True while PowerShell looks unusable on this computer: HOST_GIVE_UP_STARTS processes in a
@@ -429,8 +439,9 @@ export class PowerShellHost {
         if (this.active?.id !== id) return
         // The same command, too slow again and again (a counter provider or WMI that hangs):
         // asking it only costs every other reading its PowerShell, so it is left alone a while.
-        // Only on a PowerShell that has answered something: before that it may just be starting.
-        if (this.answered) {
+        // Only where PowerShell has answered something, in this process or an earlier one: until
+        // it has, it may be PowerShell that cannot start, which is counted another way.
+        if (this.worked) {
           const stalls = (this.stalls.get(next.command) ?? 0) + 1
           this.stalls.set(next.command, stalls)
           if (stalls >= HOST_STALL_LIMIT) {
@@ -446,7 +457,7 @@ export class PowerShellHost {
       // which can take seconds: it gets the allowance a new process's first answer does.
       next.timeoutMs + (this.warm.has(next.command) ? 0 : HOST_START_MS)
     )
-    this.active = { ...next, id, timer }
+    this.active = { ...next, id, timer, sentAt: this.mono() }
     try {
       child.stdin?.write(`${id} ${next.command}\n`)
     } catch {
@@ -517,8 +528,14 @@ export class PowerShellHost {
     this.active = null
     this.answered = true
     this.barren = 0
-    this.stalls.delete(active.command)
-    this.refusals.delete(active.command)
+    this.worked = true
+    // The command is well again only when it answered within its own time: an answer that needed
+    // the first-run allowance would otherwise wipe the slate each time PowerShell is started
+    // again, and a command that is always a little too slow would never be left alone.
+    if (this.mono() - active.sentAt <= active.timeoutMs) {
+      this.stalls.delete(active.command)
+      this.refusals.delete(active.command)
+    }
     this.warm.add(active.command)
     let value: unknown = null
     try {

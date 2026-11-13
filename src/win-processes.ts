@@ -33,7 +33,8 @@ import { PowerShellHost } from './win-host.ts'
  *  long before it is tried again. */
 export const EMPTY_LIMIT = 5
 export const RETRY_BLOCKED_MS = 60 * 60_000
-/** How long PowerShell has to answer; a panel waits on this, and gets no list after it. */
+/** How long PowerShell has to answer once asked (and 10 s more on a first run: src/win-host.ts).
+ *  A caller waits TABLE_DEADLINE_MS at most, whatever this comes to. */
 const PROC_TIMEOUT_MS = 10_000
 /** How long a caller waits in all, the time behind other requests included: under the panel's own
  *  10 s for an answer. PowerShell answers one request at a time, and a command's first run may
@@ -170,7 +171,7 @@ export function buildWindowsTable(current: WindowsProcessReading, previous: Wind
 }
 
 export type WindowsProcessSamplerDeps = {
-  host?: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean; ask?: PowerShellHost['ask'] }
+  host?: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean; ask?: PowerShellHost['ask']; refusing?: PowerShellHost['refusing'] }
   mono?: () => number
   wall?: () => number
   platform?: string
@@ -186,7 +187,7 @@ export type WindowsProcessSamplerDeps = {
  * it is handed in and never stopped here. Nothing is asked on any other platform.
  */
 export class WindowsProcessSampler {
-  private readonly host: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean; ask?: PowerShellHost['ask'] }
+  private readonly host: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean; ask?: PowerShellHost['ask']; refusing?: PowerShellHost['refusing'] }
   private readonly mono: () => number
   private readonly wall: () => number
   private readonly platform: string
@@ -250,7 +251,9 @@ export class WindowsProcessSampler {
    *  (the performance counters are off, broken or not this user's to read). Tried again after
    *  RETRY_BLOCKED_MS. */
   unavailable(): boolean {
-    return this.host.unavailable === true || this.mono() < this.blockedUntil
+    // Also while PowerShell is leaving `proc` alone: the read hangs instead of failing, which
+    // comes to the same for whoever is waiting for a list.
+    return this.host.unavailable === true || this.host.refusing?.('proc') === true || this.mono() < this.blockedUntil
   }
 
   private async tableNow(): Promise<ProcessTable | null> {

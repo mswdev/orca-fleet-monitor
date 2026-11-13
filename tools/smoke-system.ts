@@ -7,6 +7,7 @@
 //
 // A runner has no battery, and no GPU but a software display adapter, so those are printed but
 // never required.
+import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { LinuxProcessSampler } from '../src/linux-processes.ts'
@@ -55,6 +56,17 @@ function work(ms: number): void {
   while (performance.now() < until) x += Math.sqrt(x + 1)
 }
 
+/** Windows' display adapters as WMI lists them: name, device id and driver file. */
+function displayAdapters(): string {
+  try {
+    const root = process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows'
+    const command = 'Get-CimInstance Win32_VideoController | Select-Object Name, PNPDeviceID, InfFilename | ConvertTo-Json -Compress'
+    return execFileSync(`${root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 30_000 }).trim() || 'none'
+  } catch (error) {
+    return `could not be listed (${error instanceof Error ? error.message.split('\n')[0] : 'error'})`
+  }
+}
+
 async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
   const started = performance.now()
   const cpu = process.cpuUsage()
@@ -98,6 +110,8 @@ async function main(): Promise<void> {
   check(isCount(disk?.totalBytes) && isCount(disk?.usedBytes) && disk!.totalBytes! > 2 ** 30 && disk!.usedBytes! <= disk!.totalBytes!, 'disk: space used and total')
   check(isCount(disk?.readBytesPerSec) && isCount(disk?.writeBytesPerSec), 'disk: bytes per second read and written')
   console.log(`     gpu: ${snapshot?.gpu ? `${snapshot.gpu.percent}%` : 'none reported'}; battery: ${snapshot?.battery ? JSON.stringify(snapshot.battery) : 'none reported'}`)
+  // What the reader's "is there a real GPU" rule had to go on, for whoever reads this log.
+  if (platform === 'win32') console.log(`     display adapters: ${displayAdapters()}`)
 
   check(first !== null && table !== null, 'the process list could be read')
   if (table) {

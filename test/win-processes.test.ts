@@ -397,3 +397,16 @@ test('a list asked for behind a slow request is given up on in time for the pane
   assert.equal((await second)?.rows.length, 1)
   assert.equal(time.pending, 0, 'no timer is left behind')
 })
+
+test('while PowerShell is leaving proc alone (its read hangs), the list is one that cannot be read here', async () => {
+  let refusing = false
+  const sampler = new WindowsProcessSampler({
+    host: { request: async () => null, ask: async () => ({ answered: false, value: null }), unavailable: false, refusing: (command) => refusing && command === 'proc' },
+    platform: 'win32'
+  })
+  assert.equal(sampler.unavailable(), false)
+  refusing = true
+  assert.equal(sampler.unavailable(), true)
+  refusing = false
+  assert.equal(sampler.unavailable(), false, 'and a list again once it is asked again')
+})

@@ -419,6 +419,60 @@ describe('the PowerShell host', () => {
     host.stop()
   })
 
+  test('a command that is always a little too slow is left alone too: an answer that needed the first-run allowance does not clear it', async () => {
+    const { time, ps, host } = setup()
+    /** In a new PowerShell: `gpu` answers after 12 s (inside its first run's 20 s), then, asked
+     *  again, runs out of its own 10 s. */
+    const round = async (): Promise<void> => {
+      const first = host.request('gpu', 10_000)
+      const child = ps.children.at(-1)!
+      time.advance(12_000)
+      child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+      assert.equal(await first, 1, 'its first run has the allowance')
+      const second = host.request('gpu', 10_000)
+      time.advance(9_999)
+      assert.equal(child.killed, null)
+      time.advance(1)
+      assert.equal(child.killed, 'SIGKILL', 'its second run in the same PowerShell has no allowance')
+      assert.equal(await second, null)
+      time.advance(HOST_RESTART_MAX_MS)
+    }
+    for (let i = 0; i < HOST_STALL_LIMIT; i += 1) {
+      assert.equal(host.refusing('gpu'), false)
+      await round()
+    }
+    assert.equal(host.refusing('gpu'), true, 'three stalls, with slow answers in between')
+    assert.equal(host.refusing('net'), false)
+    const starts = ps.children.length
+    assert.equal(await host.request('gpu', 10_000), null)
+    assert.equal(ps.children.length, starts, 'nothing is started for it')
+    host.stop()
+  })
+
+  test('an answer in its own time does clear a command’s stalls', async () => {
+    const { time, ps, host } = setup()
+    const answer = async (command: string, value: number): Promise<void> => {
+      const asked = host.request(command, 1_000)
+      const child = ps.children.at(-1)!
+      child.say(`${child.written.at(-1)!.split(' ')[0]} ${value}\n`)
+      assert.equal(await asked, value)
+    }
+    for (let i = 0; i < HOST_STALL_LIMIT * 2; i += 1) {
+      await answer('net', 1)
+      // Two stalls, then an answer in time: never three in a row.
+      if (i % 3 === 2) {
+        await answer('gpu', 2)
+      } else {
+        const gpu = host.request('gpu', 1_000)
+        time.advance(1_000 + HOST_START_MS)
+        assert.equal(await gpu, null)
+        time.advance(HOST_RESTART_MAX_MS)
+      }
+    }
+    assert.equal(host.refusing('gpu'), false)
+    host.stop()
+  })
+
   test('a PowerShell that is only slow to start is not taken for one that cannot run', async () => {
     const { time, ps, host } = setup()
     for (let i = 0; i < HOST_GIVE_UP_STARTS + 2; i += 1) {
