@@ -1116,6 +1116,11 @@ export function mountFleetView(
         ui.showAll = true
         draw()
         break
+      case 'show-fewer':
+        // Back to the first rows; a row open or focused further down goes with the rest (arrange).
+        ui.showAll = false
+        draw()
+        break
       case 'pair':
         ui.pairOpen = !ui.pairOpen
         draw()

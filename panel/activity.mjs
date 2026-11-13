@@ -51,7 +51,7 @@ import { h, s } from './dom.mjs'
 import { toProcessList } from './fleet-binding.mjs'
 import { duration, size } from './format.mjs'
 
-/** Rows drawn before "Show all N". */
+/** Rows drawn before "Show all N", and again after "Show fewer". */
 export const FIRST_ROWS = 25
 /** The memory line names a process only when it holds at least this share of the machine's RAM. */
 export const SUGGEST_FLOOR = 0.05
@@ -664,8 +664,11 @@ export function processesSection(p, { shown, matches, open, tabStop, machineName
         )
       )
     )
+    // One footer either way, so the button keeps its place (and the keyboard's focus) when pressed.
     if (shown.length < matches) {
       nodes.push(h('div', { class: 'fm-proc-foot', 'data-key': 'proc-foot' }, h('button', { type: 'button', class: 'fm-foot-link', 'data-action': 'show-all' }, `Show all ${matches}`)))
+    } else if (matches > FIRST_ROWS) {
+      nodes.push(h('div', { class: 'fm-proc-foot', 'data-key': 'proc-foot' }, h('button', { type: 'button', class: 'fm-foot-link', 'data-action': 'show-fewer' }, 'Show fewer')))
     }
   }
   if (p.state === 'ready' && !p.top && p.truncated) {

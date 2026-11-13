@@ -456,6 +456,30 @@ describe('the Processes card', () => {
     assert.equal($(v.root, '[data-action="show-all"]'), null)
   })
 
+  test('"Show fewer" goes back to the first 25, closing a row opened further down', async () => {
+    const v = mount(viewOf([local()]), () => listOf(many(30), { total: 30 }))
+    await activity(v, 'local')
+    assert.equal($(v.root, '[data-action="show-fewer"]'), null, 'nothing to go back from yet')
+    $(v.root, '[data-action="show-all"]')!.click()
+    const fewer = $(v.root, '[data-action="show-fewer"]')!
+    assert.equal(text(fewer), 'Show fewer')
+    // Open the last row, which the short list does not hold.
+    const rows = $$(v.root, '.fm-proc')
+    rows.at(-1)!.querySelector('[data-action="proc"]')?.click()
+    fewer.click()
+    assert.equal($$(v.root, '.fm-proc').length, 25)
+    assert.equal(text($(v.root, '[data-action="show-all"]')), 'Show all 30')
+    assert.equal($(v.root, '[data-action="show-fewer"]'), null)
+    assert.equal($(v.root, '.fm-proc-more'), null, 'no open row left behind')
+  })
+
+  test('a list of 25 or fewer has neither button', async () => {
+    const v = mount(viewOf([local()]), () => listOf(many(25), { total: 25 }))
+    await activity(v, 'local')
+    assert.equal($(v.root, '[data-action="show-all"]'), null)
+    assert.equal($(v.root, '[data-action="show-fewer"]'), null)
+  })
+
   test('CPU is percent of one core, labelled so, and can pass 100', async () => {
     const v = mount(viewOf([local()]), () => listOf([{ pid: 7, name: 'compiler', cpu: 312.4, mem: 3 * GIB }, { pid: 8, name: 'idle', cpu: 0.04, mem: 2 ** 20 }]))
     await activity(v, 'local')
