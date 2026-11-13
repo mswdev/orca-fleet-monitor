@@ -19,10 +19,9 @@
 // PowerShell is running, each request should cost a few ms of its CPU (`gpu` some tens of ms on a
 // computer with many processes using the GPU), so well under 0.1% of one core in all. Starting
 // PowerShell, and its first use of the performance counters, cost far more, once.
-import { statfsSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
-import { diskSpaceOf, isInterfaceName, SYSTEM_CADENCE, SYSTEM_MAX_AGE, type StatFs } from './mac-system.ts'
-import type { BatteryReading, DiskReading, GpuReading, MacSystem, NetReading } from './model.ts'
+import { diskSpaceOf, due, isInterfaceName, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
+import type { BatteryReading, MacSystem, NetReading } from './model.ts'
 import { PowerShellHost } from './win-host.ts'
 
 /** How long PowerShell has to answer one request. Long, because a slow answer costs nothing
@@ -118,16 +117,7 @@ export function systemDriveRoot(env: NodeJS.ProcessEnv): string {
   return `${drive !== undefined && /^[A-Za-z]:$/.test(drive) ? drive : 'C:'}\\`
 }
 
-const realStatfs: StatFs = (path) => {
-  try {
-    const s = statfsSync(path)
-    return { bsize: Number(s.bsize), blocks: Number(s.blocks), bavail: Number(s.bavail) }
-  } catch {
-    return null
-  }
-}
 
-type Held<T> = { value: T; at: number }
 
 /**
  * Reads a Windows computer's network, disk, GPU and battery, each on its own cadence. `refresh()`
@@ -191,35 +181,7 @@ export class WindowsSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'win32') return null
-    const now = this.mono()
-    const age = (held: { at: number } | null, max: number): number | null => {
-      if (!held) return null
-      const a = Math.max(0, Math.round(now - held.at))
-      return a <= max ? a : null
-    }
-    const withAge = <T extends object>(value: T, a: number, key: string): T => (a >= 1_000 ? { ...value, [key]: a } : value)
-    const netAge = age(this.net, SYSTEM_MAX_AGE.netMs)
-    const net = this.net && netAge !== null ? withAge(this.net.value, netAge, 'ageMs') : null
-    const ioAge = age(this.diskIo, SYSTEM_MAX_AGE.diskIoMs)
-    const spaceAge = age(this.space, SYSTEM_MAX_AGE.spaceMs)
-    let disk: DiskReading | null = null
-    if (ioAge !== null || spaceAge !== null) {
-      const io = ioAge !== null && this.diskIo ? this.diskIo.value : null
-      const space = spaceAge !== null && this.space ? this.space.value : null
-      disk = {
-        totalBytes: space?.total ?? null,
-        usedBytes: space?.used ?? null,
-        ...(space && spaceAge! >= 1_000 ? { spaceAgeMs: spaceAge! } : {}),
-        readBytesPerSec: io?.read ?? null,
-        writeBytesPerSec: io?.write ?? null,
-        ...(io && ioAge! >= 1_000 ? { ioAgeMs: ioAge! } : {})
-      }
-    }
-    const gpuAge = age(this.gpu, SYSTEM_MAX_AGE.gpuMs)
-    const gpu: GpuReading | null = this.gpu && gpuAge !== null ? withAge({ percent: this.gpu.value }, gpuAge, 'ageMs') : null
-    const batteryAge = age(this.battery, SYSTEM_MAX_AGE.batteryMs)
-    const battery = this.battery && batteryAge !== null ? withAge(this.battery.value, batteryAge, 'ageMs') : null
-    return { net, disk, gpu, battery }
+    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, gpu: this.gpu, battery: this.battery }, this.mono())
   }
 
   private async readDue(): Promise<void> {
@@ -306,6 +268,3 @@ export class WindowsSystemReader {
   }
 }
 
-function due(triedAt: number, now: number, interval: number): boolean {
-  return now - triedAt >= interval || now < triedAt
-}

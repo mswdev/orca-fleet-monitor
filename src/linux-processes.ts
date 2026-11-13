@@ -2,11 +2,11 @@
 //
 //   /proc                  its numeric directories: one for each process (threads are not listed)
 //   /proc/<pid>/stat       the process's parent, cumulative CPU time (user + system, in clock
-//                          ticks of 1/100 s), start time (in ticks after boot) and resident
-//                          pages. The name is the kernel's short name for the process (`comm`):
-//                          its executable's file name cut to 15 bytes, or the short name the
-//                          process last gave itself (prctl PR_SET_NAME; Node 24 calls itself
-//                          `MainThread`), never a path or an argument. It is what `top` shows.
+//                          ticks of 1/100 s), start time (in ticks after boot), resident pages,
+//                          and the kernel's short name for it (`comm`)
+//   /proc/<pid>/exe        the link to the process's executable (the link is read, never the
+//                          file): the process is named by its executable's file name, which is
+//                          what `ucomm` is on a Mac
 //   /proc/<pid>            the directory's owner (one `stat`) is the process's effective user,
 //                          named through /etc/passwd (read once; of each line only the name and
 //                          the uid are kept)
@@ -14,8 +14,17 @@
 //   /proc/stat             `btime`, when the computer started, about once a minute: a start
 //                          time is that plus the process's ticks after boot
 //
-// Nothing else under /proc/<pid> is read: not cmdline, environ, exe, cwd or status. So no path,
-// argument or environment is read at all, and none can be published, answered or logged.
+// The name. Of the executable's path only the file name is kept: the directory part is dropped
+// at once, in the step that reads the link (exeName), and is never stored, returned, logged or
+// published. The link can be read for this user's own processes (for every process when the
+// worker runs as root). For another user's process, for one that has made itself unreadable (a
+// password agent, say) and for a zombie it cannot, and the process then shows the kernel's
+// short name: its executable's file name cut to 15 bytes when it started, or whatever short name
+// it has given itself since (prctl PR_SET_NAME). That is why the executable comes first: Node 24
+// names itself `MainThread`, and a computer full of Node programs would be a column of it.
+//
+// Nothing else under /proc/<pid> is read: not cmdline, environ, cwd or status. So no argument,
+// environment or working directory is read at all, and none can be published, answered or logged.
 //
 // CPU % is the CPU time used between two readings over the time between them, as a percentage
 // of one core (it passes 100 for a process busy on several), which is how `top` counts it.
@@ -28,15 +37,16 @@
 // Kernel threads (kthreadd, pid 2, and its children) are left out: they have no memory of their
 // own, and nobody would look for them here.
 //
-// Cost: one small read and one `stat` for each process, never more than 64 processes at once.
-// With 1,000 processes, in a Linux virtual machine on an Apple M1 Max (kernel 7.0, Node 24), one
-// reading took about 100 ms of CPU (user + system, the threads that read the files included) and
-// 60 ms from start to end, and never held the event loop for more than about 3 ms. The reads are
-// asynchronous although the same pass with synchronous ones took about 17 ms of CPU: a read that
-// stalls in the kernel (a computer out of memory) then stalls one reading, which is given up on
-// after 5 s, and not the worker and its beacon. Nothing runs between requests: no child process,
-// no stream, no timer but the deadline of a reading under way.
-import { stat as statPath } from 'node:fs/promises'
+// Cost: one small read, one `stat` and one link read for each process, never more than 64
+// processes at once. With 1,000 processes, every link readable, in a Linux virtual machine on an
+// Apple M1 Max (kernel 7.0, Node 24), one reading took about 125 ms of CPU (user + system, the
+// threads that read the files included) and 75 ms from start to end, and never held the event
+// loop for more than about 5 ms. The reads are asynchronous although the same pass with
+// synchronous ones took about 30 ms of CPU: a read that stalls in the kernel (a computer out of
+// memory) then stalls one reading, which is given up on after 5 s, and not the worker and its
+// beacon. Nothing runs between requests: no child process, no stream, no timer but the deadline
+// of a reading under way.
+import { readlink, stat as statPath } from 'node:fs/promises'
 import os from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { listDir, MAX_FILE_BYTES, readBytesBounded, readTextBounded, type ReadDir, type ReadFile } from './linux-system.ts'
@@ -61,6 +71,8 @@ export const READ_DEADLINE_MS = 5_000
 const STAT_MAX_BYTES = 4_096
 /** The auxiliary vector is about twenty pairs of words. */
 const AUXV_MAX_BYTES = 4_096
+/** The longest link target taken: a path of PATH_MAX (4,096) bytes and ` (deleted)`. */
+const EXE_MAX_CHARS = 4_096 + 16
 /** The most directories of /proc tried in one reading: more than MAX_PROCESSES are kept from,
  *  since kernel threads are read before they are left out. */
 const MAX_PIDS_READ = 4 * MAX_PROCESSES
@@ -78,7 +90,9 @@ const MIN_CPU_WINDOW_MS = 500
 /** What is taken from one /proc/<pid>/stat. */
 export type ProcStat = {
   pid: number
-  /** The kernel's short name, as it stands in the file: not yet made fit for one line. */
+  /** The kernel's short name, as it stands in the file (not yet made fit for one line): the
+   *  executable's file name cut to 15 bytes, or what the process has named itself since. It names
+   *  the process only where its executable's name cannot be read (exeName). */
   comm: string
   /** One letter: R running, S sleeping, Z zombie and so on. */
   state: string
@@ -130,6 +144,20 @@ export function parseProcStat(text: unknown): ProcStat | null {
  *  matters in a container, where pid 2 is an ordinary process with children of its own. */
 export function isKernelThread(stat: ProcStat): boolean {
   return (stat.pid === 2 || stat.ppid === 2) && stat.vsize === 0
+}
+
+/**
+ * The file name of a process's executable, from the target of its /proc/<pid>/exe link: what
+ * follows the last `/`, without the ` (deleted)` the kernel adds once the file has been replaced
+ * (by an update, say), made fit for one line. The directory part is dropped here and goes no
+ * further. Null when the target is not an absolute path or names no file (`/`): the caller then
+ * keeps `comm`.
+ */
+export function exeName(target: unknown): string | null {
+  if (typeof target !== 'string' || target.length > EXE_MAX_CHARS || !target.startsWith('/')) return null
+  const path = target.replace(/ \(deleted\)$/, '')
+  const name = oneLineName(path.slice(path.lastIndexOf('/') + 1), NAME_MAX)
+  return name === '' ? null : name
 }
 
 /** The process ids in a listing of /proc: its all-digit names, in order, each once. */
@@ -206,10 +234,12 @@ export function parseBootTime(text: unknown, maxBytes = MAX_FILE_BYTES): number 
 
 // --- a table from two readings ---------------------------------------------------------------
 
-/** One process of a reading: its kernel short name, never a path, argument or title. */
+/** One process of a reading. */
 export type ProcRow = {
   pid: number
   ppid: number
+  /** Its executable's file name, or the kernel's short name where that cannot be read: never a
+   *  directory or an argument. */
   name: string
   user: string | null
   /** Cumulative CPU time, user + system, in clock ticks. */
@@ -280,6 +310,8 @@ export type LinuxProcessSamplerDeps = {
   readDir?: ReadDir
   /** The uid that owns `path`, or null when it cannot be read (the process has gone). */
   statUid?: (path: string) => Promise<number | null>
+  /** Where the link at `path` points, or null when it cannot be read. For /proc/<pid>/exe. */
+  readLink?: (path: string) => Promise<string | null>
   timers?: Timers
   mono?: () => number
   wall?: () => number
@@ -296,6 +328,14 @@ const realStatUid = async (path: string): Promise<number | null> => {
   }
 }
 
+const realReadLink = async (path: string): Promise<string | null> => {
+  try {
+    return await readlink(path)
+  } catch {
+    return null
+  }
+}
+
 const realTimers: Timers = {
   setTimeout: (fn, ms) => {
     const handle = setTimeout(fn, ms)
@@ -304,6 +344,9 @@ const realTimers: Timers = {
   },
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
 }
+
+/** What one process's step of a reading gives: `exe` is its executable's file name alone. */
+type FoundProcess = { stat: ProcStat; uid: number | null; exe: string | null }
 
 /**
  * This Linux computer's processes, read from /proc when asked and at most every LIST_CACHE_MS.
@@ -316,6 +359,7 @@ export class LinuxProcessSampler {
   private readonly readBytes: (path: string) => Promise<Uint8Array | null>
   private readonly readDir: ReadDir
   private readonly statUid: (path: string) => Promise<number | null>
+  private readonly readLink: (path: string) => Promise<string | null>
   private readonly timers: Timers
   private readonly mono: () => number
   private readonly wall: () => number
@@ -333,6 +377,7 @@ export class LinuxProcessSampler {
     this.readBytes = deps.readBytes ?? ((path) => readBytesBounded(path, AUXV_MAX_BYTES))
     this.readDir = deps.readDir ?? listDir
     this.statUid = deps.statUid ?? realStatUid
+    this.readLink = deps.readLink ?? realReadLink
     this.timers = deps.timers ?? realTimers
     this.mono = deps.mono ?? (() => performance.now())
     this.wall = deps.wall ?? Date.now
@@ -398,7 +443,7 @@ export class LinuxProcessSampler {
     const pids = pidsOf(await this.dir(PROC_PATH)).slice(0, MAX_PIDS_READ)
     if (pids.length === 0) return null
     const [pageBytes, bootSeconds] = await Promise.all([this.pageBytesNow(), this.bootSecondsNow()])
-    const found: { stat: ProcStat; uid: number | null }[] = []
+    const found: FoundProcess[] = []
     for (let i = 0; i < pids.length && found.length < MAX_PROCESSES; i += READ_BATCH) {
       const batch = await Promise.all(pids.slice(i, i + READ_BATCH).map((pid) => this.readProcess(pid)))
       for (const one of batch) if (one && found.length < MAX_PROCESSES) found.push(one)
@@ -407,13 +452,14 @@ export class LinuxProcessSampler {
     const at = this.mono()
     const wallAt = this.wall()
     const users = await this.usersFor(found)
-    const rows: ProcRow[] = found.map(({ stat, uid }) => {
+    const rows: ProcRow[] = found.map(({ stat, uid, exe }) => {
       const mem = stat.rssPages * pageBytes
       return {
         pid: stat.pid,
         ppid: stat.ppid,
-        // A process may give itself an empty name; its pid stands in, as on a line from afar.
-        name: oneLineName(stat.comm, NAME_MAX) || String(stat.pid),
+        // The executable's file name; where it could not be read, the kernel's short name. A
+        // process may give itself an empty one: its pid then stands in, as on a line from afar.
+        name: exe ?? (oneLineName(stat.comm, NAME_MAX) || String(stat.pid)),
         // An account /etc/passwd does not name (one from a directory service) shows as its uid.
         user: uid === null ? null : (users.get(uid) ?? String(uid)),
         cpuTicks: stat.cpuTicks,
@@ -430,17 +476,34 @@ export class LinuxProcessSampler {
   }
 
   /** One process, or null: a kernel thread, or one that ended between the listing of /proc and
-   *  this read (its file is gone, or cut short), which is simply not in the list. */
-  private async readProcess(pid: number): Promise<{ stat: ProcStat; uid: number | null } | null> {
+   *  this read (its file is gone, or cut short), which is simply not in the list. Its owner and
+   *  its executable's name are asked for side by side, in this same step, so a process takes one
+   *  place in its batch from start to end. */
+  private async readProcess(pid: number): Promise<FoundProcess | null> {
     const stat = parseProcStat(await this.file(`${PROC_PATH}/${pid}/stat`))
     if (!stat || stat.pid !== pid || isKernelThread(stat)) return null
-    let uid: number | null = null
+    const [uid, exe] = await Promise.all([this.ownerOf(pid), this.exeNameOf(pid)])
+    return { stat, uid, exe }
+  }
+
+  private async ownerOf(pid: number): Promise<number | null> {
     try {
-      uid = await this.statUid(`${PROC_PATH}/${pid}`)
+      const uid = await this.statUid(`${PROC_PATH}/${pid}`)
+      return typeof uid === 'number' && Number.isSafeInteger(uid) && uid >= 0 ? uid : null
     } catch {
-      uid = null
+      return null
     }
-    return { stat, uid: typeof uid === 'number' && Number.isSafeInteger(uid) && uid >= 0 ? uid : null }
+  }
+
+  /** The file name of the process's executable, or null where its link cannot be read. The
+   *  link's target goes straight into exeName and nowhere else: only the file name comes out of
+   *  this method, so no directory can reach a row, a log line or the list that is published. */
+  private async exeNameOf(pid: number): Promise<string | null> {
+    try {
+      return exeName(await this.readLink(`${PROC_PATH}/${pid}/exe`))
+    } catch {
+      return null
+    }
   }
 
   private async file(path: string): Promise<string | null> {

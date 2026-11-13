@@ -5,6 +5,7 @@ import { assert, describe, test } from 'orca/testing'
 import {
   AUXV_PATH,
   buildProcessTable,
+  exeName,
   FALLBACK_PAGE_BYTES,
   isKernelThread,
   LinuxProcessSampler,
@@ -18,10 +19,11 @@ import {
   type ProcReading
 } from '../src/linux-processes.ts'
 import type { ProcessSource } from '../src/monitor.ts'
-import { LIST_CACHE_MS, MAX_PROCESSES } from '../src/processes.ts'
+import { LIST_CACHE_MS, MAX_PROCESSES, NAME_MAX } from '../src/processes.ts'
 import { FakeTime, fixtureText, flush } from './helpers.ts'
 
-type Proc = { pid: number; comm: string; state?: string; ppid: number; utime: number; stime?: number; start: number; vsize?: number; rss: number; uid?: number }
+/** `exe` is where /proc/<pid>/exe points; without one the link cannot be read. */
+type Proc = { pid: number; comm: string; state?: string; ppid: number; utime: number; stime?: number; start: number; vsize?: number; rss: number; uid?: number; exe?: string }
 
 /** One /proc/<pid>/stat: 52 fields, the ones read here set and the rest plausible. */
 const statLine = (p: Proc): string =>
@@ -113,6 +115,46 @@ describe('/proc/<pid>/stat', () => {
     assert.deepEqual(pidsOf(['cpuinfo', '42', '1', 'self', 'net', '007', '42', '0', '3x', '99999999999', '4194304', 'thread-self']), [1, 42, 4_194_304])
     assert.deepEqual(pidsOf(null), [])
     assert.deepEqual(pidsOf([7, null, '8']), [8])
+  })
+})
+
+describe('the name of the executable', () => {
+  test('the file name of the link target, and nothing of its directory', () => {
+    assert.equal(exeName('/usr/local/bin/node'), 'node')
+    assert.equal(exeName('/usr/lib/firefox/firefox'), 'firefox')
+    assert.equal(exeName('/home/example/secret-project-x/bin/tool'), 'tool')
+    assert.equal(exeName('/opt/My App/bin/My Tool'), 'My Tool', 'spaces are part of a name')
+    assert.equal(exeName('/sbin/init'), 'init')
+    assert.equal(exeName('/toplevel'), 'toplevel')
+    assert.equal(exeName('/usr/bin/café-tool'), 'café-tool')
+  })
+
+  test('a replaced executable loses its " (deleted)"', () => {
+    assert.equal(exeName('/usr/lib/firefox/firefox (deleted)'), 'firefox')
+    assert.equal(exeName('/opt/My App/My Tool (deleted)'), 'My Tool')
+    assert.equal(exeName('/memfd:jit (deleted)'), 'memfd:jit', 'a program run from memory')
+    assert.equal(exeName('/usr/bin/tool (deleted) '), 'tool (deleted)', 'only at the very end')
+    assert.equal(exeName('/usr/bin/(deleted)'), '(deleted)', 'a file may be called that')
+  })
+
+  test('made fit for one line, and no longer than a name may be', () => {
+    assert.equal(exeName(`/srv/${'n'.repeat(300)}`), 'n'.repeat(NAME_MAX))
+    assert.equal(exeName(`/srv/${'d'.repeat(300)}/${'n'.repeat(200)} (deleted)`), 'n'.repeat(NAME_MAX))
+    assert.equal(exeName('/tmp/evil\u202Eexe'), 'evil\uFFFDexe')
+    assert.equal(exeName('/tmp/two\nlines'), 'two lines')
+  })
+
+  test('a target that names no file is none: the kernel short name stays', () => {
+    assert.equal(exeName('/'), null)
+    assert.equal(exeName('/usr/bin/'), null)
+    assert.equal(exeName('/ (deleted)'), null)
+    assert.equal(exeName('/tmp/\n'), null, 'nothing left of the name')
+    assert.equal(exeName(''), null)
+    assert.equal(exeName('node'), null, 'not an absolute path: not what the kernel gives')
+    assert.equal(exeName(' (deleted)'), null)
+    assert.equal(exeName(`/${'x/'.repeat(3_000)}tool`), null, 'longer than any path')
+    assert.equal(exeName(null), null)
+    assert.equal(exeName(42), null)
   })
 })
 
@@ -235,9 +277,12 @@ function fakeProc(platform = 'linux') {
     listable: true,
     reads: [] as string[],
     owners: [] as string[],
+    links: [] as string[],
     lists: 0,
     inFlight: 0,
     maxInFlight: 0,
+    linksInFlight: 0,
+    maxLinksInFlight: 0,
     /** While set, a listing of /proc waits for it. */
     gate: null as Promise<void> | null
   }
@@ -271,7 +316,16 @@ function fakeProc(platform = 'linux') {
     state.reads.push(path)
     return path === AUXV_PATH ? state.auxv : null
   }
-  const sampler = new LinuxProcessSampler({ readFile, readBytes, readDir, statUid, timers: time, mono: time.now, wall: time.now, platform, cores: () => 4 })
+  const readLink = async (path: string): Promise<string | null> => {
+    state.links.push(path)
+    state.linksInFlight += 1
+    state.maxLinksInFlight = Math.max(state.maxLinksInFlight, state.linksInFlight)
+    await Promise.resolve()
+    state.linksInFlight -= 1
+    const match = /^\/proc\/(\d+)\/exe$/.exec(path)
+    return (match ? procs.get(Number(match[1]))?.exe : undefined) ?? null
+  }
+  const sampler = new LinuxProcessSampler({ readFile, readBytes, readDir, statUid, readLink, timers: time, mono: time.now, wall: time.now, platform, cores: () => 4 })
   const readsOf = (path: string): number => state.reads.filter((p) => p === path).length
   return { time, procs, state, put, sampler, readsOf }
 }
@@ -292,7 +346,7 @@ function desktop(platform = 'linux') {
 }
 
 describe('the process sampler', () => {
-  test('every process, its owner, memory and start; kernel threads left out; nothing but stat read', async () => {
+  test('every process, its owner, memory and start; kernel threads left out; nothing but stat and the exe link read', async () => {
     const pc = desktop()
     const table = (await pc.sampler.localTable())!
     assert.deepEqual(table.rows, [
@@ -303,11 +357,13 @@ describe('the process sampler', () => {
     ])
     assert.deepEqual([table.takenAt, table.cpuWindowMs, table.memAgeMs, table.energyWindowMs, table.total], [pc.time.now(), null, 0, null, 4])
     assert.equal(pc.sampler.latestTable(), table)
-    // The privacy rule: of a process, its stat file and its directory's owner, and nothing else.
+    // The privacy rule: of a process, its stat file, its directory's owner and where its exe
+    // link points, and nothing else. No link could be read here, so each has its kernel name.
     const allowed = /^(?:\/proc\/\d+\/stat|\/proc\/stat|\/proc\/self\/auxv|\/etc\/passwd)$/
     assert.deepEqual(pc.state.reads.filter((path) => !allowed.test(path)), [])
     assert.equal(pc.state.reads.some((path) => /cmdline|environ|exe|cwd|status|comm/.test(path)), false)
     assert.deepEqual(pc.state.owners.sort(), ['/proc/1', '/proc/4100', '/proc/4242', '/proc/900'], 'no owner is asked of a kernel thread')
+    assert.deepEqual(pc.state.links.sort(), ['/proc/1/exe', '/proc/4100/exe', '/proc/4242/exe', '/proc/900/exe'], 'nor its executable; and no other link is read')
     assert.equal(pc.time.pending, 0, 'the deadline of a finished reading is cleared')
   })
 
@@ -331,6 +387,57 @@ describe('the process sampler', () => {
     const reused = third.rows.find((r) => r.pid === 900)!
     assert.deepEqual([reused.name, reused.user, reused.cpu, reused.start], ['sleep', 'example', 10, BOOT + 82_000])
     assert.equal(pc.sampler.latestTable(), third)
+  })
+
+  test('a process is named by its executable where the link can be read, by its kernel name where not', async () => {
+    const pc = fakeProc()
+    pc.put(
+      // This user's own: Node 24 calls its main thread MainThread.
+      { pid: 100, comm: 'MainThread', ppid: 1, utime: 5, start: 100, rss: 20_000, exe: '/home/example/.nvm/versions/node/v24.1.0/bin/node' },
+      { pid: 101, comm: 'Web Content', ppid: 1, utime: 5, start: 101, rss: 90_000, exe: '/usr/lib/firefox/firefox (deleted)' },
+      { pid: 102, comm: 'My Tool', ppid: 1, utime: 5, start: 102, rss: 300, exe: '/opt/My App/bin/My Tool' },
+      { pid: 103, comm: 'gnome-settings-', ppid: 1, utime: 5, start: 103, rss: 300, exe: '/usr/libexec/gnome-settings-daemon' },
+      { pid: 104, comm: 'wrapper', ppid: 1, utime: 5, start: 104, rss: 300, exe: `/home/example/secret-project-x/${'n'.repeat(300)}` },
+      // Another user's, a zombie, and targets that name no file: the link says nothing.
+      { pid: 200, comm: 'sshd', ppid: 1, utime: 5, start: 200, rss: 300, uid: 0 },
+      { pid: 201, comm: 'defunct', state: 'Z', ppid: 100, utime: 5, start: 201, vsize: 0, rss: 0 },
+      { pid: 202, comm: 'rootless', ppid: 1, utime: 5, start: 202, rss: 300, exe: '/' },
+      { pid: 203, comm: 'relative', ppid: 1, utime: 5, start: 203, rss: 300, exe: 'bin/tool' },
+      { pid: 204, comm: '', ppid: 1, utime: 5, start: 204, rss: 300 },
+      // Kernel threads have no executable, and are never asked for one.
+      { pid: 2, comm: 'kthreadd', ppid: 0, utime: 0, start: 2, vsize: 0, rss: 0, uid: 0, exe: '/must/not/be/read' },
+      { pid: 37, comm: 'kworker/3:0H', ppid: 2, utime: 0, start: 14, vsize: 0, rss: 0, uid: 0, exe: '/must/not/be/read' }
+    )
+    const table = (await pc.sampler.localTable())!
+    assert.deepEqual(
+      table.rows.map((r) => [r.pid, r.name]),
+      [[100, 'node'], [101, 'firefox'], [102, 'My Tool'], [103, 'gnome-settings-daemon'], [104, 'n'.repeat(NAME_MAX)], [200, 'sshd'], [201, 'defunct'], [202, 'rootless'], [203, 'relative'], [204, '204']]
+    )
+    assert.deepEqual(pc.state.links.sort(), [100, 101, 102, 103, 104, 200, 201, 202, 203, 204].map((pid) => `/proc/${pid}/exe`))
+    // No directory anywhere: not in a row, not in the table, not in what the sampler keeps.
+    for (const kept of [JSON.stringify(table), JSON.stringify(pc.sampler.latestTable()), JSON.stringify(pc.sampler)]) {
+      assert.equal(/secret-project-x|\.nvm|\/usr|\/opt|\/home|My App|libexec|deleted/.test(kept), false)
+    }
+    assert.equal(table.rows.some((r) => Object.values(r).some((value) => typeof value === 'string' && value.includes('/'))), false)
+    // The name follows the executable from one reading to the next: an update replaced the file.
+    pc.procs.get(100)!.exe = '/home/example/.nvm/versions/node/v24.1.0/bin/node (deleted)'
+    pc.procs.get(200)!.exe = '/usr/sbin/sshd'
+    pc.time.advance(5_000)
+    const later = (await pc.sampler.localTable())!
+    assert.deepEqual([later.rows.find((r) => r.pid === 100)!.name, later.rows.find((r) => r.pid === 200)!.name], ['node', 'sshd'])
+    assert.equal(later.rows.find((r) => r.pid === 100)!.cpu, 0, 'and it is still the same process')
+  })
+
+  test('a link read that throws, or gives something that is not text, leaves the kernel name', async () => {
+    const time = new FakeTime()
+    const stat = async (path: string): Promise<string | null> => (path === '/proc/7/stat' ? statLine({ pid: 7, comm: 'lonely', ppid: 1, utime: 5, start: 100, rss: 10 }) : null)
+    const deps = { readFile: stat, readBytes: async () => null, readDir: async () => ['7'], statUid: async () => 1000, timers: time, mono: time.now, wall: time.now, platform: 'linux' }
+    const thrower = new LinuxProcessSampler({ ...deps, readLink: async () => { throw new Error('EACCES') } })
+    assert.equal((await thrower.localTable())!.rows[0]!.name, 'lonely')
+    const odd = new LinuxProcessSampler({ ...deps, readLink: (async () => 42) as unknown as (path: string) => Promise<string | null> })
+    assert.equal((await odd.localTable())!.rows[0]!.name, 'lonely')
+    const named = new LinuxProcessSampler({ ...deps, readLink: async (path) => (path === '/proc/7/exe' ? '/usr/bin/only-child' : null) })
+    assert.equal((await named.localTable())!.rows[0]!.name, 'only-child')
   })
 
   test('a process that ends while the list is read is simply not in it', async () => {
@@ -453,6 +560,8 @@ describe('the process sampler', () => {
     assert.equal(table.rows.length, MAX_PROCESSES)
     assert.equal(table.rows[0]!.pid, 100)
     assert.equal(pc.state.maxInFlight, READ_BATCH)
+    assert.ok(pc.state.maxLinksInFlight <= READ_BATCH, 'the link reads take no place of their own')
+    assert.equal(pc.state.links.length, pc.state.owners.length, 'one link and one owner for each process kept or tried')
     assert.ok(pc.state.reads.length < MAX_PROCESSES + 300, 'it stops reading once it has enough')
   })
 
@@ -503,7 +612,7 @@ describe('the process sampler', () => {
       throw new Error('EACCES')
     }
     const time = new FakeTime()
-    const dead = new LinuxProcessSampler({ readFile: boom, readBytes: boom, readDir: boom, statUid: boom, timers: time, mono: time.now, wall: time.now, platform: 'linux' })
+    const dead = new LinuxProcessSampler({ readFile: boom, readBytes: boom, readDir: boom, statUid: boom, readLink: boom, timers: time, mono: time.now, wall: time.now, platform: 'linux' })
     assert.equal(await dead.localTable(), null)
     assert.equal(time.pending, 0)
     const text = statLine({ pid: 7, comm: 'lonely', ppid: 1, utime: 5, start: 100, rss: 10 })
@@ -515,6 +624,7 @@ describe('the process sampler', () => {
       readBytes: boom,
       readDir: async () => ['7'],
       statUid: boom,
+      readLink: boom,
       timers: time,
       mono: time.now,
       wall: time.now,
@@ -534,7 +644,7 @@ describe('the process sampler', () => {
     assert.equal(await mac.sampler.publishTable(), null)
     assert.equal(mac.sampler.latestTable(), null)
     mac.sampler.stop()
-    assert.deepEqual([mac.state.reads.length, mac.state.lists, mac.state.owners.length, mac.time.pending], [0, 0, 0, 0])
+    assert.deepEqual([mac.state.reads.length, mac.state.lists, mac.state.owners.length, mac.state.links.length, mac.time.pending], [0, 0, 0, 0, 0])
     const pc = desktop()
     // The monitor takes it as it takes a Mac's sampler.
     const source: ProcessSource = pc.sampler
