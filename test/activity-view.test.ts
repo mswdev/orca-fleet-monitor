@@ -296,7 +296,8 @@ describe('Overview | Activity', () => {
   })
 
   test('no tabs on a basic machine (the install hint says what installing adds), offline, connecting, or a machine with nothing to show', () => {
-    const linux = base({ id: 'env-linux', name: 'Linux Box', host: { ...base().host, platform: 'linux' }, processes: { state: 'unavailable', reason: 'not-mac', takenAt: null } })
+    // A platform Fleet Monitor reads no activity on (it reads a Mac, Linux and Windows).
+    const linux = base({ id: 'env-linux', name: 'BSD Box', host: { ...base().host, platform: 'freebsd' }, processes: { state: 'unavailable', reason: 'not-mac', takenAt: null } })
     const v = mount(
       viewOf([
         local(),
@@ -322,6 +323,34 @@ describe('Overview | Activity', () => {
     v.handle.show('env-studio')
     assert.equal($(v.root, '[role="tablist"]'), null)
     assert.equal(text($(v.root, '[data-key="activity-notice"]')), 'Update Fleet Monitor on Studio to 1.2 or later to see its network, disk and processes here.')
+  })
+
+  test('a Linux or Windows machine needs 1.3 for it, and the notice says so', () => {
+    for (const platform of ['linux', 'win32']) {
+      const box = base({ id: 'env-box', name: 'Box', host: { ...base().host, platform }, system: null, processes: { state: 'unavailable', reason: 'outdated', takenAt: null } })
+      const v = mount(viewOf([local(), box]))
+      v.handle.show('env-box')
+      assert.equal($(v.root, '[role="tablist"]'), null)
+      assert.equal(text($(v.root, '[data-key="activity-notice"]')), 'Update Fleet Monitor on Box to 1.3 or later to see its network, disk and processes here.', platform)
+    }
+  })
+
+  test('a Windows machine whose PowerShell cannot run the reader says that, and does not ask for an update', () => {
+    const box = base({ id: 'env-box', name: 'Locked Box', host: { ...base().host, platform: 'win32' }, system: null, processes: { state: 'unavailable', reason: 'no-reader', takenAt: null } })
+    const v = mount(viewOf([local(), box]))
+    v.handle.show('env-box')
+    assert.equal($(v.root, '[role="tablist"]'), null)
+    assert.match(text($(v.root, '[data-key="activity-notice"]')), /^Fleet Monitor on Locked Box cannot read its processes, and may lack other readings: Windows PowerShell, or the performance counters/)
+  })
+
+  test('disk space is read without PowerShell, so that machine may have a tab: the notice is in it too', async () => {
+    const space = { net: null, gpu: null, battery: null, disk: { totalBytes: 500 * GIB, usedBytes: 200 * GIB, readBytesPerSec: null, writeBytesPerSec: null } }
+    const box = base({ id: 'env-box', name: 'Locked Box', host: { ...base().host, platform: 'win32' }, system: space, processes: { state: 'unavailable', reason: 'no-reader', takenAt: null } })
+    const v = mount(viewOf([local(), box]))
+    await activity(v, 'env-box')
+    assert.ok($(v.root, '[role="tablist"]'), 'the disk tile gives it an Activity tab')
+    assert.match(text($(v.root, '[data-key="activity-notice"]')), /cannot read its processes, and may lack other readings/)
+    assert.equal($(v.root, '.fm-procs-card'), null)
   })
 })
 
@@ -437,6 +466,30 @@ describe('the Processes card', () => {
     assert.equal($(v.root, '[data-action="show-all"]'), null)
   })
 
+  test('"Show fewer" goes back to the first 25, closing a row opened further down', async () => {
+    const v = mount(viewOf([local()]), () => listOf(many(30), { total: 30 }))
+    await activity(v, 'local')
+    assert.equal($(v.root, '[data-action="show-fewer"]'), null, 'nothing to go back from yet')
+    $(v.root, '[data-action="show-all"]')!.click()
+    const fewer = $(v.root, '[data-action="show-fewer"]')!
+    assert.equal(text(fewer), 'Show fewer')
+    // Open the last row, which the short list does not hold.
+    const rows = $$(v.root, '.fm-proc')
+    rows.at(-1)!.querySelector('[data-action="proc"]')?.click()
+    fewer.click()
+    assert.equal($$(v.root, '.fm-proc').length, 25)
+    assert.equal(text($(v.root, '[data-action="show-all"]')), 'Show all 30')
+    assert.equal($(v.root, '[data-action="show-fewer"]'), null)
+    assert.equal($(v.root, '.fm-proc-more'), null, 'no open row left behind')
+  })
+
+  test('a list of 25 or fewer has neither button', async () => {
+    const v = mount(viewOf([local()]), () => listOf(many(25), { total: 25 }))
+    await activity(v, 'local')
+    assert.equal($(v.root, '[data-action="show-all"]'), null)
+    assert.equal($(v.root, '[data-action="show-fewer"]'), null)
+  })
+
   test('CPU is percent of one core, labelled so, and can pass 100', async () => {
     const v = mount(viewOf([local()]), () => listOf([{ pid: 7, name: 'compiler', cpu: 312.4, mem: 3 * GIB }, { pid: 8, name: 'idle', cpu: 0.04, mem: 2 ** 20 }]))
     await activity(v, 'local')
@@ -530,6 +583,14 @@ describe('the Processes card', () => {
     await activity(v, 'local')
     assert.match(text($(v.root, '[data-key="proc-failed"]')), /could not be read just now/)
     assert.equal($(v.root, '.fm-procs'), null)
+  })
+
+  test('this computer, where PowerShell cannot run the reader: said once, not as a passing failure', async () => {
+    const v = mount(viewOf([local()]), () => listOf([], { state: 'unavailable', reason: 'no-reader', takenAt: null, ageMs: null, total: null }))
+    await activity(v, 'local')
+    assert.match(text($(v.root, '[data-key="proc-blocked"]')), /cannot be read on this computer: Windows PowerShell, or the performance counters/)
+    assert.equal($(v.root, '[data-key="proc-failed"]'), null)
+    assert.equal($(v.root, '[data-key="proc-loading"]'), null)
   })
 })
 

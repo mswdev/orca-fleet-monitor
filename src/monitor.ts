@@ -7,6 +7,7 @@ import { PanelBridge } from './bridge.ts'
 import { localAnswer, remoteAnswer, unavailableAnswer } from './process-answer.ts'
 import { encodeProcessLine, PROCESS_INTERVAL_MS } from './process-line.ts'
 import { largestProcess, type ProcessTable } from './processes.ts'
+import type { StarSource } from './star.ts'
 import type { TopProcess } from './model.ts'
 import { cliLauncherName, type CliResolution, type CommandRunner } from './cli.ts'
 import type { CliInfo, LocalSample } from './model.ts'
@@ -55,10 +56,25 @@ export type MonitorDeps = {
   declaredCommands?: readonly string[]
   /** This computer's platform; process.platform when not given. */
   platform?: string
-  /** This Mac's processes (src/processes.ts ProcessSampler); absent where there are none to list. */
+  /** This computer's processes (src/processes.ts on a Mac, src/linux-processes.ts,
+   *  src/win-processes.ts); absent where there are none to list. */
   processes?: ProcessSource | null
+  /** Ends whatever the readers keep running that nothing else stops (Windows' PowerShell process). */
+  dispose?: () => void
+  /** Stars this plugin's repository with the person's `gh` when they press the panel's link
+   *  (src/star.ts); absent where that is not offered. */
+  star?: StarSource | null
   /** Wall clock, epoch ms (process tables carry wall times); Date.now when not given. */
   wall?: () => number
+}
+
+/** A yes-or-no question that must not throw into a snapshot. */
+function safely(ask: () => boolean): boolean {
+  try {
+    return ask()
+  } catch {
+    return false
+  }
 }
 
 /** What the monitor needs of src/processes.ts's ProcessSampler. */
@@ -68,6 +84,9 @@ export type ProcessSource = {
   localTable(): Promise<ProcessTable | null>
   publishTable(): Promise<ProcessTable | null>
   stop(): void
+  /** True while the list cannot be read on this computer at all (Windows, when PowerShell cannot
+   *  run the reader); nothing is published then, and the panel says why. */
+  unavailable?(): boolean
 }
 
 export type FleetMonitor = {
@@ -107,7 +126,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     source: cli.source,
     error: cli.error,
     runError: poller?.environmentError() ?? null,
-    launcher
+    launcher,
+    ...(safely(() => deps.star?.available() === true) ? { canStar: true } : {})
   })
   const runner = deps.createRunner(() => cli.path)
 
@@ -190,8 +210,9 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     const at = takenAt - table.memAgeMs
     if (!localLargest || at >= localLargest.at) localLargest = { largest, at }
   }
-  /** This Mac publishes its top processes along with its readings (the beacon setting). */
-  const publishingProcesses = (): boolean => processes !== null && settings.beacon
+  /** This computer publishes its top processes along with its readings (the beacon setting),
+   *  where it can read them. */
+  const publishingProcesses = (): boolean => processes !== null && settings.beacon && !processes.unavailable?.()
   /** The background process beat waits while macOS memory pressure is critical, and for
    *  CRITICAL_HOLD_MS after it was last seen critical: a Mac flipping between warning and critical
    *  would otherwise restart `top` (about 2 s of CPU each time) every few seconds, just when it
@@ -288,10 +309,21 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       activePoller.heartbeat()
       if (id !== LOCAL_ID) return remoteAnswer(id, activePoller.stateOf(id), activePoller.processLineOf(id), deps.now())
       if (!processes) return unavailableAnswer(id, 'not-mac', 'full')
+      if (processes.unavailable?.()) return unavailableAnswer(id, 'no-reader', 'full')
       const table = await processes.localTable()
       noteTable(table)
       activePoller.onLocalProcesses()
       return localAnswer(id, table, deps.now(), wall())
+    }),
+    // Only ever from a press of the panel's link; never on a timer, never for another repository.
+    orca.panels.handle('fleet.star', async () => {
+      let starred = false
+      try {
+        starred = (await deps.star?.star()) === true
+      } catch {
+        starred = false
+      }
+      return { starred }
     }),
     orca.panels.handle('fleet.retry', (input) => {
       const id = input && typeof input === 'object' && typeof input.id === 'string' ? input.id : null
@@ -341,7 +373,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     syncPublishing()
     if (settings.beacon) {
       seq += 1
-      const line = encodeBeacon(sample, { run: runId, seq, intervalMs: BEACON_INTERVAL_MS, processes: publishingProcesses() })
+      const line = encodeBeacon(sample, { run: runId, seq, intervalMs: BEACON_INTERVAL_MS, processes: processes?.unavailable?.() ? 'unavailable' : publishingProcesses() })
       if (line) orca.log(line)
     }
     activePoller.onLocalSample()
@@ -394,6 +426,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       deps.clearInterval(tickTimer)
       processStopped = true
       processes?.stop()
+      deps.dispose?.()
       if (statusTimer !== null) deps.clearTimeout(statusTimer)
       activeBridge.dispose()
       activePoller.stop()

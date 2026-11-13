@@ -26,7 +26,7 @@
 //                                  // the memory line, already past its 5 % floor; ageSec: how old the figure is
 // }
 // ProcessesModel = {
-//   state: 'loading' | 'ready' | 'failed'
+//   state: 'loading' | 'ready' | 'failed' | 'blocked'
 //   top: boolean                   // a remote machine's own top list, not every process
 //   truncated: boolean             // this computer had more processes than one answer carries
 //   total: number | null           // every process on the machine, when known
@@ -51,7 +51,7 @@ import { h, s } from './dom.mjs'
 import { toProcessList } from './fleet-binding.mjs'
 import { duration, size } from './format.mjs'
 
-/** Rows drawn before "Show all N". */
+/** Rows drawn before "Show all N", and again after "Show fewer". */
 export const FIRST_ROWS = 25
 /** The memory line names a process only when it holds at least this share of the machine's RAM. */
 export const SUGGEST_FLOOR = 0.05
@@ -127,6 +127,8 @@ function processesOf(machine, list, ui, now) {
   if (model.state === 'loading' || model.state === 'waiting' || (model.state === 'unavailable' && model.reason === 'not-read-yet')) {
     return { ...base, state: 'loading' }
   }
+  // This computer cannot read its own list (Windows, where PowerShell may not run the reader).
+  if (model.state === 'unavailable' && model.reason === 'no-reader') return { ...base, state: 'blocked' }
   if (model.state !== 'ok') return { ...base, state: 'failed' }
   const rows = rowsOf(model.rows, now)
   const energy = rows.some((r) => r.energy !== null)
@@ -168,11 +170,20 @@ export function toActivityModel({ machine, list, ui = { sort: 'cpu', query: '' }
   const tiles = live ? tilesOf(machine) : { network: null, disk: null, gpu: null, battery: null }
   const processes = live ? processesOf(machine, list, ui, now) : null
   const tabs = live && (processes !== null || Object.values(tiles).some(Boolean))
-  // Fleet Monitor there is older than 1.2.
+  // Fleet Monitor there is too old to read these: before 1.2 on a Mac, before 1.3 anywhere else.
   const older = live && !tabs && machine.processes?.state === 'unavailable' && machine.processes.reason === 'outdated'
+  const needs = machine.platform === 'darwin' ? '1.2' : '1.3'
+  // Its Fleet Monitor is new enough, and says it cannot read them there. Disk space is read
+  // without PowerShell, so there may still be a tab, with that one tile in it: the notice is
+  // shown either way, or the rest would be missing without a word.
+  const blocked = live && machine.processes?.state === 'unavailable' && machine.processes.reason === 'no-reader'
   return {
     tabs,
-    notice: older ? `Update Fleet Monitor on ${machine.name} to 1.2 or later to see its network, disk and processes here.` : null,
+    notice: older
+      ? `Update Fleet Monitor on ${machine.name} to ${needs} or later to see its network, disk and processes here.`
+      : blocked
+        ? `Fleet Monitor on ${machine.name} cannot read its processes, and may lack other readings: Windows PowerShell, or the performance counters, are not available to it there.`
+        : null,
     tiles,
     processes,
     suggest: suggestOf(machine)
@@ -531,7 +542,7 @@ function head(p) {
     { class: 'fm-proc-head', 'aria-hidden': 'true', 'data-key': 'proc-head' },
     h('span', { class: key('name') }, 'Name'),
     h('span', { class: 'fm-proc-hint' }),
-    h('span', { class: ['fm-proc-cpu', key('cpu') ?? (p.sort === 'name' ? 'is-key' : null)], title: 'Percent of one core, as Activity Monitor shows it: a process busy on four cores shows 400%' }, CPU_HEAD),
+    h('span', { class: ['fm-proc-cpu', key('cpu') ?? (p.sort === 'name' ? 'is-key' : null)], title: 'Percent of one core: a process busy on four cores shows 400%' }, CPU_HEAD),
     p.energy ? h('span', { class: ['fm-proc-energy', key('energy')] }, 'Energy') : null,
     h('span', { class: ['fm-proc-mem', key('memory')] }, 'Memory')
   )
@@ -628,6 +639,8 @@ export function processesSection(p, { shown, matches, open, tabStop, machineName
   const nodes = [h('div', { class: 'fm-proc-top', 'data-key': 'proc-top' }, h('h2', {}, 'Processes'), h('span', { class: 'fm-sub' }, countText(p, matches)), toolbar(p))]
   if (p.state === 'loading') {
     nodes.push(h('div', { class: 'fm-proc-list', 'data-key': 'proc-loading' }, head(p), skeleton(p)))
+  } else if (p.state === 'blocked') {
+    nodes.push(h('p', { class: 'fm-note', 'data-key': 'proc-blocked' }, 'The process list cannot be read on this computer: Windows PowerShell, or the performance counters, are not available to Fleet Monitor here. It is tried again once an hour.'))
   } else if (p.state === 'failed') {
     nodes.push(h('p', { class: 'fm-note', 'data-key': 'proc-failed' }, 'The process list could not be read just now. It is asked for again in a few seconds.'))
   } else if (query && matches === 0) {
@@ -653,8 +666,11 @@ export function processesSection(p, { shown, matches, open, tabStop, machineName
         )
       )
     )
+    // One footer either way, so the button keeps its place (and the keyboard's focus) when pressed.
     if (shown.length < matches) {
       nodes.push(h('div', { class: 'fm-proc-foot', 'data-key': 'proc-foot' }, h('button', { type: 'button', class: 'fm-foot-link', 'data-action': 'show-all' }, `Show all ${matches}`)))
+    } else if (matches > FIRST_ROWS) {
+      nodes.push(h('div', { class: 'fm-proc-foot', 'data-key': 'proc-foot' }, h('button', { type: 'button', class: 'fm-foot-link', 'data-action': 'show-fewer' }, 'Show fewer')))
     }
   }
   if (p.state === 'ready' && !p.top && p.truncated) {

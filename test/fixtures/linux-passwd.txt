@@ -1,0 +1,12 @@
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+messagebus:x:101:101::/nonexistent:/usr/sbin/nologin
+systemd-network:x:998:998:systemd Network Management:/:/usr/sbin/nologin
+example:x:1000:1000:Example Person,,,:/home/example:/bin/bash
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+# a comment someone left
++::::::
+toor:x:0:0:a second name for uid 0:/root:/bin/sh
+half-a-line
+badid:x:12x:12::/:/bin/false

@@ -384,11 +384,30 @@ function overview(fleet, ui, now) {
       h('p', { class: 'fm-notice', 'data-key': 'omitted' }, `${n} paired ${n === 1 ? 'machine is' : 'machines are'} not shown: their readings would not fit in one answer to this panel.`)
     )
   }
-  // Only where the frame can open it (the desktop app): small and muted, below everything.
-  if (ui.canOpenExternal) {
-    nodes.push(h('footer', { class: 'fm-foot', 'data-key': 'foot' }, h('button', { type: 'button', class: 'fm-foot-link', 'data-action': 'star' }, 'Star on GitHub')))
-  }
+  const foot = starFoot(fleet, ui)
+  if (foot) nodes.push(foot)
   return nodes
+}
+
+/**
+ * The quiet "Star on GitHub" link, below everything. Where this computer has the GitHub CLI, a
+ * press stars the project with it and the link says so; where that fails, or there is no CLI, it
+ * opens the project's page (only where the frame can: the desktop app). Orca opens a page only
+ * within a few seconds of a press, so when a failed try took longer than that, the page is offered
+ * as a link of its own.
+ */
+function starFoot(fleet, ui) {
+  // Only in the desktop app, where the frame can open the page: Orca's browser and mobile clients
+  // never had the link, and a press there would star from whatever computer runs the worker.
+  if (!ui.canOpenExternal) return null
+  // One button throughout, so the keyboard's focus stays on it as its words change; the footer
+  // announces them. aria-disabled, not disabled: a disabled button drops focus to the page.
+  const foot = (child) => h('footer', { class: 'fm-foot', 'data-key': 'foot', 'aria-live': 'polite' }, child)
+  const link = (action, label, more = {}) => h('button', { type: 'button', class: 'fm-foot-link', 'data-action': action, 'data-key': 'star', ...more }, label)
+  if (ui.star === 'done') return foot(link('star', 'Starred on GitHub. Thank you.', { 'aria-disabled': 'true' }))
+  if (ui.star === 'busy') return foot(link('star', 'Starring…', { 'aria-disabled': 'true' }))
+  if (ui.star === 'failed') return foot(link('star-open', 'Could not star from here. Open it on GitHub'))
+  return foot(link('star', 'Star on GitHub'))
 }
 
 // --- detail ------------------------------------------------------------------------------------
@@ -642,12 +661,11 @@ function workspacesSection(m) {
 }
 
 const INSTALL_TEXT = {
-  absent: 'Install Fleet Monitor on this machine for full detail',
+  absent: 'Install Fleet Monitor on this machine for measured CPU, activity and processes',
   installed: 'Fleet Monitor is installed on this machine but not running',
   quiet: 'Fleet Monitor runs on this machine, but its readings are not arriving'
 }
-/** On a Mac, what installing it adds is said in so many words. Activity (network, disk and the
- *  process list) is a Mac's only. */
+/** On a Mac, installing it also replaces Orca's memory pressure figure with RAM in use. */
 const INSTALL_TEXT_MAC = {
   ...INSTALL_TEXT,
   absent: 'Install Fleet Monitor on this machine for real RAM usage, activity and processes'
@@ -834,6 +852,8 @@ function detail(m, ui, now, act, list) {
   const tab = act?.tabs ? ui.tab : 'overview'
   if (tab === 'activity') {
     sections.push(...activitySections(m, act, ui, now, list))
+    // Why part of this tab is missing (a Windows machine whose PowerShell cannot run the reader).
+    if (act?.notice) sections.push(h('p', { class: 'fm-notice', 'data-key': 'activity-notice' }, act.notice))
   } else if (m.status === 'connecting') {
     sections.push(h('section', { class: 'fm-section fm-skel', 'aria-label': 'Connecting', 'data-key': 'waiting' }, skeletonMetrics()))
   } else if (!m.online) {
@@ -885,6 +905,10 @@ export function mountFleetView(
   const doc = root.ownerDocument
   const ui = {
     canOpenExternal: typeof openExternal === 'function',
+    /** The binding can ask the worker to star; whether this computer can is the fleet's `canStar`. */
+    canStar: typeof binding?.star === 'function',
+    /** 'idle', then 'busy' while the worker tries, then 'done' or 'failed'. */
+    star: 'idle',
     nav: { view: 'overview', id: null },
     pairOpen: false,
     installOpen: new Set(),
@@ -917,6 +941,24 @@ export function mountFleetView(
   /** This frame's clock moved onto the worker's, which history and "last seen" times use. */
   const workerNow = () => now() + (Number.isFinite(view?.clockOffsetMs) ? view.clockOffsetMs : 0)
   let fleet = toFleet(view, workerNow())
+
+  /**
+   * Opens the project's page; resolves false when Orca would not. Orca opens a page only within a
+   * few seconds of a press in this frame, and asks the person before a host the first time (their
+   * "no" is an answer, not a failure).
+   */
+  function openRepository() {
+    if (typeof openExternal !== 'function') return Promise.resolve(false)
+    try {
+      return Promise.resolve(openExternal(REPOSITORY_URL)).then(
+        (answer) => !(answer && answer.opened === false && answer.reason !== 'cancelled'),
+        () => false
+      )
+    } catch {
+      // Not offered after all: nothing to open.
+      return Promise.resolve(false)
+    }
+  }
 
   function resetActivity() {
     Object.assign(ui, { tab: 'overview', sort: 'cpu', sortShown: 'cpu', query: '', showAll: false, openKey: null, rowFocus: null, held: null, matches: 0, announce: '' })
@@ -1117,6 +1159,11 @@ export function mountFleetView(
         ui.showAll = true
         draw()
         break
+      case 'show-fewer':
+        // Back to the first rows; a row open or focused further down goes with the rest (arrange).
+        ui.showAll = false
+        draw()
+        break
       case 'pair':
         ui.pairOpen = !ui.pairOpen
         draw()
@@ -1136,14 +1183,33 @@ export function mountFleetView(
         void binding.refresh()
         break
       case 'star':
-        // Within the click, as Orca requires; Orca asks before opening a host the first time.
-        if (typeof openExternal === 'function') {
-          try {
-            void Promise.resolve(openExternal(REPOSITORY_URL)).catch(() => {})
-          } catch {
-            // Not offered after all: nothing to open.
-          }
+        // With the GitHub CLI on this computer, the worker stars the project for the person.
+        if (ui.canStar && ui.star === 'idle' && fleet.canStar === true) {
+          ui.star = 'busy'
+          draw()
+          void Promise.resolve()
+            .then(() => binding.star())
+            .catch(() => false)
+            .then((starred) => {
+              if (starred === true) return 'done'
+              // Could not star from here: the page instead, at once. Orca opens it only while the
+              // press is still fresh; past that, the link below offers it for a press of its own.
+              return openRepository().then((opened) => (opened ? 'idle' : 'failed'))
+            })
+            .then((state) => {
+              ui.star = state
+              draw()
+            })
+          break
         }
+        void openRepository()
+        break
+      case 'star-open':
+        void openRepository().then((opened) => {
+          if (!opened) return
+          ui.star = 'idle'
+          draw()
+        })
         break
     }
   })

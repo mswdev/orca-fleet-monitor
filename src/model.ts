@@ -52,9 +52,12 @@ export type MacMemory = {
   pressureAgeMs?: number
 }
 
-/** The default network interface's traffic, from `netstat -ibn` (src/mac-system.ts). */
+/** The default network interface's traffic: `netstat -ibn` on a Mac (src/mac-system.ts),
+ *  `/proc/net/dev` on Linux (src/linux-system.ts), .NET's interface statistics on Windows
+ *  (src/win-system.ts). */
 export type NetReading = {
-  /** The interface the default route goes out of (`en0`, say). */
+  /** The interface the default route goes out of (`en0`, `eth0`; on Windows the adapter's name
+   *  made to fit the beacon's rule for one, `Ethernet-3`). */
   iface: string
   /** Bytes per second since the previous reading; null on the first one, or when the counters
    *  went back (the interface reset, or the default route moved to another one). */
@@ -64,11 +67,14 @@ export type NetReading = {
   ageMs?: number
 }
 
-/** The main volume's space (`statfs`) and every disk's traffic (`ioreg`'s block storage
- *  statistics, as Activity Monitor's Disk tab sums them). */
+/** The main volume's space (`statfs`) and every disk's traffic: on a Mac `ioreg`'s block storage
+ *  statistics, as Activity Monitor's Disk tab sums them; on Linux `/proc/diskstats` over physical
+ *  disks; on Windows the PhysicalDisk counters' total. */
 export type DiskReading = {
-  /** The APFS container's size, and what is used of it: size minus what is available, which is
-   *  what `df` reports as available (space macOS could purge is not counted as available). */
+  /** The volume's size, and what is used of it: size minus what is available to this user, as
+   *  `df` counts available. On a Mac that is the APFS container (space macOS could purge is not
+   *  counted as available); on Linux `/`, where blocks reserved for root count as used; on Windows
+   *  the system drive. */
   totalBytes: number | null
   usedBytes: number | null
   /** How old the space figures are, in ms; they are read about once a minute. */
@@ -80,29 +86,34 @@ export type DiskReading = {
   ioAgeMs?: number
 }
 
-/** The GPU's utilisation, `ioreg`'s "Device Utilization %" (Apple silicon and most Intel GPUs). */
+/** The busiest GPU's utilisation. A Mac: `ioreg`'s "Device Utilization %" (Apple silicon and most
+ *  Intel GPUs). Linux: the driver's `gpu_busy_percent` (AMD) or `nvidia-smi`; Intel reports none.
+ *  Windows: its busiest engine, from the "GPU Engine" counters, as Task Manager shows one figure. */
 export type GpuReading = {
   percent: number
   /** How old it is, in ms; it is read about every 30 s. */
   ageMs?: number
 }
 
-/** `pmset -g batt`: the power source, and the internal battery when there is one. */
+/** The power source, and the internal battery when there is one: `pmset -g batt` on a Mac,
+ *  `/sys/class/power_supply` on Linux, the system's power status on Windows. */
 export type BatteryReading = {
-  /** False on a Mac without a battery (a desktop): the other battery fields are then null. */
+  /** False on a machine without a battery (a desktop): the other battery fields are then null. */
   present: boolean
   percent: number | null
   state: 'charging' | 'discharging' | 'charged' | 'not-charging' | null
   /** `ac` (AC power), `battery`, or `ups`; null when pmset did not say. */
   source: 'ac' | 'battery' | 'ups' | null
-  /** Minutes until full (charging) or empty (discharging), when macOS gives an estimate. */
+  /** Minutes until full (charging) or empty (discharging), when the system gives an estimate
+   *  (Windows gives one only while discharging). */
   minutesRemaining: number | null
   /** How old it is, in ms; it is read about once a minute. */
   ageMs?: number
 }
 
-/** A Mac's network, disk, GPU and battery readings. Each part is null when it could not be read
- *  (or this is not a Mac, where none is read). */
+/** A machine's network, disk, GPU and battery readings (the name is from 1.2, when only a Mac
+ *  had them; Linux and Windows have since 1.3). Each part is null when it could not be read or
+ *  the machine has no such thing. */
 export type MacSystem = {
   net: NetReading | null
   disk: DiskReading | null
@@ -157,30 +168,43 @@ export type BeaconRecord = {
   coreGroups: CoreGroup[] | null
   /** Only from a Mac running Fleet Monitor 1.1 or later; absent or null otherwise. */
   macMemory?: MacMemory | null
-  /** Only from a Mac running Fleet Monitor 1.2 or later; absent or null otherwise. */
+  /** From a machine whose Fleet Monitor reads them (1.2 on a Mac, 1.3 on Linux and Windows);
+   *  absent or null otherwise. */
   system?: MacSystem | null
-  /** The beacon says its writer also publishes process lines (1.2, a Mac, publishing on). */
+  /** The beacon says its writer also publishes process lines (publishing on; 1.2 on a Mac, 1.3 on
+   *  Linux and Windows). */
   publishesProcesses?: boolean
+  /** The beacon says its writer cannot list its processes at all (1.3: a Windows machine whose
+   *  PowerShell cannot run the reader). */
+  cannotListProcesses?: boolean
   /** When the remote Orca appended the log line (remote clock). */
   loggedAt: number
 }
 
 // --- Processes ------------------------------------------------------------------------------
 
-/** One process, as the worker reads it (src/processes.ts). */
+/** One process, as the worker reads it (src/processes.ts on a Mac, src/linux-processes.ts,
+ *  src/win-processes.ts). */
 export type ProcessRow = {
   pid: number
   ppid: number | null
-  /** The kernel's short name for the process (`ps -o ucomm`): its executable's file name, cut by
-   *  macOS to 16 characters (`Google Chrome He`). Never a path, an argument or a title the process
-   *  set itself, so nothing secret it was started with can show up here. */
+  /** The program's name, never a path or an argument, so nothing secret it was started with can
+   *  show up here. A Mac: the kernel's short name (`ps -o ucomm`), the executable's file name cut
+   *  to 16 characters (`Google Chrome He`). Linux: the executable's file name where this user may
+   *  read it, else the kernel's short name (15 characters, which a process can set itself).
+   *  Windows: the image's file name without `.exe`. */
   name: string
+  /** The owner's user name; null on Windows, where it cannot be read without elevation. */
   user: string | null
-  /** Percent of one core over the list's `cpuWindowMs` (Activity Monitor's "% CPU"). */
+  /** Percent of one core over the list's `cpuWindowMs` (Activity Monitor's "% CPU"): it can pass 100. */
   cpu: number | null
-  /** Physical footprint in bytes: Activity Monitor's "Memory" column (`top`'s MEM). */
+  /** Bytes, as the system's own tool shows a process's memory. A Mac: physical footprint, Activity
+   *  Monitor's "Memory" column (`top`'s MEM). Windows: private working set, Task Manager's
+   *  "Memory" column. Linux: resident set size (`top`'s RES), which counts shared pages in every
+   *  process that maps them. */
   mem: number | null
-  /** `top`'s POWER, which is meant to be Activity Monitor's "Energy Impact" (not checked). */
+  /** `top`'s POWER, which is meant to be Activity Monitor's "Energy Impact" (not checked). A Mac
+   *  only; null elsewhere. */
   energy: number | null
   /** Start time, epoch seconds. */
   start: number | null
@@ -201,9 +225,10 @@ export type ProcessColumns = {
 
 /** Why there is no process list for a machine. */
 export type ProcessUnavailable =
-  | 'not-mac' // only macOS lists processes
+  | 'not-mac' // a platform Fleet Monitor lists no processes on (the name is from 1.2, when only macOS did)
   | 'basic' // Fleet Monitor is not installed there, or installed but not running
-  | 'outdated' // Fleet Monitor there is older than 1.2: "Update Fleet Monitor to 1.2"
+  | 'outdated' // Fleet Monitor there is too old to list them: before 1.2 on a Mac, 1.3 elsewhere
+  | 'no-reader' // the machine cannot read its own list (Windows, when PowerShell cannot run the reader)
   | 'publishing-off' // it runs there, but its readings are not arriving (publishing off)
   | 'not-read-yet' // not known yet: still connecting, or its plugins or log not read yet
   | 'offline'
@@ -441,6 +466,9 @@ export type CliInfo = {
   /** The command a person types for Orca's CLI on this computer: `orca-ide` on Linux, where
    *  `orca` is GNOME's screen reader; `orca` elsewhere. */
   launcher?: 'orca' | 'orca-ide'
+  /** The GitHub CLI is installed on this computer, so the panel's "Star on GitHub" link can star
+   *  the project when pressed (src/star.ts) and need not only open its page. */
+  canStar?: boolean
 }
 
 /** The person's thresholds, so a panel can colour each metric and core the way health is judged. */

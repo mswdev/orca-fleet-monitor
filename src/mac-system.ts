@@ -55,6 +55,21 @@ export function isInterfaceName(name: unknown): name is string {
   return typeof name === 'string' && /^[A-Za-z][A-Za-z0-9._-]{0,15}$/.test(name)
 }
 
+/**
+ * A network interface's name in the shape a beacon carries (isInterfaceName), for the platforms
+ * whose own names need not fit it: Windows' adapter names ("Ethernet 3", "Wi-Fi"), and a Linux
+ * name that starts with a digit. Anything else than a letter, digit, `.`, `_` or `-` becomes `-`;
+ * what comes before the first letter is dropped; a name with nothing left is `net`.
+ */
+export function interfaceLabel(name: string): string {
+  const label = name
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[^A-Za-z]+/, '')
+    .slice(0, 16)
+    .replace(/-+$/, '')
+  return isInterfaceName(label) ? label : 'net'
+}
+
 /** The interface of the default route, from `route -n get default`, or null. */
 export function parseDefaultRoute(text: unknown): string | null {
   if (typeof text !== 'string' || text.length > MAX_OUTPUT_BYTES) return null
@@ -170,7 +185,7 @@ export function parsePmset(text: unknown): BatteryReading | null {
 /** What `fs.statfs` gives, or null when it cannot read the volume. */
 export type StatFs = (path: string) => { bsize: number; blocks: number; bavail: number } | null
 
-const realStatfs: StatFs = (path) => {
+export const realStatfs: StatFs = (path) => {
   try {
     const s = statfsSync(path)
     return { bsize: Number(s.bsize), blocks: Number(s.blocks), bavail: Number(s.bavail) }
@@ -193,7 +208,56 @@ export function diskSpaceOf(s: { bsize: number; blocks: number; bavail: number }
   return Number.isSafeInteger(total) ? { total, used } : null
 }
 
-type Held<T> = { value: T; at: number }
+/** A value and when it was read, on the reader's monotonic clock. */
+export type Held<T> = { value: T; at: number }
+
+/** What a system reader holds between reads, on any platform. Disk traffic may know only one of
+ *  read and write (a counter that went back gives none for that reading). */
+export type HeldSystem = {
+  net: Held<NetReading> | null
+  diskIo: Held<{ read: number | null; write: number | null }> | null
+  space: Held<{ total: number; used: number }> | null
+  gpu: Held<number> | null
+  battery: Held<BatteryReading> | null
+}
+
+/** What is known at `now`: each part with its age (from a second on), or null where there is
+ *  nothing young enough (SYSTEM_MAX_AGE). The same for every platform's reader. */
+export function systemSnapshot(held: HeldSystem, now: number): MacSystem {
+  const age = (part: { at: number } | null, max: number): number | null => {
+    if (!part) return null
+    const a = Math.max(0, Math.round(now - part.at))
+    return a <= max ? a : null
+  }
+  const withAge = <T extends object>(value: T, a: number, key: string): T => (a >= 1_000 ? { ...value, [key]: a } : value)
+  const netAge = age(held.net, SYSTEM_MAX_AGE.netMs)
+  const net = held.net && netAge !== null ? withAge(held.net.value, netAge, 'ageMs') : null
+  const ioAge = age(held.diskIo, SYSTEM_MAX_AGE.diskIoMs)
+  const spaceAge = age(held.space, SYSTEM_MAX_AGE.spaceMs)
+  let disk: DiskReading | null = null
+  if (ioAge !== null || spaceAge !== null) {
+    const io = ioAge !== null && held.diskIo ? held.diskIo.value : null
+    const space = spaceAge !== null && held.space ? held.space.value : null
+    disk = {
+      totalBytes: space?.total ?? null,
+      usedBytes: space?.used ?? null,
+      ...(space && spaceAge! >= 1_000 ? { spaceAgeMs: spaceAge! } : {}),
+      readBytesPerSec: io?.read ?? null,
+      writeBytesPerSec: io?.write ?? null,
+      ...(io && ioAge! >= 1_000 ? { ioAgeMs: ioAge! } : {})
+    }
+  }
+  const gpuAge = age(held.gpu, SYSTEM_MAX_AGE.gpuMs)
+  const gpu: GpuReading | null = held.gpu && gpuAge !== null ? withAge({ percent: held.gpu.value }, gpuAge, 'ageMs') : null
+  const batteryAge = age(held.battery, SYSTEM_MAX_AGE.batteryMs)
+  const battery = held.battery && batteryAge !== null ? withAge(held.battery.value, batteryAge, 'ageMs') : null
+  return { net, disk, gpu, battery }
+}
+
+/** Whether a part last tried at `triedAt` is due again (also when the clock went back). */
+export function due(triedAt: number, now: number, interval: number): boolean {
+  return now - triedAt >= interval || now < triedAt
+}
 
 /**
  * Reads a Mac's network, disk, GPU and battery, each on its own cadence. `refresh()` runs the
@@ -243,35 +307,7 @@ export class MacSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'darwin') return null
-    const now = this.mono()
-    const age = (held: { at: number } | null, max: number): number | null => {
-      if (!held) return null
-      const a = Math.max(0, Math.round(now - held.at))
-      return a <= max ? a : null
-    }
-    const withAge = <T extends object>(value: T, a: number, key: string): T => (a >= 1_000 ? { ...value, [key]: a } : value)
-    const netAge = age(this.net, SYSTEM_MAX_AGE.netMs)
-    const net = this.net && netAge !== null ? withAge(this.net.value, netAge, 'ageMs') : null
-    const ioAge = age(this.diskIo, SYSTEM_MAX_AGE.diskIoMs)
-    const spaceAge = age(this.space, SYSTEM_MAX_AGE.spaceMs)
-    let disk: DiskReading | null = null
-    if (ioAge !== null || spaceAge !== null) {
-      const io = ioAge !== null && this.diskIo ? this.diskIo.value : null
-      const space = spaceAge !== null && this.space ? this.space.value : null
-      disk = {
-        totalBytes: space?.total ?? null,
-        usedBytes: space?.used ?? null,
-        ...(space && spaceAge! >= 1_000 ? { spaceAgeMs: spaceAge! } : {}),
-        readBytesPerSec: io?.read ?? null,
-        writeBytesPerSec: io?.write ?? null,
-        ...(io && ioAge! >= 1_000 ? { ioAgeMs: ioAge! } : {})
-      }
-    }
-    const gpuAge = age(this.gpu, SYSTEM_MAX_AGE.gpuMs)
-    const gpu: GpuReading | null = this.gpu && gpuAge !== null ? withAge({ percent: this.gpu.value }, gpuAge, 'ageMs') : null
-    const batteryAge = age(this.battery, SYSTEM_MAX_AGE.batteryMs)
-    const battery = this.battery && batteryAge !== null ? withAge(this.battery.value, batteryAge, 'ageMs') : null
-    return { net, disk, gpu, battery }
+    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, gpu: this.gpu, battery: this.battery }, this.mono())
   }
 
   private async readDue(): Promise<void> {
@@ -370,8 +406,4 @@ export class MacSystemReader {
       }
     }
   }
-}
-
-function due(triedAt: number, now: number, interval: number): boolean {
-  return now - triedAt >= interval || now < triedAt
 }

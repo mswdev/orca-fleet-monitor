@@ -13,6 +13,9 @@ declare module 'orca' {
     'fleet.heartbeat': { output: { ok: true; mode: 'fast' | 'slow'; seq: number } }
     /** "Retry connection" on an offline machine: read it now rather than after its back-off. */
     'fleet.retry': { input: { id: string }; output: { ok: boolean } }
+    /** "Star on GitHub", pressed: stars this plugin's repository with the person's own `gh`.
+     *  `starred` is false wherever that could not be done (the panel then opens the page). */
+    'fleet.star': { output: { starred: boolean } }
     /** One machine's processes: this computer's whole list (read while asked), or a paired Mac's
      *  newest top list. Counts as a heartbeat. */
     'fleet.processes': { input: { id: string }; output: ProcessList }
