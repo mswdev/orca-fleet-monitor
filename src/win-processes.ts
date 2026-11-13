@@ -35,6 +35,11 @@ export const EMPTY_LIMIT = 5
 export const RETRY_BLOCKED_MS = 60 * 60_000
 /** How long PowerShell has to answer; a panel waits on this, and gets no list after it. */
 const PROC_TIMEOUT_MS = 10_000
+/** How long a caller waits in all, the time behind other requests included: under the panel's own
+ *  10 s for an answer. PowerShell answers one request at a time, and a command's first run may
+ *  take 20 s; a list asked for behind one is given up on here, and read all the same for the
+ *  next caller. */
+export const TABLE_DEADLINE_MS = 8_000
 /** The counters count in units of 100 ns. */
 const TICKS_PER_MS = 10_000
 const TICKS_PER_SECOND = 10_000_000
@@ -170,6 +175,8 @@ export type WindowsProcessSamplerDeps = {
   wall?: () => number
   platform?: string
   cores?: () => number
+  /** For the overall deadline of a list (a test seam). */
+  timers?: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void }
 }
 
 /**
@@ -189,6 +196,8 @@ export class WindowsProcessSampler {
   private reading: Promise<WindowsProcessReading | null> | null = null
   private table: { table: ProcessTable; of: WindowsProcessReading } | null = null
   /** How many readings in a row gave no list, and until when that is taken as "cannot". */
+  private readonly later: (fn: () => void, ms: number) => unknown
+  private readonly cancel: (handle: unknown) => void
   private empty = 0
   private blockedUntil = Number.NEGATIVE_INFINITY
 
@@ -198,6 +207,14 @@ export class WindowsProcessSampler {
     this.mono = deps.mono ?? (() => performance.now())
     this.wall = deps.wall ?? Date.now
     this.cores = deps.cores ?? (() => 0)
+    this.later =
+      deps.timers?.setTimeout ??
+      ((fn, ms) => {
+        const handle = setTimeout(fn, ms)
+        handle.unref?.()
+        return handle
+      })
+    this.cancel = deps.timers?.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
   }
 
   get supported(): boolean {
@@ -242,6 +259,27 @@ export class WindowsProcessSampler {
     // Taken to be unreadable here: nothing is asked until its hour is up.
     if (now < this.blockedUntil) return null
     if (cached && now - cached.of.at < LIST_CACHE_MS && now >= cached.of.at) return cached.table
+    return this.within(this.fresh(), TABLE_DEADLINE_MS)
+  }
+
+  /** `work`, or null once `ms` have passed; the work goes on, and its result is kept. */
+  private within<T>(work: Promise<T | null>, ms: number): Promise<T | null> {
+    return new Promise((resolve) => {
+      const timer = this.later(() => resolve(null), ms)
+      void work.then(
+        (value) => {
+          this.cancel(timer)
+          resolve(value)
+        },
+        () => {
+          this.cancel(timer)
+          resolve(null)
+        }
+      )
+    })
+  }
+
+  private async fresh(): Promise<ProcessTable | null> {
     const reading = await this.read()
     if (!reading) return null
     // Callers that shared the reading share its table too.

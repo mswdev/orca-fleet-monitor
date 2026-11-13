@@ -254,6 +254,15 @@ describe('the table', () => {
     assert.equal(buildProcessTable(now, before, 8).rows.find((r) => r.pid === 12)!.cpu, 50)
   })
 
+  test('new means later than the newest process the last reading saw, too', () => {
+    // The last reading began at 95 s and went on to list a process that started at 97 s. One that
+    // started at 96 s and is missing from it (its read failed) is not new.
+    const before = reading(100_000, [[10, 1_000, 50], [12, 40, 9_700]], 100_000, 9_500)
+    const now = reading(103_000, [[10, 1_000, 50], [12, 40, 9_700], [13, 600, 9_600], [14, 30, 9_800]])
+    const byPid = new Map(buildProcessTable(now, before, 8).rows.map((r) => [r.pid, r.cpu]))
+    assert.deepEqual([byPid.get(13), byPid.get(14)], [null, 10])
+  })
+
   test('without the uptime of the last reading, no unmatched process is taken for a new one', () => {
     const before = reading(100_000, [[10, 1_000, 50]])
     const now = reading(103_000, [[10, 1_300, 50], [12, 150, 10_250]])
@@ -413,11 +422,58 @@ describe('the process sampler', () => {
     assert.deepEqual(first!.rows.map((r) => [r.pid, r.start]), second.rows.map((r) => [r.pid, r.start]), 'the same processes keep the same start')
     // Pid 900 ends and a new process gets its number.
     pc.put({ pid: 900, comm: 'sleep', ppid: 4_100, utime: 20, stime: 10, start: 8_200_000, rss: 200 })
+    pc.state.uptime = '82010.00 1040500.00\n' // the computer has been up a little longer than that
     pc.time.advance(3_000)
     const third = (await pc.sampler.localTable())!
     const reused = third.rows.find((r) => r.pid === 900)!
     assert.deepEqual([reused.name, reused.user, reused.cpu, reused.start], ['sleep', 'example', 10, BOOT + 82_000])
     assert.equal(pc.sampler.latestTable(), third)
+  })
+
+  test('once the uptime is seen to be on another clock, it is not believed again', async () => {
+    const pc = desktop()
+    // A container five minutes old: its processes seem to have started far in the future.
+    pc.state.uptime = '300.00 280.00\n'
+    await pc.sampler.localTable()
+    // Weeks later the container is older than its processes' starts, and nothing shows the
+    // mismatch any more. It is the same wrong clock.
+    pc.state.uptime = '90000.00 80000.00\n'
+    pc.time.advance(5_000)
+    await pc.sampler.localTable()
+    pc.time.advance(5_000)
+    pc.put({ pid: 5000, comm: 'old-and-busy', ppid: 1, utime: 400_000, stime: 0, start: 8_100_000, rss: 100 })
+    const table = (await pc.sampler.localTable())!
+    assert.equal(table.rows.find((r) => r.pid === 5000)!.cpu, null)
+  })
+
+  test('the reading that finds the other clock out does not use the last one’s uptime either', async () => {
+    const pc = desktop()
+    // The first reading sees nothing odd: every process it lists started before this uptime.
+    pc.state.uptime = '82000.00 80000.00\n'
+    await pc.sampler.localTable()
+    pc.time.advance(5_000)
+    // Now a process whose start is beyond the uptime shows the mismatch, and with it comes an
+    // old process the first reading missed.
+    pc.put({ pid: 5000, comm: 'old-and-busy', ppid: 1, utime: 400_000, stime: 0, start: 8_210_000, rss: 100 })
+    pc.put({ pid: 5001, comm: 'tell-tale', ppid: 1, utime: 1, stime: 0, start: 9_000_000, rss: 10 })
+    const table = (await pc.sampler.localTable())!
+    assert.deepEqual([table.rows.find((r) => r.pid === 5000)!.cpu, table.rows.find((r) => r.pid === 5001)!.cpu], [null, null])
+  })
+
+  test('a computer that slept during a reading is not taken for a container', async () => {
+    const pc = desktop()
+    // The uptime is read before the pass and again after it; here a minute's sleep fell between,
+    // and a process started on waking. Against the second reading its start is not in the future.
+    let reads = 0
+    const before = '81500.00 1040000.00\n'
+    const after = '81561.00 1040000.00\n'
+    Object.defineProperty(pc.state, 'uptime', { get: () => ((reads += 1) % 2 === 1 ? before : after) })
+    pc.put({ pid: 6000, comm: 'woke', ppid: 1, utime: 5, stime: 0, start: 8_156_050, rss: 10 })
+    await pc.sampler.localTable()
+    pc.time.advance(5_000)
+    pc.put({ pid: 6001, comm: 'new', ppid: 1, utime: 100, stime: 0, start: 8_156_150, rss: 10 })
+    const table = (await pc.sampler.localTable())!
+    assert.equal(table.rows.find((r) => r.pid === 6001)!.cpu, 20, 'the uptime is still believed: a new process has its first figure')
   })
 
   test('an uptime on another clock than the start times (a container under LXCFS) is not used', async () => {

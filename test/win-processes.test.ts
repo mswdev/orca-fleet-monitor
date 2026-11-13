@@ -3,7 +3,7 @@
 import { assert, describe, test } from 'orca/testing'
 import type { ProcessSource } from '../src/monitor.ts'
 import { LIST_CACHE_MS, MAX_PROCESSES } from '../src/processes.ts'
-import { buildWindowsTable, EMPTY_LIMIT, parseProcAnswer, RETRY_BLOCKED_MS, startSeconds, windowsProcessName, WindowsProcessSampler, type WindowsProcessReading } from '../src/win-processes.ts'
+import { buildWindowsTable, EMPTY_LIMIT, parseProcAnswer, RETRY_BLOCKED_MS, startSeconds, TABLE_DEADLINE_MS, windowsProcessName, WindowsProcessSampler, type WindowsProcessReading } from '../src/win-processes.ts'
 import { FakeTime, flush } from './helpers.ts'
 
 /** A Windows file time (100 ns units since 1601) for a time in epoch seconds. */
@@ -343,14 +343,57 @@ test('a request PowerShell never answered is not a reading without a list', asyn
   assert.equal(sampler.unavailable(), true)
   // While it is taken to be unreadable, nothing is asked, by the panel or the 30 s beat.
   const before = asked
+  // The hour runs from the fifth empty reading, which was LIST_CACHE_MS ago.
+  const polled = 20 * 30_000
   for (let i = 0; i < 20; i += 1) {
     assert.equal(await sampler.publishTable(), null)
     assert.equal(await sampler.localTable(), null)
     time.advance(30_000)
   }
   assert.equal(asked, before)
-  assert.equal(sampler.unavailable(), true, 'and its hour is not pushed back by those')
-  time.advance(RETRY_BLOCKED_MS)
+  // Its hour is not pushed back by those: it ends when it was going to.
+  time.advance(RETRY_BLOCKED_MS - LIST_CACHE_MS - polled - 1)
+  assert.equal(sampler.unavailable(), true)
+  assert.equal(await sampler.localTable(), null)
+  assert.equal(asked, before, 'a millisecond before the hour is up, still nothing is asked')
+  time.advance(1)
+  assert.equal(sampler.unavailable(), false)
   await sampler.localTable()
   assert.equal(asked, before + 1, 'one try once the hour is up')
+})
+
+test('a list asked for behind a slow request is given up on in time for the panel, and kept for the next caller', async () => {
+  const time = new FakeTime()
+  let asked = 0
+  let finish: (result: { answered: boolean; value: unknown }) => void = () => {}
+  const sampler = new WindowsProcessSampler({
+    host: {
+      request: async () => null,
+      // PowerShell is busy with another command's first run: this one waits its turn.
+      ask: () => {
+        asked += 1
+        return new Promise((resolve) => (finish = resolve))
+      },
+      unavailable: false
+    },
+    mono: time.now,
+    wall: time.now,
+    platform: 'win32',
+    timers: time
+  })
+  let first: unknown = 'waiting'
+  void sampler.localTable().then((table) => (first = table))
+  time.advance(TABLE_DEADLINE_MS - 1)
+  await flush()
+  assert.equal(first, 'waiting')
+  time.advance(1)
+  await flush()
+  assert.equal(first, null, 'answered before the panel gives up on its own request')
+  assert.equal(sampler.unavailable(), false, 'a list not waited for is not a list that cannot be read')
+  // The request is still out: the next caller joins it, and gets the list it brings.
+  const second = sampler.localTable()
+  assert.equal(asked, 1)
+  finish({ answered: true, value: { t: 133_000_000_000_000_000, p: [[4, 0, 'System', 10, 2_000_000, 132_999_000_000_000_000]] } })
+  assert.equal((await second)?.rows.length, 1)
+  assert.equal(time.pending, 0, 'no timer is left behind')
 })

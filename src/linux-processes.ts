@@ -284,7 +284,7 @@ export type ProcReading = { at: number; wallAt: number; rows: ProcRow[]; sinceBo
  * on the monotonic clock, so setting the wall clock between two readings cannot bend it. And
  * "started since the last reading" is decided by the start time, which is exact here: only a
  * process that started when the last reading began or later (the same clock tick counts: both
- * times are whole ticks). One that was already running then, but is
+ * times are whole ticks), and no earlier than the newest process that reading saw. One that was already running then, but is
  * missing from that reading (its read failed), gets no CPU % rather than its whole life's CPU
  * time in one window; so does every unmatched process when the uptime could not be read.
  */
@@ -292,7 +292,9 @@ export function buildProcessTable(current: ProcReading, previous: ProcReading | 
   const windowMs = previous ? current.at - previous.at : null
   const usableWindow = windowMs !== null && windowMs >= MIN_CPU_WINDOW_MS ? windowMs : null
   const before = previous && usableWindow !== null ? new Map(previous.rows.map((r) => [r.pid, r])) : null
-  const lastBegan = previous?.sinceBootTicks ?? null
+  // Not before the newest start the last reading saw either: what it saw was there to be seen.
+  let lastBegan = previous?.sinceBootTicks ?? null
+  if (lastBegan !== null) for (const r of previous?.rows ?? []) lastBegan = Math.max(lastBegan, r.startTicks)
   const maxCpu = Math.max(100, cores * 100)
   const msPerTick = 1000 / CLOCK_TICKS_PER_SECOND
   const rows: ProcessRow[] = current.rows.map((r) => {
@@ -388,6 +390,8 @@ export class LinuxProcessSampler {
   private readonly platform: string
   private readonly cores: () => number
   private current: ProcReading | null = null
+  /** /proc/uptime was seen to be on another clock than process start times (LXCFS): for good. */
+  private otherClock = false
   private reading: Promise<ProcessTable | null> | null = null
   private table: { table: ProcessTable; at: number } | null = null
   private pageBytes: number | null = null
@@ -463,7 +467,6 @@ export class LinuxProcessSampler {
 
   private async readTable(): Promise<ProcessTable | null> {
     // Before the listing: whatever starts from here on is new to the next reading.
-    const began = this.mono()
     const sinceBootTicks = parseUptimeTicks(await this.file(PROC_UPTIME_PATH))
     const pids = pidsOf(await this.dir(PROC_PATH)).slice(0, MAX_PIDS_READ)
     if (pids.length === 0) return null
@@ -494,12 +497,18 @@ export class LinuxProcessSampler {
       }
     })
     // The uptime only helps if it is on the clock the start times are on. Under LXCFS it is the
-    // container's age while a process's start stays counted from the host's boot, and then every
-    // process seems to have started in the future: the uptime is not used.
-    const passTicks = Math.ceil((at - began) / (1000 / CLOCK_TICKS_PER_SECOND)) + CLOCK_TICKS_PER_SECOND
-    const sameClock = sinceBootTicks !== null && rows.every((r) => r.startTicks <= sinceBootTicks + passTicks)
-    const reading: ProcReading = { at, wallAt, rows, sinceBootTicks: sameClock ? sinceBootTicks : null }
-    const table = buildProcessTable(reading, this.current, safeCores(this.cores))
+    // container's age while a process's start stays counted from the host's boot, and then a
+    // process can seem to have started in the future. One such sighting settles it for good:
+    // later, when the container is older than its processes' starts, nothing would show it, and
+    // the wrong clock would be believed again. The uptime is read once more for this, after the
+    // pass: against the first reading, a computer that slept in between would look the same.
+    const upAfter = parseUptimeTicks(await this.file(PROC_UPTIME_PATH))
+    if (upAfter !== null && rows.some((r) => r.startTicks > upAfter + CLOCK_TICKS_PER_SECOND)) this.otherClock = true
+    const trusted = !this.otherClock && sinceBootTicks !== null && upAfter !== null
+    const reading: ProcReading = { at, wallAt, rows, sinceBootTicks: trusted ? sinceBootTicks : null }
+    // Found out only now: the last reading's uptime was on that clock too, and is not used either.
+    const previous = this.current && this.otherClock ? { ...this.current, sinceBootTicks: null } : this.current
+    const table = buildProcessTable(reading, previous, safeCores(this.cores))
     this.current = reading
     this.table = { table, at }
     return table

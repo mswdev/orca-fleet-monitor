@@ -569,10 +569,13 @@ describe('the "Star on GitHub" link', () => {
       asked += 1
       return new Promise<boolean>((resolve) => (answer = resolve))
     })
-    $(v.root, '[data-action="star"]')!.click()
+    const link = $(v.root, '[data-action="star"]')!
+    link.focus()
+    link.click()
     await settle()
     assert.equal(asked, 1)
     const busy = $(v.root, '[data-action="star"]')!
+    assert.ok(busy === link && v.document.activeElement === link, 'the same button, still focused, while it works')
     assert.deepEqual([busy.textContent, busy.getAttribute('aria-disabled')], ['Starring…', 'true'])
     busy.click()
     await settle()
@@ -581,6 +584,7 @@ describe('the "Star on GitHub" link', () => {
     await settle()
     // The same button, so the keyboard's focus stays where it was; it does nothing more.
     const done = $(v.root, '[data-action="star"]')!
+    assert.ok(done === link && v.document.activeElement === link, 'and after: focus never drops to the page')
     assert.deepEqual([done.textContent, done.getAttribute('aria-disabled')], ['Starred on GitHub. Thank you.', 'true'])
     assert.equal($(v.root, '[data-key="foot"]')!.getAttribute('aria-live'), 'polite')
     done.click()

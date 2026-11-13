@@ -383,6 +383,42 @@ describe('the PowerShell host', () => {
     host.stop()
   })
 
+  test('a command that stalls again on its retry is left alone for an hour that time', async () => {
+    const { time, ps, host } = setup()
+    /** `net` is answered, then `gpu` runs out of time; resolves when the pause after it is over. */
+    const stall = async (): Promise<void> => {
+      const net = host.request('net', 1_000)
+      const child = ps.children.at(-1)!
+      child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+      await net
+      const gpu = host.request('gpu', 1_000)
+      time.advance(1_000 + HOST_START_MS)
+      assert.equal(await gpu, null)
+      time.advance(HOST_RESTART_MAX_MS)
+    }
+    for (let i = 0; i < HOST_STALL_LIMIT; i += 1) await stall()
+    // Refused for ten minutes from the third stall; five have passed in the pause.
+    time.advance(HOST_FIRST_REFUSAL_MS - HOST_RESTART_MAX_MS)
+    const starts = ps.children.length
+    // Its one retry stalls too: now it is an hour.
+    await stall()
+    assert.equal(ps.children.length, starts + 1)
+    time.advance(HOST_GIVE_UP_MS - HOST_RESTART_MAX_MS - 1)
+    assert.equal(await host.request('gpu', 1_000), null, 'a millisecond short of the hour, not asked')
+    assert.equal(ps.children.at(-1)!.written.some((line) => line.endsWith(' gpu\n')), true)
+    const asksBefore = ps.children.flatMap((c) => c.written).filter((line) => line.endsWith(' gpu\n')).length
+    time.advance(1)
+    const net = host.request('net', 1_000)
+    const child = ps.children.at(-1)!
+    child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+    await net
+    const again = host.request('gpu', 1_000)
+    assert.equal(ps.children.flatMap((c) => c.written).filter((line) => line.endsWith(' gpu\n')).length, asksBefore + 1, 'asked again once the hour is up')
+    child.say(`${child.written.at(-1)!.split(' ')[0]} 5\n`)
+    assert.equal(await again, 5)
+    host.stop()
+  })
+
   test('a PowerShell that is only slow to start is not taken for one that cannot run', async () => {
     const { time, ps, host } = setup()
     for (let i = 0; i < HOST_GIVE_UP_STARTS + 2; i += 1) {
