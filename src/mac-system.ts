@@ -55,6 +55,21 @@ export function isInterfaceName(name: unknown): name is string {
   return typeof name === 'string' && /^[A-Za-z][A-Za-z0-9._-]{0,15}$/.test(name)
 }
 
+/**
+ * A network interface's name in the shape a beacon carries (isInterfaceName), for the platforms
+ * whose own names need not fit it: Windows' adapter names ("Ethernet 3", "Wi-Fi"), and a Linux
+ * name that starts with a digit. Anything else than a letter, digit, `.`, `_` or `-` becomes `-`;
+ * what comes before the first letter is dropped; a name with nothing left is `net`.
+ */
+export function interfaceLabel(name: string): string {
+  const label = name
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[^A-Za-z]+/, '')
+    .slice(0, 16)
+    .replace(/-+$/, '')
+  return isInterfaceName(label) ? label : 'net'
+}
+
 /** The interface of the default route, from `route -n get default`, or null. */
 export function parseDefaultRoute(text: unknown): string | null {
   if (typeof text !== 'string' || text.length > MAX_OUTPUT_BYTES) return null

@@ -14,7 +14,9 @@ import { createRunBounded, type ExecFile } from './mac-memory.ts'
 /** The one repository this can star: this plugin's own. Never taken from a setting or the panel. */
 export const STAR_REPOSITORY = 'mswdev/orca-fleet-monitor'
 export const STAR_ARGS = ['api', '--method', 'PUT', '-H', 'Accept: application/vnd.github+json', `/user/starred/${STAR_REPOSITORY}`] as const
-const STAR_TIMEOUT_MS = 15_000
+/** Short, so that when it fails the panel can still open the project's page on the same press:
+ *  Orca allows that only within a few seconds of it. */
+const STAR_TIMEOUT_MS = 4_000
 const STAR_MAX_BYTES = 64 * 1024
 export const AVAILABLE_CACHE_MS = 60_000
 /** `gh`'s own bounded runner, apart from the readers'. */

@@ -340,7 +340,17 @@ describe('Overview | Activity', () => {
     const v = mount(viewOf([local(), box]))
     v.handle.show('env-box')
     assert.equal($(v.root, '[role="tablist"]'), null)
-    assert.match(text($(v.root, '[data-key="activity-notice"]')), /^Fleet Monitor on Locked Box cannot read its network, disk and processes: Windows PowerShell/)
+    assert.match(text($(v.root, '[data-key="activity-notice"]')), /^Fleet Monitor on Locked Box cannot read its network, disk traffic, GPU, battery and processes: Windows PowerShell/)
+  })
+
+  test('disk space is read without PowerShell, so that machine may have a tab: the notice is in it too', async () => {
+    const space = { net: null, gpu: null, battery: null, disk: { totalBytes: 500 * GIB, usedBytes: 200 * GIB, readBytesPerSec: null, writeBytesPerSec: null } }
+    const box = base({ id: 'env-box', name: 'Locked Box', host: { ...base().host, platform: 'win32' }, system: space, processes: { state: 'unavailable', reason: 'no-reader', takenAt: null } })
+    const v = mount(viewOf([local(), box]))
+    await activity(v, 'env-box')
+    assert.ok($(v.root, '[role="tablist"]'), 'the disk tile gives it an Activity tab')
+    assert.match(text($(v.root, '[data-key="activity-notice"]')), /cannot read its network, disk traffic, GPU, battery and processes/)
+    assert.equal($(v.root, '.fm-procs-card'), null)
   })
 })
 

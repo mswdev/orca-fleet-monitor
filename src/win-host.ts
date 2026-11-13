@@ -31,6 +31,11 @@
 //   proc   every process from one read of the "Process" counters: pid, parent pid, name,
 //          cumulative CPU time, private working set and start time
 //
+// .NET keeps what it learns of the counters for the life of the process, a missing or broken
+// category included. So when a request fails, the script lets go of that (CloseSharedResources,
+// once a minute at most) and the next request looks afresh: counters repaired meanwhile (`lodctr
+// /R`) are found without restarting anything.
+//
 // .NET takes the counters' English names on every display language. Nothing here needs
 // elevation, and no path, command line or window title is read at all: a process's name is its
 // counter instance name, which is the image's file name without `.exe`.
@@ -73,6 +78,7 @@ $bad = [regex]'[\x00-\x1f]'
 $global:fmDisk = $null
 $global:fmGpu = $null
 $global:fmHasGpu = $null
+$global:fmReset = [DateTime]::MinValue
 $global:fmForms = $false
 
 function FmJson($value) {
@@ -202,6 +208,12 @@ while ($true) {
     }
   } catch {
     $r = $null
+    if (([DateTime]::UtcNow - $global:fmReset).TotalSeconds -ge 60) {
+      $global:fmReset = [DateTime]::UtcNow
+      $global:fmDisk = $null
+      $global:fmGpu = $null
+      try { [System.Diagnostics.PerformanceCounter]::CloseSharedResources() } catch { }
+    }
   }
   if ($r -isnot [string] -or $r.Length -eq 0) { $r = 'null' }
   $out.WriteLine($id + ' ' + $r)

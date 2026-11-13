@@ -20,7 +20,9 @@
 // computer with many processes using the GPU), so well under 0.1% of one core in all. Starting
 // PowerShell, and its first use of the performance counters, cost far more, once.
 import { performance } from 'node:perf_hooks'
-import { diskSpaceOf, due, isInterfaceName, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
+import { diskSpaceOf, due, interfaceLabel, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
+
+export { interfaceLabel }
 import type { BatteryReading, MacSystem, NetReading } from './model.ts'
 import { PowerShellHost } from './win-host.ts'
 
@@ -48,20 +50,6 @@ export function parseNetAnswer(answer: unknown): { name: string; rx: number; tx:
   return { name: a.n.slice(0, ADAPTER_NAME_MAX), rx: a.rx, tx: a.tx }
 }
 
-/**
- * An adapter's name (`Ethernet 2`, `Wi-Fi`, `vEthernet (Default Switch)`) in the shape of an
- * interface name, which is all a beacon carries (isInterfaceName): a letter first, then letters,
- * digits, `.`, `_` and `-`, 16 characters at most. Anything else becomes `-`; a name with nothing
- * left (one in another script, say) is `net`.
- */
-export function interfaceLabel(name: string): string {
-  const label = name
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/^[^A-Za-z]+/, '')
-    .slice(0, 16)
-    .replace(/-+$/, '')
-  return isInterfaceName(label) ? label : 'net'
-}
 
 /** `disk`'s answer, `{ r, w }`: cumulative bytes read and written over every physical disk. */
 export function parseDiskAnswer(answer: unknown): { read: number; write: number } | null {

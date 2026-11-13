@@ -392,8 +392,9 @@ function overview(fleet, ui, now) {
 /**
  * The quiet "Star on GitHub" link, below everything. Where this computer has the GitHub CLI, a
  * press stars the project with it and the link says so; where that fails, or there is no CLI, it
- * opens the project's page (only where the frame can: the desktop app). The page is opened within
- * a press, as Orca requires, so after a failed try it is offered as a link of its own.
+ * opens the project's page (only where the frame can: the desktop app). Orca opens a page only
+ * within a few seconds of a press, so when a failed try took longer than that, the page is offered
+ * as a link of its own.
  */
 function starFoot(fleet, ui) {
   const canStar = ui.canStar && fleet.canStar === true
@@ -854,6 +855,8 @@ function detail(m, ui, now, act, list) {
   const tab = act?.tabs ? ui.tab : 'overview'
   if (tab === 'activity') {
     sections.push(...activitySections(m, act, ui, now, list))
+    // Why part of this tab is missing (a Windows machine whose PowerShell cannot run the reader).
+    if (act?.notice) sections.push(h('p', { class: 'fm-notice', 'data-key': 'activity-notice' }, act.notice))
   } else if (m.status === 'connecting') {
     sections.push(h('section', { class: 'fm-section fm-skel', 'aria-label': 'Connecting', 'data-key': 'waiting' }, skeletonMetrics()))
   } else if (!m.online) {
@@ -942,14 +945,21 @@ export function mountFleetView(
   const workerNow = () => now() + (Number.isFinite(view?.clockOffsetMs) ? view.clockOffsetMs : 0)
   let fleet = toFleet(view, workerNow())
 
-  /** Opens the project's page. Called within a press, as Orca requires; Orca asks before opening
-   *  a host the first time. */
+  /**
+   * Opens the project's page; resolves false when Orca would not. Orca opens a page only within a
+   * few seconds of a press in this frame, and asks the person before a host the first time (their
+   * "no" is an answer, not a failure).
+   */
   function openRepository() {
-    if (typeof openExternal !== 'function') return
+    if (typeof openExternal !== 'function') return Promise.resolve(false)
     try {
-      void Promise.resolve(openExternal(REPOSITORY_URL)).catch(() => {})
+      return Promise.resolve(openExternal(REPOSITORY_URL)).then(
+        (answer) => !(answer && answer.opened === false && answer.reason !== 'cancelled'),
+        () => false
+      )
     } catch {
       // Not offered after all: nothing to open.
+      return Promise.resolve(false)
     }
   }
 
@@ -1184,15 +1194,25 @@ export function mountFleetView(
             .then(() => binding.star())
             .catch(() => false)
             .then((starred) => {
-              ui.star = starred === true ? 'done' : 'failed'
+              if (starred === true) return 'done'
+              // Could not star from here: the page instead, at once. Orca opens it only while the
+              // press is still fresh; past that, the link below offers it for a press of its own.
+              return openRepository().then((opened) => (opened ? 'idle' : 'failed'))
+            })
+            .then((state) => {
+              ui.star = state
               draw()
             })
           break
         }
-        openRepository()
+        void openRepository()
         break
       case 'star-open':
-        openRepository()
+        void openRepository().then((opened) => {
+          if (!opened) return
+          ui.star = 'idle'
+          draw()
+        })
         break
     }
   })

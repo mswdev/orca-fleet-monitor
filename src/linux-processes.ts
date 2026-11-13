@@ -55,6 +55,7 @@ import { LIST_CACHE_MS, MAX_PROCESSES, NAME_MAX, oneLineName, USER_MAX, type Pro
 
 export const PROC_PATH = '/proc'
 export const PROC_STAT_PATH = '/proc/stat'
+export const PROC_UPTIME_PATH = '/proc/uptime'
 export const AUXV_PATH = '/proc/self/auxv'
 export const PASSWD_PATH = '/etc/passwd'
 /** The kernel reports a process's CPU time, and its start after boot, in clock ticks of USER_HZ,
@@ -232,6 +233,23 @@ export function parseBootTime(text: unknown, maxBytes = MAX_FILE_BYTES): number 
   return seconds > 0 ? seconds : null
 }
 
+/** `/proc/uptime`'s first figure, seconds since boot, in clock ticks: the clock a process's
+ *  start time is on. Null when out of shape. */
+export function parseUptimeTicks(text: unknown): number | null {
+  if (typeof text !== 'string' || text.length > 256) return null
+  const match = /^\s*(\d{1,12})(?:\.(\d{1,3}))?\s/.exec(text)
+  if (!match) return null
+  const ticks = Math.floor(Number(`${match[1]}.${match[2] ?? '0'}`) * CLOCK_TICKS_PER_SECOND)
+  return Number.isSafeInteger(ticks) ? ticks : null
+}
+
+/** The kernel's short name with any directory dropped. An executable's own never has one; a
+ *  process that named itself with a path keeps only what follows its last `/`. */
+export function commName(comm: string): string {
+  const slash = comm.lastIndexOf('/')
+  return oneLineName(slash === -1 ? comm : comm.slice(slash + 1), NAME_MAX)
+}
+
 // --- a table from two readings ---------------------------------------------------------------
 
 /** One process of a reading. */
@@ -252,8 +270,11 @@ export type ProcRow = {
   mem: number | null
 }
 
-/** `at` is monotonic ms and `wallAt` wall ms, both when the last process had been read. */
-export type ProcReading = { at: number; wallAt: number; rows: ProcRow[] }
+/** `at` is monotonic ms and `wallAt` wall ms, both when the last process had been read.
+ *  `sinceBootTicks` is how long the computer had been up when this reading began, in clock ticks
+ *  (null when /proc/uptime could not be read): a process that started later than that was not
+ *  there for this reading to see. */
+export type ProcReading = { at: number; wallAt: number; rows: ProcRow[]; sinceBootTicks?: number | null }
 
 /**
  * A table from a reading and the one before it, with src/processes.ts's rules for CPU %: two
@@ -261,16 +282,16 @@ export type ProcReading = { at: number; wallAt: number; rows: ProcRow[] }
  * process started since the last reading has all its CPU time shared over the whole window; never
  * more than every core; one decimal. Two things differ from a Mac's table. The window is measured
  * on the monotonic clock, so setting the wall clock between two readings cannot bend it. And
- * "started since the last reading" is decided by the start time, which is exact here: a process
- * older than the newest one the last reading saw, but missing from it (a read that failed), gets
- * no CPU % rather than its whole life's CPU time in one window.
+ * "started since the last reading" is decided by the start time, which is exact here: only a
+ * process that started after the last reading began. One that was already running then, but is
+ * missing from that reading (its read failed), gets no CPU % rather than its whole life's CPU
+ * time in one window; so does every unmatched process when the uptime could not be read.
  */
 export function buildProcessTable(current: ProcReading, previous: ProcReading | null, cores = 0): ProcessTable {
   const windowMs = previous ? current.at - previous.at : null
   const usableWindow = windowMs !== null && windowMs >= MIN_CPU_WINDOW_MS ? windowMs : null
   const before = previous && usableWindow !== null ? new Map(previous.rows.map((r) => [r.pid, r])) : null
-  let newestBefore = -1
-  for (const r of before?.values() ?? []) newestBefore = Math.max(newestBefore, r.startTicks)
+  const lastBegan = previous?.sinceBootTicks ?? null
   const maxCpu = Math.max(100, cores * 100)
   const msPerTick = 1000 / CLOCK_TICKS_PER_SECOND
   const rows: ProcessRow[] = current.rows.map((r) => {
@@ -280,7 +301,7 @@ export function buildProcessTable(current: ProcReading, previous: ProcReading | 
       let ticks: number | null = null
       if (old && old.startTicks === r.startTicks) {
         if (r.cpuTicks >= old.cpuTicks) ticks = r.cpuTicks - old.cpuTicks
-      } else if (r.startTicks > newestBefore) {
+      } else if (lastBegan !== null && r.startTicks > lastBegan) {
         // Started since the last reading: all its CPU time was used in this window, and is
         // shared over the whole window (not over its shorter life, which would make every young
         // process look busy).
@@ -440,6 +461,8 @@ export class LinuxProcessSampler {
   }
 
   private async readTable(): Promise<ProcessTable | null> {
+    // Before the listing: whatever starts from here on is new to the next reading.
+    const sinceBootTicks = parseUptimeTicks(await this.file(PROC_UPTIME_PATH))
     const pids = pidsOf(await this.dir(PROC_PATH)).slice(0, MAX_PIDS_READ)
     if (pids.length === 0) return null
     const [pageBytes, bootSeconds] = await Promise.all([this.pageBytesNow(), this.bootSecondsNow()])
@@ -459,7 +482,7 @@ export class LinuxProcessSampler {
         ppid: stat.ppid,
         // The executable's file name; where it could not be read, the kernel's short name. A
         // process may give itself an empty one: its pid then stands in, as on a line from afar.
-        name: exe ?? (oneLineName(stat.comm, NAME_MAX) || String(stat.pid)),
+        name: exe ?? (commName(stat.comm) || String(stat.pid)),
         // An account /etc/passwd does not name (one from a directory service) shows as its uid.
         user: uid === null ? null : (users.get(uid) ?? String(uid)),
         cpuTicks: stat.cpuTicks,
@@ -468,7 +491,7 @@ export class LinuxProcessSampler {
         mem: Number.isSafeInteger(mem) ? mem : null
       }
     })
-    const reading: ProcReading = { at, wallAt, rows }
+    const reading: ProcReading = { at, wallAt, rows, sinceBootTicks }
     const table = buildProcessTable(reading, this.current, safeCores(this.cores))
     this.current = reading
     this.table = { table, at }

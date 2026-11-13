@@ -4,6 +4,7 @@
 import { fileURLToPath } from 'node:url'
 import { assert, describe, test } from 'orca/testing'
 import {
+  isLinuxInterfaceName,
   isRuntimeSuspended,
   LINUX_SPACE_PATHS,
   LinuxSystemReader,
@@ -58,8 +59,13 @@ describe('parsers', () => {
     assert.equal(parseProcNetRoute(routes(routeRow('eth0', '00000000', '0001', 100, '000000FF'))), null, '0.0.0.0/8 is not the default')
     assert.equal(parseProcNetRoute(routes(routeRow('eth0', '00000000', 'zz'))), null, 'flags out of shape')
     assert.equal(parseProcNetRoute(routes(routeRow('eth0', '00000000', '0003', -1))), null, 'metric out of shape')
-    assert.equal(parseProcNetRoute(routes(routeRow('-rf'))), null)
-    assert.equal(parseProcNetRoute(routes(routeRow('eth0;ls'))), null)
+    // Any name the kernel allows: it is only matched against /proc/net/dev, never run or published
+    // as it is (interfaceLabel shapes what is shown).
+    assert.equal(parseProcNetRoute(routes(routeRow('9lives'))), '9lives')
+    assert.equal(parseProcNetRoute(routes(routeRow('eth0;ls'))), 'eth0;ls')
+    assert.equal(parseProcNetRoute(routes(routeRow('a/b'))), null, 'a name the kernel refuses')
+    assert.equal(parseProcNetRoute(routes(routeRow('sixteen-chars-xx'))), null, 'longer than the kernel keeps')
+    assert.deepEqual(['eth0', '9lives', 'wl-p2', '.', '..', 'a:b', 'a b', ''].map(isLinuxInterfaceName), [true, true, true, false, false, false, false, false])
     assert.equal(parseProcNetRoute(routes(routeRow('eth0'), routeRow('tun0', '00000000', '0003', 50))), 'tun0')
     assert.equal(parseProcNetRoute('eth0 00000000 010200C0 0003'), null, 'a row cut short')
     assert.equal(parseProcNetRoute(42), null)
@@ -431,12 +437,62 @@ describe('LinuxSystemReader', () => {
     assert.equal(offline.readsOf('/proc/net/route'), 2)
   })
 
-  test('an interface name out of shape gives no reading', async () => {
+  test('an interface whose name a beacon could not carry is still read, under a name it can', async () => {
     const pc = laptop()
     pc.net.iface = '9lives'
     pc.write()
     await pc.reader.refresh()
-    assert.equal(pc.reader.snapshot()!.net, null, 'the beacon would refuse the name')
+    pc.state.t = 5_000
+    pc.net.rx += 50_000
+    pc.write()
+    await pc.reader.refresh()
+    assert.deepEqual(pc.reader.snapshot()!.net, { iface: 'lives', rxBytesPerSec: 10_000, txBytesPerSec: 0 })
+  })
+
+  test('hardware files are read one at a time, and nvidia-smi is not run while any NVIDIA GPU sleeps', async () => {
+    const pc = laptop()
+    let inFlight = 0
+    let most = 0
+    const reader = new LinuxSystemReader({
+      readFile: async (path) => {
+        const hardware = path.startsWith('/sys/class/power_supply/') || path.startsWith('/sys/class/drm/') || path.startsWith('/sys/bus/pci/')
+        if (hardware) {
+          inFlight += 1
+          most = Math.max(most, inFlight)
+        }
+        await Promise.resolve()
+        await Promise.resolve()
+        if (hardware) inFlight -= 1
+        return pc.files.get(path) ?? null
+      },
+      readDir: async (path) => {
+        if (path === '/proc/driver/nvidia/gpus') return ['0000:01:00.0', '0000:02:00.0']
+        const names = new Set<string>()
+        for (const file of pc.files.keys()) if (file.startsWith(`${path}/`)) names.add(file.slice(path.length + 1).split('/')[0]!)
+        return names.size > 0 ? [...names] : null
+      },
+      exec: async (file, args) => {
+        pc.state.runs.push([file, ...args])
+        return { error: null, stdout: '55\n' }
+      },
+      mono: () => pc.state.t,
+      statfs: () => pc.state.space,
+      platform: 'linux'
+    })
+    pc.files.set('/proc/driver/nvidia/version', 'NVRM version: NVIDIA UNIX x86_64 Kernel Module\n')
+    pc.files.set('/sys/bus/pci/devices/0000:01:00.0/power/runtime_status', 'active\n')
+    pc.files.set('/sys/bus/pci/devices/0000:02:00.0/power/runtime_status', 'suspended\n')
+    await reader.refresh()
+    assert.ok(most <= 2, `at most one battery read and one GPU read at a time, saw ${most}`)
+    assert.equal(reader.snapshot()?.battery?.percent, 70)
+    assert.deepEqual(pc.state.runs, [], 'one GPU awake, one asleep: asking would wake the second')
+    assert.equal(reader.snapshot()?.gpu?.percent, 20, 'the AMD card is read all the same')
+    // Both awake: asked.
+    pc.files.set('/sys/bus/pci/devices/0000:02:00.0/power/runtime_status', 'active\n')
+    pc.state.t = SYSTEM_CADENCE.gpuMs
+    await reader.refresh()
+    assert.equal(pc.state.runs.length, 1)
+    assert.equal(reader.snapshot()?.gpu?.percent, 55)
   })
 
   test('a failed read carries the last value until it is too old', async () => {

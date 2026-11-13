@@ -173,14 +173,16 @@ export function toActivityModel({ machine, list, ui = { sort: 'cpu', query: '' }
   // Fleet Monitor there is too old to read these: before 1.2 on a Mac, before 1.3 anywhere else.
   const older = live && !tabs && machine.processes?.state === 'unavailable' && machine.processes.reason === 'outdated'
   const needs = machine.platform === 'darwin' ? '1.2' : '1.3'
-  // Its Fleet Monitor is new enough, and says it cannot read them there.
-  const blocked = live && !tabs && machine.processes?.state === 'unavailable' && machine.processes.reason === 'no-reader'
+  // Its Fleet Monitor is new enough, and says it cannot read them there. Disk space is read
+  // without PowerShell, so there may still be a tab, with that one tile in it: the notice is
+  // shown either way, or the rest would be missing without a word.
+  const blocked = live && machine.processes?.state === 'unavailable' && machine.processes.reason === 'no-reader'
   return {
     tabs,
     notice: older
       ? `Update Fleet Monitor on ${machine.name} to ${needs} or later to see its network, disk and processes here.`
       : blocked
-        ? `Fleet Monitor on ${machine.name} cannot read its network, disk and processes: Windows PowerShell is not able to run its reader there.`
+        ? `Fleet Monitor on ${machine.name} cannot read its network, disk traffic, GPU, battery and processes: Windows PowerShell is not able to run its reader there.`
         : null,
     tiles,
     processes,

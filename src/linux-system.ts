@@ -32,7 +32,7 @@
 import { open, readdir, type FileHandle } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import { createRunBounded, type ExecFile } from './mac-memory.ts'
-import { diskSpaceOf, due, isInterfaceName, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
+import { diskSpaceOf, due, interfaceLabel, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
 import type { BatteryReading, MacSystem, NetReading } from './model.ts'
 
 export const PROC_NET_ROUTE_PATH = '/proc/net/route'
@@ -134,6 +134,12 @@ const DIGITS = /^\d{1,20}$/
 const RTF_UP = 0x0001
 const RTF_REJECT = 0x0200
 
+/** A name the kernel accepts for a network interface: 15 bytes at most, no space, `/` or `:`,
+ *  and not `.` or `..`. Wider than what a beacon carries (interfaceLabel makes it fit). */
+export function isLinuxInterfaceName(name: unknown): name is string {
+  return typeof name === 'string' && /^[^\s/:\u0000-\u001f\u007f]{1,15}$/.test(name) && name !== '.' && name !== '..'
+}
+
 /**
  * The interface of the IPv4 default route in /proc/net/route: the row whose Destination and Mask
  * are both 00000000, is up, and has the lowest Metric (the one the kernel uses; the first of
@@ -151,7 +157,7 @@ export function parseProcNetRoute(text: unknown): string | null {
     const flags = Number.parseInt(f[3]!, 16)
     const name = f[0]
     // A route that rejects everything has no interface (`*`), and is not a way out.
-    if ((flags & RTF_UP) === 0 || (flags & RTF_REJECT) !== 0 || !isInterfaceName(name)) continue
+    if ((flags & RTF_UP) === 0 || (flags & RTF_REJECT) !== 0 || !isLinuxInterfaceName(name)) continue
     const metric = Number(f[6])
     if (!best || metric < best.metric) best = { name, metric }
   }
@@ -174,7 +180,7 @@ export function parseProcNetIpv6Route(text: unknown): string | null {
     if (!/^[0-9a-f]{8}$/i.test(f[5]!) || !/^[0-9a-f]{8}$/i.test(f[8]!)) continue
     const flags = Number.parseInt(f[8]!, 16)
     const name = f[9]
-    if ((flags & RTF_UP) === 0 || (flags & RTF_REJECT) !== 0 || name === 'lo' || !isInterfaceName(name)) continue
+    if ((flags & RTF_UP) === 0 || (flags & RTF_REJECT) !== 0 || name === 'lo' || !isLinuxInterfaceName(name)) continue
     const metric = Number.parseInt(f[5]!, 16)
     if (!best || metric < best.metric) best = { name, metric }
   }
@@ -562,7 +568,9 @@ export class LinuxSystemReader {
       if (seconds >= 0.5) rates = { rx: Math.round((counters.rx - last.rx) / seconds), tx: Math.round((counters.tx - last.tx) / seconds) }
     }
     this.netCounters = { iface, ...counters, at }
-    this.net = { value: { iface, rxBytesPerSec: rates?.rx ?? null, txBytesPerSec: rates?.tx ?? null }, at }
+    // The kernel's name finds the counters; what is shown and published is that name in the
+    // shape a beacon carries, which nearly every one already has (`9lives` becomes `lives`).
+    this.net = { value: { iface: interfaceLabel(iface), rxBytesPerSec: rates?.rx ?? null, txBytesPerSec: rates?.tx ?? null }, at }
   }
 
   private async readDiskIo(now: number): Promise<void> {
@@ -591,7 +599,9 @@ export class LinuxSystemReader {
 
   private async readGpu(now: number): Promise<void> {
     this.gpuTriedAt = now
-    const [drm, nvidia] = await Promise.all([this.readDrmBusy(), this.readNvidia()])
+    // One after the other, as every read of a driver's file here is: see `readSupply`.
+    const drm = await this.readDrmBusy()
+    const nvidia = await this.readNvidia()
     const percent = drm === null ? nvidia : nvidia === null ? drm : Math.max(drm, nvidia)
     if (percent !== null) this.gpu = { value: percent, at: this.mono() }
   }
@@ -604,26 +614,25 @@ export class LinuxSystemReader {
     if (!names) return null
     // card0, card1: not their connectors (card0-DP-1) or render nodes (renderD128).
     const cards = names.filter((name) => /^card\d{1,3}$/.test(name)).slice(0, MAX_GPUS)
-    const values = await Promise.all(
-      cards.map(async (card) => {
-        const device = `${SYS_DRM_PATH}/${card}/device`
-        if (isRuntimeSuspended(await this.file(`${device}/power/runtime_status`))) return null
-        return parseGpuBusyPercent(await this.file(`${device}/gpu_busy_percent`))
-      })
-    )
     let best: number | null = null
-    for (const value of values) if (value !== null) best = best === null ? value : Math.max(best, value)
+    for (const card of cards) {
+      const device = `${SYS_DRM_PATH}/${card}/device`
+      if (isRuntimeSuspended(await this.file(`${device}/power/runtime_status`))) continue
+      const value = parseGpuBusyPercent(await this.file(`${device}/gpu_busy_percent`))
+      if (value !== null) best = best === null ? value : Math.max(best, value)
+    }
     return best
   }
 
   /** NVIDIA's own tool, only where its driver is loaded (the driver makes this /proc file), and
-   *  not while every NVIDIA GPU is asleep: `nvidia-smi` wakes them. */
+   *  not while any NVIDIA GPU is asleep: `nvidia-smi` asks every one, and wakes those. */
   private async readNvidia(): Promise<number | null> {
     if ((await this.file(NVIDIA_VERSION_PATH)) === null) return null
     const addresses = ((await this.dir(NVIDIA_GPUS_PATH)) ?? []).filter(isPciAddress).slice(0, MAX_GPUS)
     if (addresses.length > 0) {
-      const statuses = await Promise.all(addresses.map((address) => this.file(`${SYS_PCI_DEVICES_PATH}/${address}/power/runtime_status`)))
-      if (statuses.every(isRuntimeSuspended)) return null
+      for (const address of addresses) {
+        if (isRuntimeSuspended(await this.file(`${SYS_PCI_DEVICES_PATH}/${address}/power/runtime_status`))) return null
+      }
     }
     return parseNvidiaSmi(await this.run(NVIDIA_SMI_PATH, NVIDIA_SMI_ARGS, NVIDIA_SMI_MAX_BYTES))
   }
@@ -634,7 +643,8 @@ export class LinuxSystemReader {
     // No such directory: this kernel has no power supplies to ask about, which is not the same
     // as a computer without a battery.
     if (!names) return
-    const supplies = await Promise.all(names.sort().slice(0, MAX_SUPPLIES).map((name) => this.readSupply(name)))
+    const supplies: PowerSupply[] = []
+    for (const name of names.sort().slice(0, MAX_SUPPLIES)) supplies.push(await this.readSupply(name))
     // Entries, but not one whose type could be read: the read failed; it says nothing.
     if (supplies.length > 0 && supplies.every((supply) => attribute(supply, 'type') === null)) return
     this.battery = { value: parsePowerSupplies(supplies), at: this.mono() }
@@ -642,7 +652,10 @@ export class LinuxSystemReader {
 
   /** One supply's files, and no more of them than its kind needs. A mouse's or a headset's
    *  battery is asked only what it is (`type`, `scope`): asked for its charge, its driver may
-   *  put the question to the device itself, over Bluetooth, and wait for the answer. */
+   *  put the question to the device itself, over Bluetooth, and wait for the answer. The files
+   *  are read one at a time. A driver that hangs holds its lock, so every other read of that
+   *  battery would wait behind it, each on one of Node's four file threads: nine at once would
+   *  leave none for /proc, and so for the process list and the network. */
   private async readSupply(name: string): Promise<PowerSupply> {
     const dir = `${SYS_POWER_SUPPLY_PATH}/${name}`
     const type = await this.file(`${dir}/type`)
@@ -650,11 +663,8 @@ export class LinuxSystemReader {
     if (type.trim() !== 'Battery') return { type, online: await this.file(`${dir}/online`) }
     const scope = await this.file(`${dir}/scope`)
     if (scope !== null && scope.trim() === 'Device') return { type, scope }
-    const values = await Promise.all(BATTERY_FILES.map((file) => this.file(`${dir}/${file}`)))
     const supply: Record<string, string | null> = { type, scope }
-    BATTERY_FILES.forEach((file, i) => {
-      supply[file] = values[i] ?? null
-    })
+    for (const file of BATTERY_FILES) supply[file] = await this.file(`${dir}/${file}`)
     return supply
   }
 

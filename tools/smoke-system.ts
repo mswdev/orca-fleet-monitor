@@ -123,14 +123,21 @@ async function main(): Promise<void> {
   }
 }
 
-main()
-  .catch((error: unknown) => {
-    console.log(error)
-    failures.push('the script threw')
-  })
-  .finally(() => {
-    processes.stop()
-    host?.stop()
-    console.log(failures.length === 0 ? '\nall checks passed' : `\n${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`)
-    process.exit(failures.length === 0 ? 0 : 1)
-  })
+// Awaited at the top, with a timer Node has to wait for: the readers' own timers do not keep Node
+// running, and a run that ended while a read was still out would otherwise exit 0 having checked
+// nothing. A run that hangs fails.
+const watchdog = setTimeout(() => {
+  console.log('\nthe run did not finish in 120 s')
+  process.exit(1)
+}, 120_000)
+try {
+  await main()
+} catch (error) {
+  console.log(error)
+  failures.push('the script threw')
+}
+clearTimeout(watchdog)
+processes.stop()
+host?.stop()
+console.log(failures.length === 0 ? '\nall checks passed' : `\n${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`)
+process.exit(failures.length === 0 ? 0 : 1)

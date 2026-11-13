@@ -5,6 +5,7 @@ import { assert, describe, test } from 'orca/testing'
 import {
   AUXV_PATH,
   buildProcessTable,
+  commName,
   exeName,
   FALLBACK_PAGE_BYTES,
   isKernelThread,
@@ -12,6 +13,7 @@ import {
   parseAuxvPageSize,
   parseBootTime,
   parsePasswd,
+  parseUptimeTicks,
   parseProcStat,
   pidsOf,
   READ_BATCH,
@@ -211,15 +213,17 @@ describe('/etc/passwd, the auxiliary vector and the boot time', () => {
 })
 
 /** A reading with `at` and `wallAt` the same; each row is [pid, CPU ticks, start ticks]. */
-const reading = (at: number, rows: [number, number, number][], wallAt = at): ProcReading => ({
+/** `sinceBootTicks`: how long the computer had been up when the reading began (ticks). */
+const reading = (at: number, rows: [number, number, number][], wallAt = at, sinceBootTicks: number | null = null): ProcReading => ({
   at,
   wallAt,
+  sinceBootTicks,
   rows: rows.map(([pid, cpuTicks, startTicks]) => ({ pid, ppid: 1, name: `p${pid}`, user: 'example', cpuTicks, startTicks, start: 1_794_412_345 + Math.floor(startTicks / 100), mem: pid * 4_096 }))
 })
 
 describe('the table', () => {
   test('CPU % of one core from two readings; memory, start and owner from the newer', () => {
-    const before = reading(100_000, [[10, 1_000, 50], [11, 500, 60]])
+    const before = reading(100_000, [[10, 1_000, 50], [11, 500, 60]], 100_000, 10_000)
     const now = reading(103_000, [[10, 1_300, 50], [11, 500, 60], [12, 150, 10_250]])
     const table = buildProcessTable(now, before, 8)
     const byPid = new Map(table.rows.map((r) => [r.pid, r]))
@@ -231,16 +235,34 @@ describe('the table', () => {
   })
 
   test('a reused pid is another process: its own CPU time, not the difference', () => {
-    const table = buildProcessTable(reading(103_000, [[10, 30, 10_250]]), reading(100_000, [[10, 90_000, 50]]))
+    const table = buildProcessTable(reading(103_000, [[10, 30, 10_250]]), reading(100_000, [[10, 90_000, 50]], 100_000, 10_000))
     assert.equal(table.rows[0]!.cpu, 10, '0.3 s of CPU over the 3 s window')
   })
 
   test('a process the last reading missed gets no CPU %, not its whole life in one window', () => {
-    // Pid 11 started before pid 12 did, so it was there at the last reading; its read failed.
-    const before = reading(100_000, [[10, 1_000, 50], [12, 40, 9_000]])
-    const now = reading(103_000, [[10, 1_000, 50], [11, 500_000, 60], [12, 40, 9_000], [13, 30, 9_000]])
+    // The last reading began 95 s after boot. Pids 11 and 13 were running by then and their reads
+    // failed; pid 13 is even the newest process the computer had. Only pid 14 started since.
+    const before = reading(100_000, [[10, 1_000, 50], [12, 40, 9_000]], 100_000, 9_500)
+    const now = reading(103_000, [[10, 1_000, 50], [11, 500_000, 60], [12, 40, 9_000], [13, 240_000, 9_400], [14, 30, 9_600]])
     const byPid = new Map(buildProcessTable(now, before, 8).rows.map((r) => [r.pid, r.cpu]))
-    assert.deepEqual([byPid.get(10), byPid.get(11), byPid.get(12), byPid.get(13)], [0, null, 0, null])
+    assert.deepEqual([byPid.get(10), byPid.get(11), byPid.get(12), byPid.get(13), byPid.get(14)], [0, null, 0, null, 10])
+  })
+
+  test('without the uptime of the last reading, no unmatched process is taken for a new one', () => {
+    const before = reading(100_000, [[10, 1_000, 50]])
+    const now = reading(103_000, [[10, 1_300, 50], [12, 150, 10_250]])
+    const byPid = new Map(buildProcessTable(now, before, 8).rows.map((r) => [r.pid, r.cpu]))
+    assert.deepEqual([byPid.get(10), byPid.get(12)], [100, null])
+  })
+
+  test('the uptime in clock ticks, and a kernel name without any directory', () => {
+    assert.equal(parseUptimeTicks('81500.25 1040000.11\n'), 8_150_025)
+    assert.equal(parseUptimeTicks('7 3\n'), 700)
+    for (const bad of ['', 'up 3 days', '-5.00 1.00\n', null, 12, 'x'.repeat(300)]) assert.equal(parseUptimeTicks(bad), null)
+    assert.equal(commName('postgres'), 'postgres')
+    assert.equal(commName('/tmp/secret'), 'secret', 'a process that named itself with a path')
+    assert.equal(commName('a/b/c'), 'c')
+    assert.equal(commName('/tmp/dir/'), '', 'nothing after the last slash: the pid stands in')
   })
 
   test('no reading before, readings too close, a counter that went back, and the cap', () => {
@@ -271,6 +293,8 @@ function fakeProc(platform = 'linux') {
   const state = {
     passwd: fixtureText('linux-passwd.txt') as string | null,
     procStat: `cpu  412034 1204 91204 81204120 4120 0 912 0 0 0\nbtime ${BOOT}\nprocesses 412034\n` as string | null,
+    /** /proc/uptime: up for 81,500 s, after every process below started. */
+    uptime: '81500.00 1040000.00\n' as string | null,
     auxv: auxvWith(4_096) as Uint8Array | null,
     /** Pids the listing still shows although the process has ended. */
     ghosts: [] as number[],
@@ -297,6 +321,7 @@ function fakeProc(platform = 'linux') {
     state.inFlight -= 1
     if (path === '/etc/passwd') return state.passwd
     if (path === '/proc/stat') return state.procStat
+    if (path === '/proc/uptime') return state.uptime
     const match = /^\/proc\/(\d+)\/stat$/.exec(path)
     const proc = match ? procs.get(Number(match[1])) : undefined
     return proc ? statLine(proc) : null
@@ -359,7 +384,7 @@ describe('the process sampler', () => {
     assert.equal(pc.sampler.latestTable(), table)
     // The privacy rule: of a process, its stat file, its directory's owner and where its exe
     // link points, and nothing else. No link could be read here, so each has its kernel name.
-    const allowed = /^(?:\/proc\/\d+\/stat|\/proc\/stat|\/proc\/self\/auxv|\/etc\/passwd)$/
+    const allowed = /^(?:\/proc\/\d+\/stat|\/proc\/stat|\/proc\/uptime|\/proc\/self\/auxv|\/etc\/passwd)$/
     assert.deepEqual(pc.state.reads.filter((path) => !allowed.test(path)), [])
     assert.equal(pc.state.reads.some((path) => /cmdline|environ|exe|cwd|status|comm/.test(path)), false)
     assert.deepEqual(pc.state.owners.sort(), ['/proc/1', '/proc/4100', '/proc/4242', '/proc/900'], 'no owner is asked of a kernel thread')

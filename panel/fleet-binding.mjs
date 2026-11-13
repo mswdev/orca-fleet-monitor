@@ -15,8 +15,8 @@
 
 export const HEARTBEAT_MS = 5_000
 const REQUEST_TIMEOUT_MS = 10_000
-/** `gh` talks to GitHub: longer than a read of the worker's own state. */
-const STAR_TIMEOUT_MS = 20_000
+/** A little over the worker's own limit for `gh` (src/star.ts), so its answer is the one heard. */
+const STAR_TIMEOUT_MS = 6_000
 /** How often watchProcesses asks: this computer's list is read only while asked (its memory
  *  figures come every 5 s, as Activity Monitor's do), and a paired Mac publishes its top list
  *  about every 30 s, which this computer reads within 5 s while a panel is open. */
