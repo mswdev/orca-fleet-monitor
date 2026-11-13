@@ -642,12 +642,11 @@ function workspacesSection(m) {
 }
 
 const INSTALL_TEXT = {
-  absent: 'Install Fleet Monitor on this machine for full detail',
+  absent: 'Install Fleet Monitor on this machine for measured CPU, activity and processes',
   installed: 'Fleet Monitor is installed on this machine but not running',
   quiet: 'Fleet Monitor runs on this machine, but its readings are not arriving'
 }
-/** On a Mac, what installing it adds is said in so many words. Activity (network, disk and the
- *  process list) is a Mac's only. */
+/** On a Mac, installing it also replaces Orca's memory pressure figure with RAM in use. */
 const INSTALL_TEXT_MAC = {
   ...INSTALL_TEXT,
   absent: 'Install Fleet Monitor on this machine for real RAM usage, activity and processes'

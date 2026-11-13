@@ -62,6 +62,9 @@ export type MergeInput = {
 /** A last-known largest process older than this is no longer shown. */
 export const LARGEST_MAX_AGE_MS = 15 * 60_000
 
+/** Where Fleet Monitor lists processes: macOS (1.2), Linux and Windows (1.3). */
+export const PROCESS_PLATFORMS: ReadonlySet<string> = new Set(['darwin', 'linux', 'win32'])
+
 /** What `fleet.processes` can give for a machine as merged. */
 export function processAvailability(input: Pick<MergeInput, 'kind' | 'status' | 'local' | 'platform' | 'processLine' | 'beacon' | 'lastLargest'> & { now?: number }, fresh: BeaconRecord | null): ProcessAvailability {
   // The last-known largest process rides on every state, with its age, until it is too old: a
@@ -74,7 +77,7 @@ export function processAvailability(input: Pick<MergeInput, 'kind' | 'status' | 
   const line = input.processLine ?? null
   if (input.kind === 'local') {
     const platform = input.local?.platform || input.platform || null
-    return platform === 'darwin' ? { state: 'full', reason: null, takenAt: line?.takenAt ?? null, ...last } : none('not-mac')
+    return platform && PROCESS_PLATFORMS.has(platform) ? { state: 'full', reason: null, takenAt: line?.takenAt ?? null, ...last } : none('not-mac')
   }
   if (input.status === 'connecting') return none('not-read-yet')
   if (input.status !== 'online') return none('offline')
@@ -84,8 +87,9 @@ export function processAvailability(input: Pick<MergeInput, 'kind' | 'status' | 
     if (plugin === 'running') return none(input.beacon?.logRead ? 'publishing-off' : 'not-read-yet')
     return none('basic')
   }
-  if (fresh.platform !== 'darwin') return none('not-mac')
-  // A 1.2 Mac publishing its readings always says it publishes its processes.
+  if (!PROCESS_PLATFORMS.has(fresh.platform)) return none('not-mac')
+  // A copy that lists processes there (1.2 on a Mac, 1.3 on Linux and Windows) and publishes its
+  // readings always says it publishes its processes.
   if (!fresh.publishesProcesses) return none('outdated')
   return line ? { state: 'top', reason: null, takenAt: line.takenAt, ...last } : { state: 'waiting', reason: null, takenAt: null, ...last }
 }
@@ -228,7 +232,8 @@ export function mergeMachine(input: MergeInput): MachineState {
     },
     updatedAt: input.now
   }
-  // Network, disk, GPU and battery: this Mac's sampler, or a fresh beacon from a Mac with 1.2.
+  // Network, disk, GPU and battery: this computer's sampler, or a fresh beacon from a machine
+  // whose Fleet Monitor reads them (1.2 on a Mac, 1.3 on Linux and Windows).
   const system = local ? (local.system ?? null) : fresh ? (fresh.system ?? null) : null
   if (system) state.system = system
   state.processes = processAvailability(input, fresh)

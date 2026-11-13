@@ -168,11 +168,12 @@ export function toActivityModel({ machine, list, ui = { sort: 'cpu', query: '' }
   const tiles = live ? tilesOf(machine) : { network: null, disk: null, gpu: null, battery: null }
   const processes = live ? processesOf(machine, list, ui, now) : null
   const tabs = live && (processes !== null || Object.values(tiles).some(Boolean))
-  // Fleet Monitor there is older than 1.2.
+  // Fleet Monitor there is too old to read these: before 1.2 on a Mac, before 1.3 anywhere else.
   const older = live && !tabs && machine.processes?.state === 'unavailable' && machine.processes.reason === 'outdated'
+  const needs = machine.platform === 'darwin' ? '1.2' : '1.3'
   return {
     tabs,
-    notice: older ? `Update Fleet Monitor on ${machine.name} to 1.2 or later to see its network, disk and processes here.` : null,
+    notice: older ? `Update Fleet Monitor on ${machine.name} to ${needs} or later to see its network, disk and processes here.` : null,
     tiles,
     processes,
     suggest: suggestOf(machine)
@@ -531,7 +532,7 @@ function head(p) {
     { class: 'fm-proc-head', 'aria-hidden': 'true', 'data-key': 'proc-head' },
     h('span', { class: key('name') }, 'Name'),
     h('span', { class: 'fm-proc-hint' }),
-    h('span', { class: ['fm-proc-cpu', key('cpu') ?? (p.sort === 'name' ? 'is-key' : null)], title: 'Percent of one core, as Activity Monitor shows it: a process busy on four cores shows 400%' }, CPU_HEAD),
+    h('span', { class: ['fm-proc-cpu', key('cpu') ?? (p.sort === 'name' ? 'is-key' : null)], title: 'Percent of one core: a process busy on four cores shows 400%' }, CPU_HEAD),
     p.energy ? h('span', { class: ['fm-proc-energy', key('energy')] }, 'Energy') : null,
     h('span', { class: ['fm-proc-mem', key('memory')] }, 'Memory')
   )

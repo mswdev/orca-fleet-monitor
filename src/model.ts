@@ -201,9 +201,9 @@ export type ProcessColumns = {
 
 /** Why there is no process list for a machine. */
 export type ProcessUnavailable =
-  | 'not-mac' // only macOS lists processes
+  | 'not-mac' // a platform Fleet Monitor lists no processes on (the name is from 1.2, when only macOS did)
   | 'basic' // Fleet Monitor is not installed there, or installed but not running
-  | 'outdated' // Fleet Monitor there is older than 1.2: "Update Fleet Monitor to 1.2"
+  | 'outdated' // Fleet Monitor there is too old to list them: before 1.2 on a Mac, 1.3 elsewhere
   | 'publishing-off' // it runs there, but its readings are not arriving (publishing off)
   | 'not-read-yet' // not known yet: still connecting, or its plugins or log not read yet
   | 'offline'

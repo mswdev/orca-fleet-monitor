@@ -44,8 +44,13 @@ describe('merge', () => {
     assert.deepEqual(state.processes, { state: 'full', reason: null, takenAt: 5, largest: { pid: 9, name: 'big', mem: 7 }, largestAt: 0, memAgeMs: 1 })
     assert.deepEqual(historyPointOf(state, 3), { t: 3, cpu: 42.5, mem: null, rx: 1_234.6, tx: 99, dr: 50, dw: 60, gpu: 33.33, bat: 71.26 })
     const linux = mergeMachine({ id: 'local', name: 'This', kind: 'local', now: 1, status: 'online', lastSeenAt: 1, latencyMs: null, error: null, health: DEFAULT_HEALTH, local: localSample() })
-    assert.deepEqual(linux.processes, { state: 'unavailable', reason: 'not-mac', takenAt: null, largest: null, largestAt: null, memAgeMs: null })
+    assert.deepEqual(linux.processes, { state: 'full', reason: null, takenAt: null, largest: null, largestAt: null, memAgeMs: null }, 'Linux lists its processes from 1.3')
     assert.equal(linux.system, undefined)
+    const windows = mergeMachine({ id: 'local', name: 'This', kind: 'local', now: 1, status: 'online', lastSeenAt: 1, latencyMs: null, error: null, health: DEFAULT_HEALTH, local: localSample({ platform: 'win32', system: SYSTEM }) })
+    assert.equal(windows.processes?.state, 'full')
+    assert.deepEqual(windows.system, SYSTEM, 'and its network, disk, GPU and battery are shown like a Mac\'s')
+    const other = mergeMachine({ id: 'local', name: 'This', kind: 'local', now: 1, status: 'online', lastSeenAt: 1, latencyMs: null, error: null, health: DEFAULT_HEALTH, local: localSample({ platform: 'freebsd' }) })
+    assert.deepEqual(other.processes, { state: 'unavailable', reason: 'not-mac', takenAt: null, largest: null, largestAt: null, memAgeMs: null })
   })
 
   test('a remote: a fresh 1.2 beacon\'s readings, and what its process list is', () => {
@@ -65,8 +70,16 @@ describe('merge', () => {
     assert.equal(merge({ beacon: { ...beacon(null, false), remotePlugin: 'unknown' } }).processes?.reason, 'not-read-yet')
     assert.equal(merge({ beacon: { ...beacon(null, false), remotePlugin: 'absent' } }).processes?.reason, 'basic')
     assert.equal(merge({ status: 'connecting' }).processes?.reason, 'not-read-yet')
-    const linux = decodeBeacon(encodeBeacon(localSample({ platform: 'linux' }), { run: 'r', seq: 1, intervalMs: 5_000, processes: true }))!
-    assert.equal(merge({ beacon: beacon(linux) }).processes?.reason, 'not-mac')
+    // Linux and Windows list processes from 1.3; a 1.2 copy there says nothing of publishing them.
+    for (const platform of ['linux', 'win32']) {
+      const publishing = decodeBeacon(encodeBeacon(localSample({ platform, system: SYSTEM }), { run: 'r', seq: 1, intervalMs: 5_000, processes: true }))!
+      assert.equal(merge({ beacon: beacon(publishing), processLine: { takenAt: 900 } }).processes?.state, 'top', platform)
+      assert.equal(merge({ beacon: beacon(publishing) }).system?.net?.iface, 'en0', platform)
+      const onOneTwo = decodeBeacon(encodeBeacon(localSample({ platform }), { run: 'r', seq: 1, intervalMs: 5_000 }))!
+      assert.equal(merge({ beacon: beacon(onOneTwo) }).processes?.reason, 'outdated', platform)
+    }
+    const other = decodeBeacon(encodeBeacon(localSample({ platform: 'freebsd' }), { run: 'r', seq: 1, intervalMs: 5_000, processes: true }))!
+    assert.equal(merge({ beacon: beacon(other) }).processes?.reason, 'not-mac')
     assert.deepEqual(processAvailability({ kind: 'local', status: 'online', platform: 'darwin' }, null), { state: 'full', reason: null, takenAt: null, largest: null, largestAt: null, memAgeMs: null })
   })
 

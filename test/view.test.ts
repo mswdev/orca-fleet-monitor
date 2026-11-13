@@ -478,7 +478,7 @@ describe('memory (1.1)', () => {
     const memory = card.querySelectorAll('.fm-metric')[1]!
     assert.deepEqual([text($(memory, '.fm-metric-label')!), text($(memory, '.fm-big')!), text($(memory, '.fm-sub')!)], ['Memory', '25%', '8/32 GB'])
     v.handle.show('env-l')
-    assert.equal(text($(v.root, '.fm-install-text')!), 'Install Fleet Monitor on this machine for full detail')
+    assert.equal(text($(v.root, '.fm-install-text')!), 'Install Fleet Monitor on this machine for measured CPU, activity and processes')
     assert.equal($(v.root, '[data-key="pressure-note"]'), null)
   })
 

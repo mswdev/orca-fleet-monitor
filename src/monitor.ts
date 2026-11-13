@@ -55,8 +55,11 @@ export type MonitorDeps = {
   declaredCommands?: readonly string[]
   /** This computer's platform; process.platform when not given. */
   platform?: string
-  /** This Mac's processes (src/processes.ts ProcessSampler); absent where there are none to list. */
+  /** This computer's processes (src/processes.ts on a Mac, src/linux-processes.ts,
+   *  src/win-processes.ts); absent where there are none to list. */
   processes?: ProcessSource | null
+  /** Ends whatever the readers keep running that nothing else stops (Windows' PowerShell process). */
+  dispose?: () => void
   /** Wall clock, epoch ms (process tables carry wall times); Date.now when not given. */
   wall?: () => number
 }
@@ -394,6 +397,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       deps.clearInterval(tickTimer)
       processStopped = true
       processes?.stop()
+      deps.dispose?.()
       if (statusTimer !== null) deps.clearTimeout(statusTimer)
       activeBridge.dispose()
       activePoller.stop()

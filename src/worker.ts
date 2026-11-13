@@ -8,11 +8,16 @@ import { performance } from 'node:perf_hooks'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { createProcessRunner, resolveCli, workerCliEnvironment } from './cli.ts'
 import { readCoreGroups } from './core-groups.ts'
+import { LinuxProcessSampler } from './linux-processes.ts'
+import { LinuxSystemReader } from './linux-system.ts'
 import { MacMemoryReader } from './mac-memory.ts'
 import { MacSystemReader } from './mac-system.ts'
 import { ProcessSampler } from './processes.ts'
-import { startFleetMonitor, type FleetMonitor, type MonitorDeps } from './monitor.ts'
-import { LocalSampler, realOs } from './sampler.ts'
+import { startFleetMonitor, type FleetMonitor, type MonitorDeps, type ProcessSource } from './monitor.ts'
+import { LocalSampler, realOs, type SystemReader } from './sampler.ts'
+import { PowerShellHost } from './win-host.ts'
+import { WindowsProcessSampler } from './win-processes.ts'
+import { WindowsSystemReader } from './win-system.ts'
 
 /** What to call this computer until Orca's own name for it arrives (`orca host list`): the
  *  hostname up to its first dot (`build-box.local` and `desk.localdomain` lose their suffix). */
@@ -57,16 +62,33 @@ export function realDeps(): MonitorDeps {
     handle.unref?.()
     return handle
   }
-  // On a Mac, each sample also reads memory as Activity Monitor counts it (one vm_stat, one sysctl),
-  // and network, disk, GPU and battery on their own cadences (src/mac-system.ts).
-  const mac = os.platform() === 'darwin'
+  // On a Mac, each sample also reads memory as Activity Monitor counts it (one vm_stat, one sysctl).
+  // On a Mac, Linux and Windows it reads network, disk, GPU and battery on their own cadences, and
+  // the process list when asked: each platform has its own readers (src/mac-system.ts and
+  // src/processes.ts, src/linux-*.ts, src/win-*.ts). Any other platform has neither.
+  const platform = os.platform()
+  const mac = platform === 'darwin'
   const memory = mac ? new MacMemoryReader({ osTotal: () => os.totalmem() }) : null
   const own: { sampler: LocalSampler | null } = { sampler: null }
-  // The I/O Kit reads wait while macOS memory pressure is critical.
-  const system = mac ? new MacSystemReader({ heavyAllowed: () => own.sampler?.latest()?.macMemory?.pressure !== 'critical' }) : null
+  const cores = (): number => os.cpus().length
+  // Windows: one PowerShell process answers both readers (src/win-host.ts); nothing starts until
+  // the first reading is asked for.
+  const host = platform === 'win32' ? new PowerShellHost() : null
+  let system: SystemReader | null = null
+  let processes: ProcessSource | null = null
+  if (mac) {
+    // The I/O Kit reads wait while macOS memory pressure is critical.
+    system = new MacSystemReader({ heavyAllowed: () => own.sampler?.latest()?.macMemory?.pressure !== 'critical' })
+    processes = new ProcessSampler({ cores })
+  } else if (platform === 'linux') {
+    system = new LinuxSystemReader()
+    processes = new LinuxProcessSampler({ cores })
+  } else if (host) {
+    system = new WindowsSystemReader({ host })
+    processes = new WindowsProcessSampler({ host, cores })
+  }
   const sampler = new LocalSampler(realOs, memory, undefined, {}, system)
   own.sampler = sampler
-  const processes = mac ? new ProcessSampler({ cores: () => os.cpus().length }) : null
   // Once per worker start; until it answers (and wherever there is no split) cores are one group.
   void readCoreGroups(os.platform(), os.cpus().length).then((groups) => sampler.setCoreGroups(groups))
   const ownFile = workerFile()
@@ -84,6 +106,7 @@ export function realDeps(): MonitorDeps {
     workerFile: ownFile,
     declaredCommands: declaredCommands(),
     processes,
+    dispose: () => host?.stop(),
     wall: Date.now
   }
 }

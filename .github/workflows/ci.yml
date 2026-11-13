@@ -65,6 +65,23 @@ jobs:
 
   # Publishes main's coverage totals to the `badges` branch, where the README badge reads
   # `total.lines.pct` through a shields.io dynamic JSON badge. The first run creates the branch.
+  # The system and process readers against a real Linux, Windows and macOS. The unit tests feed the
+  # parsers recorded text; this is where a file or counter that looks different is caught. Plain
+  # Node, nothing installed: the readers have no dependencies. A runner has no GPU and no battery.
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - run: node tools/smoke-system.ts
+
   coverage-badge:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
