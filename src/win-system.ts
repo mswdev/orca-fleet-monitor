@@ -15,10 +15,9 @@
 // read that fails carries the last value for a while longer, then the value is dropped. Every
 // answer is parsed defensively: a figure out of shape is left out, never guessed.
 //
-// Cost: estimated, not measured, because this was written without a Windows machine. Once
-// PowerShell is running, each request should cost a few ms of its CPU (`gpu` some tens of ms on a
-// computer with many processes using the GPU), so well under 0.1% of one core in all. Starting
-// PowerShell, and its first use of the performance counters, cost far more, once.
+// Cost, on a 4-core CI machine (src/win-host.ts has the figures): once PowerShell is running, a
+// refresh is answered in about 20 ms. Not measured on a desktop, nor with a real GPU, where `gpu`
+// reads one counter for each process using each engine.
 import { performance } from 'node:perf_hooks'
 import { diskSpaceOf, due, interfaceLabel, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
 

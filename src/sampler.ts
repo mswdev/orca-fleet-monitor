@@ -137,8 +137,9 @@ export class LocalSampler {
   private generation = 0
 
   /** `memory` reads a Mac's memory (null elsewhere); `mono` is a monotonic clock in ms; `timers`
-   *  are for the read's deadline (test seams); `system` reads a Mac's network, disk, GPU and
-   *  battery (null elsewhere), started with each prepare() but never waited for. */
+   *  are for the reads' deadlines (test seams); `system` reads network, disk, GPU and battery
+   *  (null on a platform without a reader), started with each prepare() and waited for
+   *  SYSTEM_WAIT_MS at most. */
   constructor(
     source: OsSource = realOs,
     memory: MemoryReader | null = null,

@@ -1,5 +1,7 @@
 // This Windows computer's processes, from one read of the "Process" performance counters by the
-// resident PowerShell (src/win-host.ts, `proc`), which every user may make without elevation:
+// resident PowerShell (src/win-host.ts, `proc`). A signed-in user may read them without
+// elevation; a standard user's service, scheduled task or SSH session may not (that needs the
+// Performance Monitor Users group), and then there is no list, which the panel says:
 //
 //   ID Process, Creating Process ID   pid and parent pid (the parent may be long gone)
 //   % Processor Time                  its raw value: cumulative CPU time, user + kernel, in units
@@ -20,13 +22,17 @@
 // No path, command line or window title is read at all, so none can be published, answered or
 // logged.
 //
-// Cost: estimated, not measured, because this was written without a Windows machine. One read
-// should cost some tens of ms of PowerShell's CPU with a few hundred processes.
+// Cost, on a 4-core CI machine with about 150 processes: a read is answered in about 10 ms. Not
+// measured on a desktop with several hundred.
 import { performance } from 'node:perf_hooks'
 import type { ProcessRow } from './model.ts'
 import { LIST_CACHE_MS, MAX_PROCESSES, NAME_MAX, oneLineName, type ProcessTable } from './processes.ts'
 import { PowerShellHost } from './win-host.ts'
 
+/** Readings in a row without a list before the list is taken to be unreadable here, and how
+ *  long before it is tried again. */
+export const EMPTY_LIMIT = 5
+export const RETRY_BLOCKED_MS = 60 * 60_000
 /** How long PowerShell has to answer; a panel waits on this, and gets no list after it. */
 const PROC_TIMEOUT_MS = 10_000
 /** The counters count in units of 100 ns. */
@@ -182,6 +188,9 @@ export class WindowsProcessSampler {
   private previous: WindowsProcessReading | null = null
   private reading: Promise<WindowsProcessReading | null> | null = null
   private table: { table: ProcessTable; of: WindowsProcessReading } | null = null
+  /** How many readings in a row gave no list, and until when that is taken as "cannot". */
+  private empty = 0
+  private blockedUntil = Number.NEGATIVE_INFINITY
 
   constructor(deps: WindowsProcessSamplerDeps = {}) {
     this.platform = deps.platform ?? process.platform
@@ -219,9 +228,12 @@ export class WindowsProcessSampler {
   /** Nothing of this sampler's own runs; whoever made the PowerShell host stops it. */
   stop(): void {}
 
-  /** True while PowerShell cannot run the reader here (src/win-host.ts `unavailable`). */
+  /** True while the list cannot be read here at all: PowerShell cannot run the reader
+   *  (src/win-host.ts `unavailable`), or it runs and has given no list EMPTY_LIMIT times in a row
+   *  (the performance counters are off, broken or not this user's to read). Tried again after
+   *  RETRY_BLOCKED_MS. */
   unavailable(): boolean {
-    return this.host.unavailable === true
+    return this.host.unavailable === true || this.mono() < this.blockedUntil
   }
 
   private async tableNow(): Promise<ProcessTable | null> {
@@ -246,7 +258,13 @@ export class WindowsProcessSampler {
       } catch {
         answer = null
       }
-      if (!answer || answer.rows.length === 0) return null
+      if (!answer || answer.rows.length === 0) {
+        this.empty += 1
+        if (this.empty >= EMPTY_LIMIT) this.blockedUntil = this.mono() + RETRY_BLOCKED_MS
+        return null
+      }
+      this.empty = 0
+      this.blockedUntil = Number.NEGATIVE_INFINITY
       const reading: WindowsProcessReading = { ...answer, at: this.mono(), wallAt: this.wall() }
       this.previous = this.current
       this.current = reading

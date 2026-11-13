@@ -3,7 +3,7 @@
 import { assert, describe, test } from 'orca/testing'
 import type { ProcessSource } from '../src/monitor.ts'
 import { LIST_CACHE_MS, MAX_PROCESSES } from '../src/processes.ts'
-import { buildWindowsTable, parseProcAnswer, startSeconds, windowsProcessName, WindowsProcessSampler, type WindowsProcessReading } from '../src/win-processes.ts'
+import { buildWindowsTable, EMPTY_LIMIT, parseProcAnswer, RETRY_BLOCKED_MS, startSeconds, windowsProcessName, WindowsProcessSampler, type WindowsProcessReading } from '../src/win-processes.ts'
 import { FakeTime, flush } from './helpers.ts'
 
 /** A Windows file time (100 ns units since 1601) for a time in epoch seconds. */
@@ -271,4 +271,42 @@ test('the sampler says when PowerShell cannot run the reader, as the host does',
   assert.equal(blocked.unavailable(), true)
   // A host given without that word (a test's fake) is taken to work.
   assert.equal(new WindowsProcessSampler({ host: { request: async () => null }, platform: 'win32' }).unavailable(), false)
+})
+
+test('five readings in a row without a list: the counters cannot be read here, said as that and tried again in an hour', async () => {
+  const time = new FakeTime()
+  let answer: unknown = null
+  let asked = 0
+  const sampler = new WindowsProcessSampler({
+    host: {
+      request: async () => {
+        asked += 1
+        return answer
+      },
+      unavailable: false
+    },
+    mono: time.now,
+    wall: time.now,
+    platform: 'win32'
+  })
+  for (let i = 0; i < EMPTY_LIMIT; i += 1) {
+    assert.equal(sampler.unavailable(), false)
+    assert.equal(await sampler.localTable(), null)
+    time.advance(LIST_CACHE_MS)
+  }
+  assert.equal(sampler.unavailable(), true)
+  time.advance(RETRY_BLOCKED_MS - LIST_CACHE_MS - 1)
+  assert.equal(sampler.unavailable(), true)
+  time.advance(1)
+  assert.equal(sampler.unavailable(), false, 'its hour is up')
+  // Still nothing: back for another hour after one try.
+  const before = asked
+  assert.equal(await sampler.localTable(), null)
+  assert.equal(asked, before + 1)
+  assert.equal(sampler.unavailable(), true)
+  // The day the counters answer, it is a list again.
+  time.advance(RETRY_BLOCKED_MS)
+  answer = { t: 133_000_000_000_000_000, p: [[4, 0, 'System', 10, 2_000_000, 132_999_000_000_000_000]] }
+  assert.equal((await sampler.localTable())?.rows.length, 1)
+  assert.equal(sampler.unavailable(), false)
 })

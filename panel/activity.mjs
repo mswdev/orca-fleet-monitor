@@ -182,7 +182,7 @@ export function toActivityModel({ machine, list, ui = { sort: 'cpu', query: '' }
     notice: older
       ? `Update Fleet Monitor on ${machine.name} to ${needs} or later to see its network, disk and processes here.`
       : blocked
-        ? `Fleet Monitor on ${machine.name} cannot read its network, disk traffic, GPU, battery and processes: Windows PowerShell is not able to run its reader there.`
+        ? `Fleet Monitor on ${machine.name} cannot read its processes, and may lack other readings: Windows PowerShell, or the performance counters, are not available to it there.`
         : null,
     tiles,
     processes,
@@ -640,7 +640,7 @@ export function processesSection(p, { shown, matches, open, tabStop, machineName
   if (p.state === 'loading') {
     nodes.push(h('div', { class: 'fm-proc-list', 'data-key': 'proc-loading' }, head(p), skeleton(p)))
   } else if (p.state === 'blocked') {
-    nodes.push(h('p', { class: 'fm-note', 'data-key': 'proc-blocked' }, 'The process list cannot be read on this computer: Windows PowerShell is not able to run Fleet Monitor’s reader. It is tried again once an hour.'))
+    nodes.push(h('p', { class: 'fm-note', 'data-key': 'proc-blocked' }, 'The process list cannot be read on this computer: Windows PowerShell, or the performance counters, are not available to Fleet Monitor here. It is tried again once an hour.'))
   } else if (p.state === 'failed') {
     nodes.push(h('p', { class: 'fm-note', 'data-key': 'proc-failed' }, 'The process list could not be read just now. It is asked for again in a few seconds.'))
   } else if (query && matches === 0) {

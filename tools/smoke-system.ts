@@ -69,6 +69,8 @@ async function main(): Promise<void> {
   let snapshot: MacSystem | null = null
   let first: ProcessTable | null = null
   let table: ProcessTable | null = null
+  let mark: { cpuUs: number; at: number } | null = null
+  let lastRound: { cpuMs: number; wallMs: number } | null = null
   // The slowest cadence a runner can show is disk traffic (every 20 s), so four readings 7 s apart.
   for (let round = 0; round < 4; round += 1) {
     if (round > 0) {
@@ -78,6 +80,11 @@ async function main(): Promise<void> {
     await timed(`system refresh ${round + 1}`, () => system.refresh())
     snapshot = system.snapshot()
     const read = await timed(`process list ${round + 1}`, () => processes.localTable())
+    // What this process used between this list and the one before, by Node's own count.
+    const usage = process.cpuUsage()
+    const at = performance.now()
+    if (mark) lastRound = { cpuMs: (usage.user + usage.system - mark.cpuUs) / 1000, wallMs: at - mark.at }
+    mark = { cpuUs: usage.user + usage.system, at }
     if (round === 0) first = read
     table = read
   }
@@ -114,8 +121,11 @@ async function main(): Promise<void> {
     if (self) {
       const rss = process.memoryUsage().rss
       check(isCount(self.mem) && self.mem! > rss / 8 && self.mem! < rss * 4, 'processes: its memory is near what Node reports')
-      // It worked a core for 1.5 s of each 7 s round: about 21% of one core.
-      check(isCount(self.cpu) && self.cpu! >= 5 && self.cpu! <= 100, `processes: its CPU reflects the work it just did (${self.cpu}%)`)
+      // Against what Node itself says this process used between the last two readings (it works
+      // a core for 1.5 s of each 7 s round, about 21%, unless the machine holds it back).
+      const expected = lastRound === null ? null : lastRound.cpuMs / (lastRound.wallMs / 100)
+      const near = expected !== null && isCount(self.cpu) && Math.abs(self.cpu! - expected) <= Math.max(5, expected * 0.5)
+      check(near, `processes: its CPU is what Node says it used (${self.cpu}% against ${expected === null ? 'none' : expected.toFixed(1) + '%'})`)
       const age = self.start === null ? null : Date.now() / 1000 - self.start
       check(age !== null && Math.abs(age - process.uptime()) < 30, `processes: its start time is right (${age === null ? 'none' : Math.round(age) + ' s ago'})`)
       if (platform !== 'win32') check(self.user === os.userInfo().username, `processes: its owner is this user (${self.user})`)

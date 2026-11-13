@@ -47,7 +47,6 @@ export const NVIDIA_VERSION_PATH = '/proc/driver/nvidia/version'
 export const NVIDIA_GPUS_PATH = '/proc/driver/nvidia/gpus'
 export const NVIDIA_SMI_PATH = '/usr/bin/nvidia-smi'
 export const NVIDIA_SMI_ARGS = ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'] as const
-/** The main volume. */
 /** The main volume: `/`, except where `/` is a small read-only image (Fedora Atomic and CoreOS
  *  mount a composefs of a few MB there, always full) and the real disk is under `/sysroot` and
  *  `/var`. The first of these with at least SPACE_MIN_BYTES is taken, else the first readable. */
@@ -56,7 +55,8 @@ export const SPACE_MIN_BYTES = 2 ** 30
 /** A refresh still running after this long is no longer waited for (a read of a driver's file
  *  can hang in the kernel). The part that hung is not read again until that read returns. */
 export const REFRESH_DEADLINE_MS = 5_000
-const TIMEOUT_MS = 2_000
+/** `nvidia-smi` wakes the driver first on a server without persistence mode, which takes seconds. */
+const TIMEOUT_MS = 5_000
 /** `nvidia-smi` prints one short line for each GPU. */
 const NVIDIA_SMI_MAX_BYTES = 4 * 1024
 /** This reader's own bounded runner, apart from the memory reads' (src/mac-memory.ts). */

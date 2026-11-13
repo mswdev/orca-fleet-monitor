@@ -6,6 +6,7 @@ import {
   HOST_FLAGS,
   HOST_GIVE_UP_MS,
   HOST_GIVE_UP_STARTS,
+  HOST_STALL_LIMIT,
   HOST_LINE_MAX,
   HOST_QUEUE_MAX,
   HOST_RESTART_MAX_MS,
@@ -39,7 +40,7 @@ describe('the script', () => {
     assert.ok(HOST_SCRIPT.includes('[Console]::In.ReadLine()'))
     assert.equal(/Get-Process|Get-WmiObject|Win32_Process|CommandLine|MainWindowTitle|\.Path\b/i.test(HOST_SCRIPT), false, 'nothing that reads a path, a command line or a title')
     // WMI is asked one thing, once: the names of the display adapters.
-    assert.deepEqual(HOST_SCRIPT.match(/Get-CimInstance[^|\n]*/g), ['Get-CimInstance -ClassName Win32_VideoController -Property Name '])
+    assert.deepEqual(HOST_SCRIPT.match(/Get-CimInstance[^|\n]*/g), ['Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID -OperationTimeoutSec 5 '])
   })
 
   test('the flags: the script as plain text, never encoded', () => {
@@ -339,6 +340,57 @@ describe('the PowerShell host', () => {
     child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
     assert.equal(await asked, 1)
     assert.equal(host.unavailable, false)
+    host.stop()
+  })
+
+  test('a command that stalls three times in a row on a working PowerShell is left alone for an hour', async () => {
+    const { time, ps, host } = setup()
+    /** One round: `net` is answered, then `gpu` gets no answer and its time runs out. */
+    const round = async (): Promise<void> => {
+      const net = host.request('net', 1_000)
+      const child = ps.children.at(-1)!
+      child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+      assert.equal(await net, 1)
+      const gpu = host.request('gpu', 1_000)
+      time.advance(1_000)
+      assert.equal(await gpu, null)
+      time.advance(HOST_RESTART_MAX_MS)
+    }
+    for (let i = 0; i < HOST_STALL_LIMIT; i += 1) await round()
+    assert.equal(ps.children.length, HOST_STALL_LIMIT)
+    // Now `gpu` is answered null without being asked, and nothing is started for it.
+    assert.equal(await host.request('gpu', 1_000), null)
+    assert.equal(ps.children.length, HOST_STALL_LIMIT)
+    // The others go on working.
+    const net = host.request('net', 1_000)
+    const child = ps.children.at(-1)!
+    child.say(`${child.written.at(-1)!.split(' ')[0]} 7\n`)
+    assert.equal(await net, 7)
+    assert.equal(child.written.some((line) => line.endsWith(' gpu\n')), false, 'this PowerShell was never asked for it')
+    assert.equal(host.unavailable, false, 'one slow command is not "PowerShell cannot run"')
+    // After its hour, it is asked once more.
+    time.advance(HOST_GIVE_UP_MS)
+    const again = host.request('gpu', 1_000)
+    child.say(`${child.written.at(-1)!.split(' ')[0]} 9\n`)
+    assert.equal(await again, 9)
+    host.stop()
+  })
+
+  test('a PowerShell that is only slow to start is not taken for one that cannot run', async () => {
+    const { time, ps, host } = setup()
+    for (let i = 0; i < HOST_GIVE_UP_STARTS + 2; i += 1) {
+      const asked = host.request('net', 1_000)
+      time.advance(1_000 + HOST_START_MS)
+      assert.equal(await asked, null, 'its first answer did not come in time')
+      time.advance(HOST_RESTART_MAX_MS)
+    }
+    assert.equal(ps.children.length, HOST_GIVE_UP_STARTS + 2, 'still tried every pause')
+    assert.equal(host.unavailable, false)
+    // And a slow start is not held against the command that happened to be first.
+    const net = host.request('net', 1_000)
+    const child = ps.children.at(-1)!
+    child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+    assert.equal(await net, 1)
     host.stop()
   })
 

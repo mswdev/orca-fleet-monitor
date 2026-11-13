@@ -23,9 +23,11 @@
 //          has several engines (3D, copy, video decode, ...), each with one counter per process
 //          using it: an engine's figure is the sum over its processes, and the GPU's is its
 //          busiest engine, which is the one figure Task Manager shows for a GPU. A computer
-//          whose only display adapters are Microsoft's own software ones (a virtual machine or
-//          a server without a GPU: "Microsoft Basic Display Adapter", "Microsoft Hyper-V Video")
-//          gets no figure, though those too have engine counters; that is asked of WMI once
+//          whose only display adapters are software ones (a virtual machine or a server
+//          without a GPU: Microsoft's basic display adapter, Hyper-V's video) gets no figure,
+//          though those too have engine counters. They are told by their device id (ROOT\,
+//          VMBUS\, SWD\, or PCI vendor 1414, Microsoft), since Windows translates their names;
+//          that is asked of WMI once, with a time limit
 //   bat    the power line, the battery's charge and flags, and the seconds it has left
 //          (System.Windows.Forms.SystemInformation.PowerStatus)
 //   proc   every process from one read of the "Process" counters: pid, parent pid, name,
@@ -40,10 +42,11 @@
 // elevation, and no path, command line or window title is read at all: a process's name is its
 // counter instance name, which is the image's file name without `.exe`.
 //
-// Cost, estimated and not measured (this was written without a Windows machine): about half a
-// second of CPU to start, once; some tens of MB of memory while it runs; a few ms for `net`,
-// `disk` and `bat`, tens of ms for `gpu` and `proc` (more with many hundreds of processes). The
-// first use of the performance counters in a process can take a second or more.
+// Cost, measured on a 4-core CI machine with about 150 processes (tools/smoke-system.ts): the
+// first answer comes about 4.5 s after the first request, PowerShell's start and its first use of
+// the counters included; each later request is answered in 10 to 20 ms; the process holds about
+// 65 MB and used under 1% of one core, asked every 7 s. Not measured on a desktop with several
+// hundred processes, nor with a real GPU.
 import { spawn as nodeSpawn } from 'node:child_process'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -126,7 +129,7 @@ function FmGpu {
   if ($null -eq $global:fmHasGpu) {
     $global:fmHasGpu = $true
     try {
-      $real = @(Get-CimInstance -ClassName Win32_VideoController -Property Name | Where-Object { $_.Name -and $_.Name -notlike 'Microsoft *' })
+      $real = @(Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID -OperationTimeoutSec 5 | Where-Object { $_.PNPDeviceID -and $_.PNPDeviceID -notmatch '^(ROOT|VMBUS|SWD)\\|^PCI\\VEN_1414' })
       $global:fmHasGpu = ($real.Count -gt 0)
     } catch { }
   }
@@ -278,9 +281,8 @@ const realTimers: Timers = {
  *  computer that is busy, as one often is just after signing in). */
 export const HOST_START_MS = 10_000
 /** After a process that ended, stalled or could not be started, the next one waits: 5 s, then
- *  twice as long each time up to 5 minutes, and 5 s again once one has answered. A PowerShell
- *  that cannot run here (blocked by policy, say) is then tried a few times an hour, not in a
- *  loop. */
+ *  twice as long each time up to 5 minutes, and 5 s again only after a process that lasted
+ *  5 minutes. */
 export const HOST_RESTART_MIN_MS = 5_000
 export const HOST_RESTART_MAX_MS = 5 * 60_000
 /** After this many processes in a row that never answered anything, PowerShell is taken to be
@@ -288,6 +290,9 @@ export const HOST_RESTART_MAX_MS = 5 * 60_000
  *  run): it is tried again only every HOST_GIVE_UP_MS, and `unavailable` says so meanwhile. */
 export const HOST_GIVE_UP_STARTS = 5
 export const HOST_GIVE_UP_MS = 60 * 60_000
+/** A command that runs out of time this many times in a row is answered null, unasked, for
+ *  HOST_GIVE_UP_MS: each time it stalls, PowerShell is killed and every other reading waits. */
+export const HOST_STALL_LIMIT = 3
 /** Longest answer line, in characters. A process list is about 80 bytes a process. */
 export const HOST_LINE_MAX = 4 * 1024 * 1024
 /** Requests that may wait at once; each reader asks for one thing at a time, so a handful do. */
@@ -327,6 +332,9 @@ export class PowerShellHost {
   /** When the running process was started, and how many in a row have ended without answering. */
   private startedAt = 0
   private barren = 0
+  /** How many times in a row each command has run out of time, and which are left alone until when. */
+  private readonly stalls = new Map<string, number>()
+  private readonly refusedUntil = new Map<string, number>()
   private stopped = false
   private readonly mono: () => number
 
@@ -356,6 +364,13 @@ export class PowerShellHost {
   request(command: string, timeoutMs: number): Promise<unknown | null> {
     if (this.platform !== 'win32' || this.stopped || this.pause !== null || this.queue.length >= HOST_QUEUE_MAX) return Promise.resolve(null)
     if (typeof command !== 'string' || !COMMAND.test(command) || !(timeoutMs > 0)) return Promise.resolve(null)
+    const refused = this.refusedUntil.get(command)
+    if (refused !== undefined) {
+      if (this.mono() < refused) return Promise.resolve(null)
+      // Its hour is up: one more try, and one more stall puts it back.
+      this.refusedUntil.delete(command)
+      this.stalls.set(command, HOST_STALL_LIMIT - 1)
+    }
     return new Promise((resolve) => {
       this.queue.push({ command, timeoutMs: Math.min(timeoutMs, TIMEOUT_MAX_MS), resolve })
       this.send()
@@ -393,7 +408,16 @@ export class PowerShellHost {
     const id = this.nextId++
     const timer = this.timers.setTimeout(
       () => {
-        if (this.active?.id === id) this.failed()
+        if (this.active?.id !== id) return
+        // The same command, too slow again and again (a counter provider or WMI that hangs):
+        // asking it only costs every other reading its PowerShell, so it is left alone a while.
+        // Only on a PowerShell that has answered something: before that it may just be starting.
+        if (this.answered) {
+          const stalls = (this.stalls.get(next.command) ?? 0) + 1
+          this.stalls.set(next.command, stalls)
+          if (stalls >= HOST_STALL_LIMIT) this.refusedUntil.set(next.command, this.mono() + HOST_GIVE_UP_MS)
+        }
+        this.failed(true)
       },
       next.timeoutMs + (this.answered ? 0 : HOST_START_MS)
     )
@@ -467,6 +491,7 @@ export class PowerShellHost {
     this.active = null
     this.answered = true
     this.barren = 0
+    this.stalls.delete(active.command)
     let value: unknown = null
     try {
       value = JSON.parse(text.slice(space + 1))
@@ -480,12 +505,14 @@ export class PowerShellHost {
 
   /** This process is of no more use (it ended, stalled, or wrote a line too long), or none could
    *  be started: it is killed, everything waiting is answered null, and the pause begins. */
-  private failed(): void {
+  private failed(timedOut = false): void {
     // The pause grows with each failure and starts over only after a process that lasted: one
     // answer does not count, or a PowerShell that answers `net` and then stalls on a counter
     // would be started again every few seconds for good.
     const lasted = this.child !== null && this.mono() - this.startedAt >= HOST_RESTART_MAX_MS
-    if (!this.answered) this.barren += 1
+    // A process that was only slow (a disk busy after sign-in) is not one that cannot run: only
+    // one that ended, or never started, without a word counts towards giving up.
+    if (!this.answered && !timedOut) this.barren += 1
     this.kill()
     this.release()
     if (this.stopped || this.pause !== null) return

@@ -340,7 +340,7 @@ describe('Overview | Activity', () => {
     const v = mount(viewOf([local(), box]))
     v.handle.show('env-box')
     assert.equal($(v.root, '[role="tablist"]'), null)
-    assert.match(text($(v.root, '[data-key="activity-notice"]')), /^Fleet Monitor on Locked Box cannot read its network, disk traffic, GPU, battery and processes: Windows PowerShell/)
+    assert.match(text($(v.root, '[data-key="activity-notice"]')), /^Fleet Monitor on Locked Box cannot read its processes, and may lack other readings: Windows PowerShell, or the performance counters/)
   })
 
   test('disk space is read without PowerShell, so that machine may have a tab: the notice is in it too', async () => {
@@ -349,7 +349,7 @@ describe('Overview | Activity', () => {
     const v = mount(viewOf([local(), box]))
     await activity(v, 'env-box')
     assert.ok($(v.root, '[role="tablist"]'), 'the disk tile gives it an Activity tab')
-    assert.match(text($(v.root, '[data-key="activity-notice"]')), /cannot read its network, disk traffic, GPU, battery and processes/)
+    assert.match(text($(v.root, '[data-key="activity-notice"]')), /cannot read its processes, and may lack other readings/)
     assert.equal($(v.root, '.fm-procs-card'), null)
   })
 })
@@ -588,7 +588,7 @@ describe('the Processes card', () => {
   test('this computer, where PowerShell cannot run the reader: said once, not as a passing failure', async () => {
     const v = mount(viewOf([local()]), () => listOf([], { state: 'unavailable', reason: 'no-reader', takenAt: null, ageMs: null, total: null }))
     await activity(v, 'local')
-    assert.match(text($(v.root, '[data-key="proc-blocked"]')), /cannot be read on this computer: Windows PowerShell/)
+    assert.match(text($(v.root, '[data-key="proc-blocked"]')), /cannot be read on this computer: Windows PowerShell, or the performance counters/)
     assert.equal($(v.root, '[data-key="proc-failed"]'), null)
     assert.equal($(v.root, '[data-key="proc-loading"]'), null)
   })
