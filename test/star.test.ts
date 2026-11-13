@@ -2,7 +2,7 @@
 // exactly what it is asked, and that nothing but a press asks it.
 import { assert, describe, test } from 'orca/testing'
 import type { ExecFile } from '../src/mac-memory.ts'
-import { AVAILABLE_CACHE_MS, createStar, findGh, ghCandidates, STAR_ARGS, STAR_REPOSITORY } from '../src/star.ts'
+import { AVAILABLE_CACHE_MS, createStar, findGh, ghCandidates, STAR_ARGS, STAR_REPOSITORY, starAccepted } from '../src/star.ts'
 
 describe('where gh is looked for', () => {
   test('PATH first (full paths only), then where its installers put it', () => {
@@ -24,11 +24,13 @@ describe('where gh is looked for', () => {
 })
 
 describe('starring', () => {
-  const fake = (result: { error: Error | null } = { error: null }) => {
+  /** What `gh api --include` prints when GitHub accepts a star. */
+  const ACCEPTED = 'HTTP/2.0 204 No Content\nX-Github-Request-Id: ABCD:1234\n\n'
+  const fake = (result: { error: Error | null; stdout?: string } = { error: null }) => {
     const calls: { file: string; args: readonly string[]; env: Record<string, string> | undefined; timeout: number }[] = []
     const exec: ExecFile = async (file, args, options) => {
       calls.push({ file, args, env: options.env, timeout: options.timeout })
-      return { error: result.error, stdout: '' }
+      return { error: result.error, stdout: result.stdout ?? ACCEPTED }
     }
     return { calls, exec }
   }
@@ -41,7 +43,8 @@ describe('starring', () => {
     assert.equal(gh.calls.length, 1)
     const call = gh.calls[0]!
     assert.equal(call.file, '/opt/homebrew/bin/gh')
-    assert.deepEqual([...call.args], ['api', '--method', 'PUT', '-H', 'Accept: application/vnd.github+json', '/user/starred/mswdev/orca-fleet-monitor'])
+    // On github.com by name: `gh` set up for a company's GitHub would otherwise ask that one.
+    assert.deepEqual([...call.args], ['api', '--hostname', 'github.com', '--include', '--method', 'PUT', '-H', 'Accept: application/vnd.github+json', '/user/starred/mswdev/orca-fleet-monitor'])
     assert.deepEqual([...call.args], [...STAR_ARGS])
     assert.equal(STAR_REPOSITORY, 'mswdev/orca-fleet-monitor')
     assert.deepEqual([call.env?.GH_PROMPT_DISABLED, call.env?.HOME, call.env?.PATH], ['1', '/Users/tester', '/opt/homebrew/bin'])
@@ -60,6 +63,14 @@ describe('starring', () => {
     assert.equal(await createStar({ platform: 'linux', env: { PATH: '/usr/bin' }, exec: thrower, runnable: only('/usr/bin/gh') }).star(), false)
   })
 
+  test('only GitHub’s own 204 is a star: another program called gh that exits 0 is not', async () => {
+    const usage = fake({ error: null, stdout: 'usage: gh [options] <command>\n' })
+    assert.equal(await createStar({ platform: 'linux', env: { PATH: '/usr/bin' }, exec: usage.exec, runnable: only('/usr/bin/gh') }).star(), false)
+    const silent = fake({ error: null, stdout: '' })
+    assert.equal(await createStar({ platform: 'linux', env: { PATH: '/usr/bin' }, exec: silent.exec, runnable: only('/usr/bin/gh') }).star(), false)
+    assert.deepEqual(['HTTP/2.0 204 No Content\n', 'HTTP/1.1 204 No Content\r\n', '\nHTTP/2 204\n', 'HTTP/2.0 404 Not Found\n', 'HTTP/2.0 2044\n', '204', null].map(starAccepted), [true, true, true, false, false, false, false])
+  })
+
   test('Windows: gh is given the APPDATA its sign-in is under, which a worker lacks', async () => {
     const gh = fake()
     const star = createStar({ platform: 'win32', env: { Path: 'C:\\Tools', USERPROFILE: 'C:\\Users\\tester' }, exec: gh.exec, runnable: only('C:\\Tools\\gh.exe') })
@@ -73,7 +84,7 @@ describe('starring', () => {
     const exec: ExecFile = () =>
       new Promise((resolve) => {
         calls.push(1)
-        finish = () => resolve({ error: null, stdout: '' })
+        finish = () => resolve({ error: null, stdout: 'HTTP/2.0 204 No Content\n' })
       })
     const star = createStar({ platform: 'linux', env: { PATH: '/usr/bin' }, exec, runnable: only('/usr/bin/gh') })
     const a = star.star()

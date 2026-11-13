@@ -1,7 +1,7 @@
 // "Star on GitHub", done for the person who pressed it. GitHub has no link that stars a
 // repository, so where the GitHub CLI (`gh`) is installed and signed in, the worker asks it to:
 //
-//   gh api --method PUT /user/starred/<owner>/<repository>
+//   gh api --hostname github.com --method PUT /user/starred/<owner>/<repository>
 //
 // It runs only when the panel's link is pressed, never by itself, and nothing is asked of GitHub
 // before that: whether `gh` is there at all is a file's existence. Where it is missing, not signed
@@ -13,7 +13,15 @@ import { createRunBounded, type ExecFile } from './mac-memory.ts'
 
 /** The one repository this can star: this plugin's own. Never taken from a setting or the panel. */
 export const STAR_REPOSITORY = 'mswdev/orca-fleet-monitor'
-export const STAR_ARGS = ['api', '--method', 'PUT', '-H', 'Accept: application/vnd.github+json', `/user/starred/${STAR_REPOSITORY}`] as const
+/** On github.com whatever host `gh` is set up to prefer (a company's GitHub Enterprise could have
+ *  a repository of the same name), and with the response's status line printed, to be checked. */
+export const STAR_ARGS = ['api', '--hostname', 'github.com', '--include', '--method', 'PUT', '-H', 'Accept: application/vnd.github+json', `/user/starred/${STAR_REPOSITORY}`] as const
+
+/** Whether `gh api --include` printed GitHub's answer to a star: `HTTP/2.0 204 No Content`. Any
+ *  other program called `gh` that happens to exit 0 does not print that. */
+export function starAccepted(stdout: unknown): boolean {
+  return typeof stdout === 'string' && /^HTTP\/\d(?:\.\d)? 204\b/.test(stdout.trimStart())
+}
 /** Short, so that when it fails the panel can still open the project's page on the same press:
  *  Orca allows that only within a few seconds of it. */
 const STAR_TIMEOUT_MS = 4_000
@@ -54,7 +62,8 @@ export type StarSource = { available(): boolean; star(): Promise<boolean> }
 
 /**
  * Stars this plugin's repository with the person's own `gh`. `star()` resolves true only when
- * GitHub accepted it (`gh` exits 0); anything else (not signed in, no network, refused) is false.
+ * GitHub accepted it (`gh` exits 0 and shows GitHub's 204); anything else (not signed in, no
+ * network, refused, another program by that name) is false.
  * `gh` is never left to ask a question, and one press starts one call at most.
  */
 export function createStar(
@@ -101,7 +110,7 @@ export function createStar(
         childEnv.NO_COLOR = '1'
         try {
           const out = await exec(gh, STAR_ARGS, { timeout: STAR_TIMEOUT_MS, maxBuffer: STAR_MAX_BYTES, env: childEnv })
-          return !out.error
+          return !out.error && starAccepted(out.stdout)
         } catch {
           return false
         }

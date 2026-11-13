@@ -165,7 +165,7 @@ export function buildWindowsTable(current: WindowsProcessReading, previous: Wind
 }
 
 export type WindowsProcessSamplerDeps = {
-  host?: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean }
+  host?: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean; ask?: PowerShellHost['ask'] }
   mono?: () => number
   wall?: () => number
   platform?: string
@@ -179,7 +179,7 @@ export type WindowsProcessSamplerDeps = {
  * it is handed in and never stopped here. Nothing is asked on any other platform.
  */
 export class WindowsProcessSampler {
-  private readonly host: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean }
+  private readonly host: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean; ask?: PowerShellHost['ask'] }
   private readonly mono: () => number
   private readonly wall: () => number
   private readonly platform: string
@@ -239,6 +239,8 @@ export class WindowsProcessSampler {
   private async tableNow(): Promise<ProcessTable | null> {
     const cached = this.table
     const now = this.mono()
+    // Taken to be unreadable here: nothing is asked until its hour is up.
+    if (now < this.blockedUntil) return null
     if (cached && now - cached.of.at < LIST_CACHE_MS && now >= cached.of.at) return cached.table
     const reading = await this.read()
     if (!reading) return null
@@ -253,14 +255,22 @@ export class WindowsProcessSampler {
   private read(): Promise<WindowsProcessReading | null> {
     this.reading ??= (async () => {
       let answer: ProcAnswer | null = null
+      let answered = false
       try {
-        answer = parseProcAnswer(await this.host.request('proc', PROC_TIMEOUT_MS))
+        // `ask` where the host has it: only a reading PowerShell answered counts below.
+        const result = this.host.ask ? await this.host.ask('proc', PROC_TIMEOUT_MS) : { answered: true, value: await this.host.request('proc', PROC_TIMEOUT_MS) }
+        answered = result.answered
+        answer = parseProcAnswer(result.value)
       } catch {
         answer = null
       }
       if (!answer || answer.rows.length === 0) {
-        this.empty += 1
-        if (this.empty >= EMPTY_LIMIT) this.blockedUntil = this.mono() + RETRY_BLOCKED_MS
+        // PowerShell answered, and had no list: that is the counters. A request that was never
+        // asked (PowerShell pausing before a restart) or went with a killed process says nothing.
+        if (answered) {
+          this.empty += 1
+          if (this.empty >= EMPTY_LIMIT) this.blockedUntil = this.mono() + RETRY_BLOCKED_MS
+        }
         return null
       }
       this.empty = 0

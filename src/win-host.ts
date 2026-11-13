@@ -302,7 +302,13 @@ const TIMEOUT_MAX_MS = 10 * 60_000
 /** A command is one plain word, so a request can never carry a second line. */
 const COMMAND = /^[a-z]{1,16}$/
 
-type Waiting = { command: string; timeoutMs: number; resolve: (answer: unknown) => void }
+/** What a request came to: `answered` only when PowerShell itself sent this request's line
+ *  (its value may still be null: the handler failed). Not answered: nothing was asked (stopped,
+ *  pausing, a command left alone) or the process went before it answered. */
+export type HostAnswer = { answered: boolean; value: unknown }
+const UNASKED: HostAnswer = Object.freeze({ answered: false, value: null })
+
+type Waiting = { command: string; timeoutMs: number; resolve: (answer: HostAnswer) => void }
 
 /**
  * One resident powershell.exe running HOST_SCRIPT, started with the first request. Requests are
@@ -362,11 +368,17 @@ export class PowerShellHost {
    * count towards `timeoutMs`.
    */
   request(command: string, timeoutMs: number): Promise<unknown | null> {
-    if (this.platform !== 'win32' || this.stopped || this.pause !== null || this.queue.length >= HOST_QUEUE_MAX) return Promise.resolve(null)
-    if (typeof command !== 'string' || !COMMAND.test(command) || !(timeoutMs > 0)) return Promise.resolve(null)
+    return this.ask(command, timeoutMs).then((answer) => answer.value)
+  }
+
+  /** `request`, saying as well whether PowerShell answered at all: a caller that counts failures
+   *  must not count the times nothing was asked. */
+  ask(command: string, timeoutMs: number): Promise<HostAnswer> {
+    if (this.platform !== 'win32' || this.stopped || this.pause !== null || this.queue.length >= HOST_QUEUE_MAX) return Promise.resolve(UNASKED)
+    if (typeof command !== 'string' || !COMMAND.test(command) || !(timeoutMs > 0)) return Promise.resolve(UNASKED)
     const refused = this.refusedUntil.get(command)
     if (refused !== undefined) {
-      if (this.mono() < refused) return Promise.resolve(null)
+      if (this.mono() < refused) return Promise.resolve(UNASKED)
       // Its hour is up: one more try, and one more stall puts it back.
       this.refusedUntil.delete(command)
       this.stalls.set(command, HOST_STALL_LIMIT - 1)
@@ -499,7 +511,7 @@ export class PowerShellHost {
       // Not JSON: no reading, but the process answered, so it stays.
       value = null
     }
-    active.resolve(value)
+    active.resolve({ answered: true, value })
     this.send()
   }
 
@@ -529,7 +541,7 @@ export class PowerShellHost {
     if (this.active) this.timers.clearTimeout(this.active.timer)
     this.active = null
     this.queue = []
-    for (const w of waiting) w.resolve(null)
+    for (const w of waiting) w.resolve(UNASKED)
   }
 
   private kill(): void {

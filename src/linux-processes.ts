@@ -283,7 +283,8 @@ export type ProcReading = { at: number; wallAt: number; rows: ProcRow[]; sinceBo
  * more than every core; one decimal. Two things differ from a Mac's table. The window is measured
  * on the monotonic clock, so setting the wall clock between two readings cannot bend it. And
  * "started since the last reading" is decided by the start time, which is exact here: only a
- * process that started after the last reading began. One that was already running then, but is
+ * process that started when the last reading began or later (the same clock tick counts: both
+ * times are whole ticks). One that was already running then, but is
  * missing from that reading (its read failed), gets no CPU % rather than its whole life's CPU
  * time in one window; so does every unmatched process when the uptime could not be read.
  */
@@ -301,7 +302,7 @@ export function buildProcessTable(current: ProcReading, previous: ProcReading | 
       let ticks: number | null = null
       if (old && old.startTicks === r.startTicks) {
         if (r.cpuTicks >= old.cpuTicks) ticks = r.cpuTicks - old.cpuTicks
-      } else if (lastBegan !== null && r.startTicks > lastBegan) {
+      } else if (lastBegan !== null && r.startTicks >= lastBegan) {
         // Started since the last reading: all its CPU time was used in this window, and is
         // shared over the whole window (not over its shorter life, which would make every young
         // process look busy).
@@ -462,6 +463,7 @@ export class LinuxProcessSampler {
 
   private async readTable(): Promise<ProcessTable | null> {
     // Before the listing: whatever starts from here on is new to the next reading.
+    const began = this.mono()
     const sinceBootTicks = parseUptimeTicks(await this.file(PROC_UPTIME_PATH))
     const pids = pidsOf(await this.dir(PROC_PATH)).slice(0, MAX_PIDS_READ)
     if (pids.length === 0) return null
@@ -491,7 +493,12 @@ export class LinuxProcessSampler {
         mem: Number.isSafeInteger(mem) ? mem : null
       }
     })
-    const reading: ProcReading = { at, wallAt, rows, sinceBootTicks }
+    // The uptime only helps if it is on the clock the start times are on. Under LXCFS it is the
+    // container's age while a process's start stays counted from the host's boot, and then every
+    // process seems to have started in the future: the uptime is not used.
+    const passTicks = Math.ceil((at - began) / (1000 / CLOCK_TICKS_PER_SECOND)) + CLOCK_TICKS_PER_SECOND
+    const sameClock = sinceBootTicks !== null && rows.every((r) => r.startTicks <= sinceBootTicks + passTicks)
+    const reading: ProcReading = { at, wallAt, rows, sinceBootTicks: sameClock ? sinceBootTicks : null }
     const table = buildProcessTable(reading, this.current, safeCores(this.cores))
     this.current = reading
     this.table = { table, at }

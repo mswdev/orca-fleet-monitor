@@ -394,6 +394,22 @@ describe('the PowerShell host', () => {
     host.stop()
   })
 
+  test('ask() says whether PowerShell answered at all', async () => {
+    const { time, ps, host } = setup()
+    const first = host.ask('proc', 1_000)
+    const child = ps.children[0]!
+    child.say(`${child.written.at(-1)!.split(' ')[0]} null\n`)
+    assert.deepEqual(await first, { answered: true, value: null }, 'answered, with no reading: the handler failed')
+    const lost = host.ask('proc', 1_000)
+    child.exit()
+    assert.deepEqual(await lost, { answered: false, value: null }, 'the process went before it answered')
+    assert.deepEqual(await host.ask('proc', 1_000), { answered: false, value: null }, 'pausing before a restart: nothing was asked')
+    assert.deepEqual(await host.ask('no such command!', 1_000), { answered: false, value: null })
+    time.advance(HOST_RESTART_MAX_MS)
+    host.stop()
+    assert.deepEqual(await host.ask('proc', 1_000), { answered: false, value: null }, 'stopped')
+  })
+
   test('when it ends by itself, cannot start, or its pipe breaks, what waits is answered null', async () => {
     const { time, ps, host } = setup()
     const a = host.request('net', 2_000)

@@ -248,6 +248,12 @@ describe('the table', () => {
     assert.deepEqual([byPid.get(10), byPid.get(11), byPid.get(12), byPid.get(13), byPid.get(14)], [0, null, 0, null, 10])
   })
 
+  test('a process that started in the very tick the last reading began is new', () => {
+    const before = reading(100_000, [[10, 1_000, 50]], 100_000, 10_250)
+    const now = reading(103_000, [[10, 1_000, 50], [12, 150, 10_250]])
+    assert.equal(buildProcessTable(now, before, 8).rows.find((r) => r.pid === 12)!.cpu, 50)
+  })
+
   test('without the uptime of the last reading, no unmatched process is taken for a new one', () => {
     const before = reading(100_000, [[10, 1_000, 50]])
     const now = reading(103_000, [[10, 1_300, 50], [12, 150, 10_250]])
@@ -412,6 +418,19 @@ describe('the process sampler', () => {
     const reused = third.rows.find((r) => r.pid === 900)!
     assert.deepEqual([reused.name, reused.user, reused.cpu, reused.start], ['sleep', 'example', 10, BOOT + 82_000])
     assert.equal(pc.sampler.latestTable(), third)
+  })
+
+  test('an uptime on another clock than the start times (a container under LXCFS) is not used', async () => {
+    const pc = desktop()
+    // The container is 5 minutes old; its processes' starts are counted from the host's boot.
+    pc.state.uptime = '300.00 280.00\n'
+    await pc.sampler.localTable()
+    pc.time.advance(5_000)
+    // A process the first reading did not hold, long-lived and busy over its life.
+    pc.put({ pid: 5000, comm: 'old-and-busy', ppid: 1, utime: 400_000, stime: 0, start: 8_100_000, rss: 100 })
+    const table = (await pc.sampler.localTable())!
+    assert.equal(table.rows.find((r) => r.pid === 5000)!.cpu, null, 'not its whole life in one window')
+    assert.deepEqual(table.rows.filter((r) => r.pid !== 5000).map((r) => r.cpu), [0, 0, 0, 0], 'the others are measured as ever')
   })
 
   test('a process is named by its executable where the link can be read, by its kernel name where not', async () => {

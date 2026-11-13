@@ -310,3 +310,47 @@ test('five readings in a row without a list: the counters cannot be read here, s
   assert.equal((await sampler.localTable())?.rows.length, 1)
   assert.equal(sampler.unavailable(), false)
 })
+
+test('a request PowerShell never answered is not a reading without a list', async () => {
+  const time = new FakeTime()
+  let asked = 0
+  let result: { answered: boolean; value: unknown } = { answered: false, value: null }
+  const sampler = new WindowsProcessSampler({
+    host: {
+      request: async () => null,
+      ask: async () => {
+        asked += 1
+        return result
+      },
+      unavailable: false
+    },
+    mono: time.now,
+    wall: time.now,
+    platform: 'win32'
+  })
+  // PowerShell pausing before a restart, or killed for another command's stall: nothing was asked.
+  for (let i = 0; i < EMPTY_LIMIT * 3; i += 1) {
+    assert.equal(await sampler.localTable(), null)
+    time.advance(LIST_CACHE_MS)
+  }
+  assert.equal(sampler.unavailable(), false, 'none of those says the counters cannot be read')
+  // Answered, and no list: those count.
+  result = { answered: true, value: null }
+  for (let i = 0; i < EMPTY_LIMIT; i += 1) {
+    await sampler.localTable()
+    time.advance(LIST_CACHE_MS)
+  }
+  assert.equal(sampler.unavailable(), true)
+  // While it is taken to be unreadable, nothing is asked, by the panel or the 30 s beat.
+  const before = asked
+  for (let i = 0; i < 20; i += 1) {
+    assert.equal(await sampler.publishTable(), null)
+    assert.equal(await sampler.localTable(), null)
+    time.advance(30_000)
+  }
+  assert.equal(asked, before)
+  assert.equal(sampler.unavailable(), true, 'and its hour is not pushed back by those')
+  time.advance(RETRY_BLOCKED_MS)
+  await sampler.localTable()
+  assert.equal(asked, before + 1, 'one try once the hour is up')
+})
