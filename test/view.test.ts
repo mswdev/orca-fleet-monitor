@@ -579,8 +579,13 @@ describe('the "Star on GitHub" link', () => {
     assert.equal(asked, 1, 'a second press while it works asks nothing more')
     answer(true)
     await settle()
-    assert.equal($(v.root, '[data-action="star"]'), null)
-    assert.equal(text($(v.root, '[data-key="foot"]')!), 'Starred on GitHub. Thank you.')
+    // The same button, so the keyboard's focus stays where it was; it does nothing more.
+    const done = $(v.root, '[data-action="star"]')!
+    assert.deepEqual([done.textContent, done.getAttribute('aria-disabled')], ['Starred on GitHub. Thank you.', 'true'])
+    assert.equal($(v.root, '[data-key="foot"]')!.getAttribute('aria-live'), 'polite')
+    done.click()
+    await settle()
+    assert.equal(asked, 1)
     assert.deepEqual(offered.opened, [], 'the page is not opened as well')
   })
 
@@ -639,16 +644,19 @@ describe('the "Star on GitHub" link', () => {
     assert.deepEqual(offered.opened, ['https://github.com/mswdev/orca-fleet-monitor'])
   })
 
-  test('where the frame cannot open a page, the link is there only if this computer can star', async () => {
-    const none = mount(viewOf([local()]), null, async () => true)
+  test('where the frame cannot open a page (Orca in a browser or on a phone) there is no link, GitHub CLI or not', async () => {
+    let asked = 0
+    const star = async () => {
+      asked += 1
+      return true
+    }
+    const none = mount(viewOf([local()]), null, star)
     assert.equal($(none.root, '[data-key="foot"]'), null)
     dom.restore()
     dom = installFakeDom()
-    const v = mount(starrable(), null, async () => false)
-    $(v.root, '[data-action="star"]')!.click()
-    await settle()
-    assert.equal(text($(v.root, '[data-key="foot"]')!), 'Could not star from here.')
-    assert.equal($(v.root, '[data-action="star-open"]'), null)
+    const v = mount(starrable(), null, star)
+    assert.equal($(v.root, '[data-key="foot"]'), null, 'a press there would star from the computer the worker runs on')
+    assert.equal(asked, 0)
   })
 
   test('sits at the foot of the overview, not on a machine’s detail', async () => {

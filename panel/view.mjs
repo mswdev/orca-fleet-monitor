@@ -397,20 +397,17 @@ function overview(fleet, ui, now) {
  * as a link of its own.
  */
 function starFoot(fleet, ui) {
-  const canStar = ui.canStar && fleet.canStar === true
-  const foot = (child) => h('footer', { class: 'fm-foot', 'data-key': 'foot' }, child)
+  // Only in the desktop app, where the frame can open the page: Orca's browser and mobile clients
+  // never had the link, and a press there would star from whatever computer runs the worker.
+  if (!ui.canOpenExternal) return null
+  // One button throughout, so the keyboard's focus stays on it as its words change; the footer
+  // announces them. aria-disabled, not disabled: a disabled button drops focus to the page.
+  const foot = (child) => h('footer', { class: 'fm-foot', 'data-key': 'foot', 'aria-live': 'polite' }, child)
   const link = (action, label, more = {}) => h('button', { type: 'button', class: 'fm-foot-link', 'data-action': action, 'data-key': 'star', ...more }, label)
-  if (ui.star === 'done') return foot(h('span', { class: 'fm-foot-note', role: 'status', 'data-key': 'star' }, 'Starred on GitHub. Thank you.'))
-  // aria-disabled, not disabled: a disabled button drops keyboard focus to the page.
+  if (ui.star === 'done') return foot(link('star', 'Starred on GitHub. Thank you.', { 'aria-disabled': 'true' }))
   if (ui.star === 'busy') return foot(link('star', 'Starring…', { 'aria-disabled': 'true' }))
-  if (ui.star === 'failed') {
-    return foot(
-      ui.canOpenExternal
-        ? link('star-open', 'Could not star from here. Open it on GitHub')
-        : h('span', { class: 'fm-foot-note', role: 'status', 'data-key': 'star' }, 'Could not star from here.')
-    )
-  }
-  return canStar || ui.canOpenExternal ? foot(link('star', 'Star on GitHub')) : null
+  if (ui.star === 'failed') return foot(link('star-open', 'Could not star from here. Open it on GitHub'))
+  return foot(link('star', 'Star on GitHub'))
 }
 
 // --- detail ------------------------------------------------------------------------------------

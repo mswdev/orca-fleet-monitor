@@ -137,7 +137,8 @@ const RTF_REJECT = 0x0200
 /** A name the kernel accepts for a network interface: 15 bytes at most, no space, `/` or `:`,
  *  and not `.` or `..`. Wider than what a beacon carries (interfaceLabel makes it fit). */
 export function isLinuxInterfaceName(name: unknown): name is string {
-  return typeof name === 'string' && /^[^\s/:\u0000-\u001f\u007f]{1,15}$/.test(name) && name !== '.' && name !== '..'
+  // `*` is what the route table prints for a route with no device (a blackhole or throw route).
+  return typeof name === 'string' && /^[^\s/:\u0000-\u001f\u007f]{1,15}$/.test(name) && name !== '.' && name !== '..' && name !== '*'
 }
 
 /**

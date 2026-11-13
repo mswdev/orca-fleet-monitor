@@ -25,9 +25,10 @@
 //          busiest engine, which is the one figure Task Manager shows for a GPU. A computer
 //          whose only display adapters are software ones (a virtual machine or a server
 //          without a GPU: Microsoft's basic display adapter, Hyper-V's video) gets no figure,
-//          though those too have engine counters. They are told by their device id (ROOT\,
-//          VMBUS\, SWD\, or PCI vendor 1414, Microsoft), since Windows translates their names;
-//          that is asked of WMI once, with a time limit
+//          though those too have engine counters. They are told by their device id (ROOT,
+//          VMBUS or SWD) or by running on Windows' own basic display driver (display.inf: a
+//          card with no driver of its maker's, as on most cloud machines), since Windows
+//          translates their names; that is asked of WMI once, with a time limit
 //   bat    the power line, the battery's charge and flags, and the seconds it has left
 //          (System.Windows.Forms.SystemInformation.PowerStatus)
 //   proc   every process from one read of the "Process" counters: pid, parent pid, name,
@@ -129,7 +130,7 @@ function FmGpu {
   if ($null -eq $global:fmHasGpu) {
     $global:fmHasGpu = $true
     try {
-      $real = @(Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID -OperationTimeoutSec 5 | Where-Object { $_.PNPDeviceID -and $_.PNPDeviceID -notmatch '^(ROOT|VMBUS|SWD)\\|^PCI\\VEN_1414' })
+      $real = @(Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID, InfFilename, Name -OperationTimeoutSec 5 | Where-Object { $_.PNPDeviceID -and $_.PNPDeviceID -notmatch '^(ROOT|VMBUS|SWD)\\' -and $_.InfFilename -ne 'display.inf' -and $_.Name -notlike 'Microsoft Basic*' })
       $global:fmHasGpu = ($real.Count -gt 0)
     } catch { }
   }
@@ -211,10 +212,10 @@ while ($true) {
     }
   } catch {
     $r = $null
+    if ($line.EndsWith(' gpu')) { $global:fmGpu = $null }
     if (([DateTime]::UtcNow - $global:fmReset).TotalSeconds -ge 60) {
       $global:fmReset = [DateTime]::UtcNow
       $global:fmDisk = $null
-      $global:fmGpu = $null
       try { [System.Diagnostics.PerformanceCounter]::CloseSharedResources() } catch { }
     }
   }
@@ -291,8 +292,10 @@ export const HOST_RESTART_MAX_MS = 5 * 60_000
 export const HOST_GIVE_UP_STARTS = 5
 export const HOST_GIVE_UP_MS = 60 * 60_000
 /** A command that runs out of time this many times in a row is answered null, unasked, for
- *  HOST_GIVE_UP_MS: each time it stalls, PowerShell is killed and every other reading waits. */
+ *  HOST_FIRST_REFUSAL_MS the first time and HOST_GIVE_UP_MS after: each time it stalls,
+ *  PowerShell is killed and every other reading waits. */
 export const HOST_STALL_LIMIT = 3
+export const HOST_FIRST_REFUSAL_MS = 10 * 60_000
 /** Longest answer line, in characters. A process list is about 80 bytes a process. */
 export const HOST_LINE_MAX = 4 * 1024 * 1024
 /** Requests that may wait at once; each reader asks for one thing at a time, so a handful do. */
@@ -341,6 +344,9 @@ export class PowerShellHost {
   /** How many times in a row each command has run out of time, and which are left alone until when. */
   private readonly stalls = new Map<string, number>()
   private readonly refusedUntil = new Map<string, number>()
+  private readonly refusals = new Map<string, number>()
+  /** Commands the running process has answered: their first run in it is over. */
+  private readonly warm = new Set<string>()
   private stopped = false
   private readonly mono: () => number
 
@@ -427,11 +433,18 @@ export class PowerShellHost {
         if (this.answered) {
           const stalls = (this.stalls.get(next.command) ?? 0) + 1
           this.stalls.set(next.command, stalls)
-          if (stalls >= HOST_STALL_LIMIT) this.refusedUntil.set(next.command, this.mono() + HOST_GIVE_UP_MS)
+          if (stalls >= HOST_STALL_LIMIT) {
+            // Ten minutes the first time (it may have been a bad moment), an hour after that.
+            const before = this.refusals.get(next.command) ?? 0
+            this.refusals.set(next.command, before + 1)
+            this.refusedUntil.set(next.command, this.mono() + (before === 0 ? HOST_FIRST_REFUSAL_MS : HOST_GIVE_UP_MS))
+          }
         }
         this.failed(true)
       },
-      next.timeoutMs + (this.answered ? 0 : HOST_START_MS)
+      // The first run of a command in a process may load the performance counters or WMI,
+      // which can take seconds: it gets the allowance a new process's first answer does.
+      next.timeoutMs + (this.warm.has(next.command) ? 0 : HOST_START_MS)
     )
     this.active = { ...next, id, timer }
     try {
@@ -469,6 +482,7 @@ export class PowerShellHost {
     this.decoder = new StringDecoder('utf8')
     this.buffer = ''
     this.answered = false
+    this.warm.clear()
     this.startedAt = this.mono()
     return true
   }
@@ -504,6 +518,8 @@ export class PowerShellHost {
     this.answered = true
     this.barren = 0
     this.stalls.delete(active.command)
+    this.refusals.delete(active.command)
+    this.warm.add(active.command)
     let value: unknown = null
     try {
       value = JSON.parse(text.slice(space + 1))

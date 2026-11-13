@@ -64,6 +64,10 @@ describe('parsers', () => {
     assert.equal(parseProcNetRoute(routes(routeRow('9lives'))), '9lives')
     assert.equal(parseProcNetRoute(routes(routeRow('eth0;ls'))), 'eth0;ls')
     assert.equal(parseProcNetRoute(routes(routeRow('a/b'))), null, 'a name the kernel refuses')
+    // A blackhole or throw route has no device: the table prints `*` for it, with flags that say
+    // nothing of rejecting. It is no default route to read, even with the lowest metric.
+    assert.equal(parseProcNetRoute(routes(routeRow('*', '00000000', '0001', 10), routeRow('eth0', '00000000', '0003', 100))), 'eth0')
+    assert.equal(parseProcNetRoute(routes(routeRow('*', '00000000', '0001', 10))), null)
     assert.equal(parseProcNetRoute(routes(routeRow('sixteen-chars-xx'))), null, 'longer than the kernel keeps')
     assert.deepEqual(['eth0', '9lives', 'wl-p2', '.', '..', 'a:b', 'a b', ''].map(isLinuxInterfaceName), [true, true, true, false, false, false, false, false])
     assert.equal(parseProcNetRoute(routes(routeRow('eth0'), routeRow('tun0', '00000000', '0003', 50))), 'tun0')

@@ -3,6 +3,7 @@
 import { assert, describe, test } from 'orca/testing'
 import {
   HOST_COMMANDS,
+  HOST_FIRST_REFUSAL_MS,
   HOST_FLAGS,
   HOST_GIVE_UP_MS,
   HOST_GIVE_UP_STARTS,
@@ -40,7 +41,7 @@ describe('the script', () => {
     assert.ok(HOST_SCRIPT.includes('[Console]::In.ReadLine()'))
     assert.equal(/Get-Process|Get-WmiObject|Win32_Process|CommandLine|MainWindowTitle|\.Path\b/i.test(HOST_SCRIPT), false, 'nothing that reads a path, a command line or a title')
     // WMI is asked one thing, once: the names of the display adapters.
-    assert.deepEqual(HOST_SCRIPT.match(/Get-CimInstance[^|\n]*/g), ['Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID -OperationTimeoutSec 5 '])
+    assert.deepEqual(HOST_SCRIPT.match(/Get-CimInstance[^|\n]*/g), ['Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID, InfFilename, Name -OperationTimeoutSec 5 '])
   })
 
   test('the flags: the script as plain text, never encoded', () => {
@@ -228,7 +229,9 @@ describe('the PowerShell host', () => {
     await first
     const slow = host.request('disk', 2_000)
     const behind = host.request('gpu', 2_000)
-    time.advance(1_999)
+    // `disk` has not run in this PowerShell yet, so it has the start allowance on top: its first
+    // use loads the performance counters.
+    time.advance(1_999 + HOST_START_MS)
     assert.equal(ps.children[0]!.killed, null)
     time.advance(1)
     assert.equal(ps.children[0]!.killed, 'SIGKILL')
@@ -343,7 +346,7 @@ describe('the PowerShell host', () => {
     host.stop()
   })
 
-  test('a command that stalls three times in a row on a working PowerShell is left alone for an hour', async () => {
+  test('a command that stalls three times in a row on a working PowerShell is left alone: ten minutes, then an hour', async () => {
     const { time, ps, host } = setup()
     /** One round: `net` is answered, then `gpu` gets no answer and its time runs out. */
     const round = async (): Promise<void> => {
@@ -352,7 +355,8 @@ describe('the PowerShell host', () => {
       child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
       assert.equal(await net, 1)
       const gpu = host.request('gpu', 1_000)
-      time.advance(1_000)
+      // Its first run in this PowerShell, so it has the start allowance as well.
+      time.advance(1_000 + HOST_START_MS)
       assert.equal(await gpu, null)
       time.advance(HOST_RESTART_MAX_MS)
     }
@@ -368,8 +372,11 @@ describe('the PowerShell host', () => {
     assert.equal(await net, 7)
     assert.equal(child.written.some((line) => line.endsWith(' gpu\n')), false, 'this PowerShell was never asked for it')
     assert.equal(host.unavailable, false, 'one slow command is not "PowerShell cannot run"')
-    // After its hour, it is asked once more.
-    time.advance(HOST_GIVE_UP_MS)
+    // Ten minutes from its third stall the first time (five of them have passed in the last
+    // round's pause); then it is asked once more.
+    time.advance(HOST_FIRST_REFUSAL_MS - HOST_RESTART_MAX_MS - 1)
+    assert.equal(await host.request('gpu', 1_000), null)
+    time.advance(1)
     const again = host.request('gpu', 1_000)
     child.say(`${child.written.at(-1)!.split(' ')[0]} 9\n`)
     assert.equal(await again, 9)

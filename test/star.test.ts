@@ -48,7 +48,8 @@ describe('starring', () => {
     assert.deepEqual([...call.args], [...STAR_ARGS])
     assert.equal(STAR_REPOSITORY, 'mswdev/orca-fleet-monitor')
     assert.deepEqual([call.env?.GH_PROMPT_DISABLED, call.env?.HOME, call.env?.PATH], ['1', '/Users/tester', '/opt/homebrew/bin'])
-    assert.ok(call.timeout > 0 && call.timeout <= 30_000)
+    // Under Orca's 5 s for opening the page on the same press, should the star fail.
+    assert.ok(call.timeout > 0 && call.timeout <= 4_500)
   })
 
   test('false wherever it could not be done: no gh, not signed in, or gh failing to start', async () => {
