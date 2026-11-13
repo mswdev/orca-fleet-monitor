@@ -76,10 +76,11 @@ afterEach(() => {
 })
 
 /** Mounts the view on a binding that always answers `view`; timers run only when told to. */
-function mount(view: FleetView, openExternal: ((url: string) => unknown) | null = null) {
+function mount(view: FleetView, openExternal: ((url: string) => unknown) | null = null, star: (() => Promise<boolean>) | null = null) {
   const timers: (() => void)[] = []
   const retries: string[] = []
   const binding = {
+    ...(star ? { star } : {}),
     ready: Promise.resolve(),
     current: () => view,
     subscribe: (listener: (v: FleetView) => void) => {
@@ -556,6 +557,68 @@ describe('the "Star on GitHub" link', () => {
     assert.equal($(w.root, '[data-action="star"]'), null, 'not drawn without it')
     assert.equal(externalOpener({}), null, 'an Orca without host.has')
     assert.equal(externalOpener({ host: { has: () => true } }), null, 'or without shell.openExternal')
+  })
+
+  const starrable = () => viewOf([local()], { cli: { path: '/x/orca', source: 'bundled', error: null, canStar: true } })
+
+  test('with the GitHub CLI on this computer, a press stars the project and says so, and opens nothing', async () => {
+    const offered = frame(true)
+    let asked = 0
+    let answer: (starred: boolean) => void = () => {}
+    const v = mount(starrable(), externalOpener(offered.orca), () => {
+      asked += 1
+      return new Promise<boolean>((resolve) => (answer = resolve))
+    })
+    $(v.root, '[data-action="star"]')!.click()
+    await settle()
+    assert.equal(asked, 1)
+    const busy = $(v.root, '[data-action="star"]')!
+    assert.deepEqual([busy.textContent, busy.getAttribute('aria-disabled')], ['Starring…', 'true'])
+    busy.click()
+    await settle()
+    assert.equal(asked, 1, 'a second press while it works asks nothing more')
+    answer(true)
+    await settle()
+    assert.equal($(v.root, '[data-action="star"]'), null)
+    assert.equal(text($(v.root, '[data-key="foot"]')!), 'Starred on GitHub. Thank you.')
+    assert.deepEqual(offered.opened, [], 'the page is not opened as well')
+  })
+
+  test('where starring fails, the page is offered instead, and opens on a press of its own', async () => {
+    const offered = frame(true)
+    const v = mount(starrable(), externalOpener(offered.orca), () => Promise.reject(new Error('worker away')))
+    $(v.root, '[data-action="star"]')!.click()
+    await settle()
+    assert.deepEqual(offered.opened, [], 'nothing opens outside a press')
+    const open = $(v.root, '[data-action="star-open"]')!
+    assert.equal(open.textContent, 'Could not star from here. Open it on GitHub')
+    open.click()
+    assert.deepEqual(offered.opened, ['https://github.com/mswdev/orca-fleet-monitor'])
+  })
+
+  test('without the GitHub CLI the link opens the page as before, and the worker is not asked', async () => {
+    const offered = frame(true)
+    let asked = 0
+    const v = mount(viewOf([local()]), externalOpener(offered.orca), async () => {
+      asked += 1
+      return true
+    })
+    $(v.root, '[data-action="star"]')!.click()
+    await settle()
+    assert.equal(asked, 0)
+    assert.deepEqual(offered.opened, ['https://github.com/mswdev/orca-fleet-monitor'])
+  })
+
+  test('where the frame cannot open a page, the link is there only if this computer can star', async () => {
+    const none = mount(viewOf([local()]), null, async () => true)
+    assert.equal($(none.root, '[data-key="foot"]'), null)
+    dom.restore()
+    dom = installFakeDom()
+    const v = mount(starrable(), null, async () => false)
+    $(v.root, '[data-action="star"]')!.click()
+    await settle()
+    assert.equal(text($(v.root, '[data-key="foot"]')!), 'Could not star from here.')
+    assert.equal($(v.root, '[data-action="star-open"]'), null)
   })
 
   test('sits at the foot of the overview, not on a machine’s detail', async () => {

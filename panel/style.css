@@ -1022,6 +1022,18 @@ body {
   color: var(--fm-fg);
   text-decoration-color: currentColor;
 }
+.fm-foot-link[aria-disabled='true'] {
+  cursor: default;
+  text-decoration: none;
+}
+.fm-foot-link[aria-disabled='true']:hover {
+  color: var(--fm-muted-fg);
+}
+.fm-foot-note {
+  padding: 2px 4px;
+  font-size: 11px;
+  color: var(--fm-muted-fg);
+}
 
 /* === 1.2: the Overview | Activity control, the memory line, the tiles, the Processes card and the
  * search and sort controls (fm-seg, fm-suggest, fm-tiles, fm-procs). The

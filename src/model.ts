@@ -466,6 +466,9 @@ export type CliInfo = {
   /** The command a person types for Orca's CLI on this computer: `orca-ide` on Linux, where
    *  `orca` is GNOME's screen reader; `orca` elsewhere. */
   launcher?: 'orca' | 'orca-ide'
+  /** The GitHub CLI is installed on this computer, so the panel's "Star on GitHub" link can star
+   *  the project when pressed (src/star.ts) and need not only open its page. */
+  canStar?: boolean
 }
 
 /** The person's thresholds, so a panel can colour each metric and core the way health is judged. */

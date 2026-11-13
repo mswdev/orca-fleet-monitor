@@ -7,6 +7,7 @@ import { PanelBridge } from './bridge.ts'
 import { localAnswer, remoteAnswer, unavailableAnswer } from './process-answer.ts'
 import { encodeProcessLine, PROCESS_INTERVAL_MS } from './process-line.ts'
 import { largestProcess, type ProcessTable } from './processes.ts'
+import type { StarSource } from './star.ts'
 import type { TopProcess } from './model.ts'
 import { cliLauncherName, type CliResolution, type CommandRunner } from './cli.ts'
 import type { CliInfo, LocalSample } from './model.ts'
@@ -60,8 +61,20 @@ export type MonitorDeps = {
   processes?: ProcessSource | null
   /** Ends whatever the readers keep running that nothing else stops (Windows' PowerShell process). */
   dispose?: () => void
+  /** Stars this plugin's repository with the person's `gh` when they press the panel's link
+   *  (src/star.ts); absent where that is not offered. */
+  star?: StarSource | null
   /** Wall clock, epoch ms (process tables carry wall times); Date.now when not given. */
   wall?: () => number
+}
+
+/** A yes-or-no question that must not throw into a snapshot. */
+function safely(ask: () => boolean): boolean {
+  try {
+    return ask()
+  } catch {
+    return false
+  }
 }
 
 /** What the monitor needs of src/processes.ts's ProcessSampler. */
@@ -113,7 +126,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     source: cli.source,
     error: cli.error,
     runError: poller?.environmentError() ?? null,
-    launcher
+    launcher,
+    ...(safely(() => deps.star?.available() === true) ? { canStar: true } : {})
   })
   const runner = deps.createRunner(() => cli.path)
 
@@ -300,6 +314,16 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
       noteTable(table)
       activePoller.onLocalProcesses()
       return localAnswer(id, table, deps.now(), wall())
+    }),
+    // Only ever from a press of the panel's link; never on a timer, never for another repository.
+    orca.panels.handle('fleet.star', async () => {
+      let starred = false
+      try {
+        starred = (await deps.star?.star()) === true
+      } catch {
+        starred = false
+      }
+      return { starred }
     }),
     orca.panels.handle('fleet.retry', (input) => {
       const id = input && typeof input === 'object' && typeof input.id === 'string' ? input.id : null

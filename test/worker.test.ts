@@ -277,6 +277,51 @@ test('a process list that cannot be read here is answered and published as that,
   await mounted.deactivate()
 })
 
+test('fleet.star stars only when the panel asks, and the snapshot says whether this computer can', async () => {
+  const time = new FakeTime()
+  const cli = fakeCli(time)
+  let pressed = 0
+  let outcome: boolean | Error = true
+  const star = {
+    available: () => true,
+    star: async () => {
+      pressed += 1
+      if (outcome instanceof Error) throw outcome
+      return outcome
+    }
+  }
+  let monitor: FleetMonitor | null = null
+  const mounted = await mountWorker(
+    {
+      default: async (orca) => {
+        monitor = await startFleetMonitor(orca, fakeDeps(time, cli, { more: { star } }))
+      },
+      deactivate: async () => monitor?.stop()
+    },
+    { host: mockHost({ settings: {} }) }
+  )
+  const snap = (await mounted.request('fleet.snapshot')) as FleetSnapshot
+  assert.equal(snap.cli.canStar, true)
+  time.advance(120_000)
+  await flush()
+  assert.equal(pressed, 0, 'never by itself: not at start, not on a timer')
+  assert.deepEqual(await mounted.request('fleet.star'), { starred: true })
+  assert.equal(pressed, 1)
+  outcome = false
+  assert.deepEqual(await mounted.request('fleet.star'), { starred: false })
+  outcome = new Error('gh went away')
+  assert.deepEqual(await mounted.request('fleet.star'), { starred: false }, 'a failure is an answer, not an error')
+  await mounted.deactivate()
+})
+
+test('without a way to star, the snapshot does not offer it and the request answers no', async () => {
+  const t = await mount()
+  const snap = (await t.mounted.request('fleet.snapshot')) as FleetSnapshot
+  assert.equal(snap.cli.canStar, undefined)
+  assert.deepEqual(await t.mounted.request('fleet.star'), { starred: false })
+  await t.mounted.deactivate()
+})
+
 test('deactivate stops every timer', async () => {
   const t = await mount()
   assert.ok(t.time.pending > 0)

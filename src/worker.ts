@@ -15,6 +15,7 @@ import { MacSystemReader } from './mac-system.ts'
 import { ProcessSampler } from './processes.ts'
 import { startFleetMonitor, type FleetMonitor, type MonitorDeps, type ProcessSource } from './monitor.ts'
 import { LocalSampler, realOs, type SystemReader } from './sampler.ts'
+import { createStar } from './star.ts'
 import { PowerShellHost } from './win-host.ts'
 import { WindowsProcessSampler } from './win-processes.ts'
 import { WindowsSystemReader } from './win-system.ts'
@@ -107,6 +108,7 @@ export function realDeps(): MonitorDeps {
     declaredCommands: declaredCommands(),
     processes,
     dispose: () => host?.stop(),
+    star: createStar({ pluginFile: ownFile }),
     wall: Date.now
   }
 }

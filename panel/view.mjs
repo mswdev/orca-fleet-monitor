@@ -384,11 +384,32 @@ function overview(fleet, ui, now) {
       h('p', { class: 'fm-notice', 'data-key': 'omitted' }, `${n} paired ${n === 1 ? 'machine is' : 'machines are'} not shown: their readings would not fit in one answer to this panel.`)
     )
   }
-  // Only where the frame can open it (the desktop app): small and muted, below everything.
-  if (ui.canOpenExternal) {
-    nodes.push(h('footer', { class: 'fm-foot', 'data-key': 'foot' }, h('button', { type: 'button', class: 'fm-foot-link', 'data-action': 'star' }, 'Star on GitHub')))
-  }
+  const foot = starFoot(fleet, ui)
+  if (foot) nodes.push(foot)
   return nodes
+}
+
+/**
+ * The quiet "Star on GitHub" link, below everything. Where this computer has the GitHub CLI, a
+ * press stars the project with it and the link says so; where that fails, or there is no CLI, it
+ * opens the project's page (only where the frame can: the desktop app). The page is opened within
+ * a press, as Orca requires, so after a failed try it is offered as a link of its own.
+ */
+function starFoot(fleet, ui) {
+  const canStar = ui.canStar && fleet.canStar === true
+  const foot = (child) => h('footer', { class: 'fm-foot', 'data-key': 'foot' }, child)
+  const link = (action, label, more = {}) => h('button', { type: 'button', class: 'fm-foot-link', 'data-action': action, 'data-key': 'star', ...more }, label)
+  if (ui.star === 'done') return foot(h('span', { class: 'fm-foot-note', role: 'status', 'data-key': 'star' }, 'Starred on GitHub. Thank you.'))
+  // aria-disabled, not disabled: a disabled button drops keyboard focus to the page.
+  if (ui.star === 'busy') return foot(link('star', 'Starring…', { 'aria-disabled': 'true' }))
+  if (ui.star === 'failed') {
+    return foot(
+      ui.canOpenExternal
+        ? link('star-open', 'Could not star from here. Open it on GitHub')
+        : h('span', { class: 'fm-foot-note', role: 'status', 'data-key': 'star' }, 'Could not star from here.')
+    )
+  }
+  return canStar || ui.canOpenExternal ? foot(link('star', 'Star on GitHub')) : null
 }
 
 // --- detail ------------------------------------------------------------------------------------
@@ -884,6 +905,10 @@ export function mountFleetView(
   const doc = root.ownerDocument
   const ui = {
     canOpenExternal: typeof openExternal === 'function',
+    /** The binding can ask the worker to star; whether this computer can is the fleet's `canStar`. */
+    canStar: typeof binding?.star === 'function',
+    /** 'idle', then 'busy' while the worker tries, then 'done' or 'failed'. */
+    star: 'idle',
     nav: { view: 'overview', id: null },
     pairOpen: false,
     installOpen: new Set(),
@@ -916,6 +941,17 @@ export function mountFleetView(
   /** This frame's clock moved onto the worker's, which history and "last seen" times use. */
   const workerNow = () => now() + (Number.isFinite(view?.clockOffsetMs) ? view.clockOffsetMs : 0)
   let fleet = toFleet(view, workerNow())
+
+  /** Opens the project's page. Called within a press, as Orca requires; Orca asks before opening
+   *  a host the first time. */
+  function openRepository() {
+    if (typeof openExternal !== 'function') return
+    try {
+      void Promise.resolve(openExternal(REPOSITORY_URL)).catch(() => {})
+    } catch {
+      // Not offered after all: nothing to open.
+    }
+  }
 
   function resetActivity() {
     Object.assign(ui, { tab: 'overview', sort: 'cpu', sortShown: 'cpu', query: '', showAll: false, openKey: null, rowFocus: null, held: null, matches: 0, announce: '' })
@@ -1140,14 +1176,23 @@ export function mountFleetView(
         void binding.refresh()
         break
       case 'star':
-        // Within the click, as Orca requires; Orca asks before opening a host the first time.
-        if (typeof openExternal === 'function') {
-          try {
-            void Promise.resolve(openExternal(REPOSITORY_URL)).catch(() => {})
-          } catch {
-            // Not offered after all: nothing to open.
-          }
+        // With the GitHub CLI on this computer, the worker stars the project for the person.
+        if (ui.canStar && ui.star === 'idle' && fleet.canStar === true) {
+          ui.star = 'busy'
+          draw()
+          void Promise.resolve()
+            .then(() => binding.star())
+            .catch(() => false)
+            .then((starred) => {
+              ui.star = starred === true ? 'done' : 'failed'
+              draw()
+            })
+          break
         }
+        openRepository()
+        break
+      case 'star-open':
+        openRepository()
         break
     }
   })

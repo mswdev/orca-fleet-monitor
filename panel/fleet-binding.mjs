@@ -15,6 +15,8 @@
 
 export const HEARTBEAT_MS = 5_000
 const REQUEST_TIMEOUT_MS = 10_000
+/** `gh` talks to GitHub: longer than a read of the worker's own state. */
+const STAR_TIMEOUT_MS = 20_000
 /** How often watchProcesses asks: this computer's list is read only while asked (its memory
  *  figures come every 5 s, as Activity Monitor's do), and a paired Mac publishes its top list
  *  about every 30 s, which this computer reads within 5 s while a panel is open. */
@@ -284,6 +286,16 @@ export function createFleetBinding(orca, options = {}) {
       .catch(() => false)
   }
 
+  /** "Star on GitHub", pressed: resolves true when the worker starred the project with the
+   *  person's own GitHub CLI, false wherever it could not (the view then offers the page). */
+  function star() {
+    if (disposed) return Promise.resolve(false)
+    return plugin
+      .request('fleet.star', undefined, { timeoutMs: STAR_TIMEOUT_MS })
+      .then((answer) => Boolean(answer && answer.starred === true))
+      .catch(() => false)
+  }
+
   /** One machine's processes (`fleet.processes`): the answer, or `{ state: 'error', error }`. */
   function processes(id) {
     if (disposed) return Promise.resolve({ state: 'error', error: 'disposed', machineId: id })
@@ -337,6 +349,7 @@ export function createFleetBinding(orca, options = {}) {
     current: view,
     refresh,
     retry,
+    star,
     processes,
     watchProcesses,
     subscribe(listener) {
@@ -899,6 +912,7 @@ export function toFleet(view, now = Date.now()) {
       error: view?.error ?? null,
       thresholds: readThresholds(null),
       cliError: null,
+      canStar: false,
       launcher: 'orca',
       omitted: 0,
       online: 0,
@@ -919,6 +933,7 @@ export function toFleet(view, now = Date.now()) {
     error: view.error ?? null,
     thresholds,
     cliError,
+    canStar: view.cli?.canStar === true,
     launcher,
     omitted: finite(view.omitted) && view.omitted > 0 ? view.omitted : 0,
     online: machines.filter((m) => m.online).length,
