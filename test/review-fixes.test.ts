@@ -7,7 +7,7 @@ import type { MacSystem } from '../src/model.ts'
 import { localAnswer } from '../src/process-answer.ts'
 import { decodeProcessLine, encodeProcessLine, PROCESS_INTERVAL_MS, PROCESS_PREFIX } from '../src/process-line.ts'
 import { processRunBounded, ProcessSampler, PS_ARGS, PS_ENV, TopStream, type SpawnTop, type TopChild } from '../src/processes.ts'
-import { LocalSampler, type OsSource } from '../src/sampler.ts'
+import { LocalSampler, SYSTEM_WAIT_MS, type OsSource } from '../src/sampler.ts'
 import { FakeTime, flush } from './helpers.ts'
 
 const SECRET = 'INVENTED_SECRET_12'
@@ -70,18 +70,56 @@ describe('2. the optional readers have their own bounded runners', () => {
   })
 })
 
-describe('3. the memory reading and the beacon never wait for the optional reads', () => {
-  test('prepare() settles once memory is read, with network, disk, GPU and battery still out', async () => {
-    const system: MacSystem = { net: null, disk: null, gpu: { percent: 3 }, battery: null }
-    const os: OsSource = { cpus: () => [], totalmem: () => 2 ** 34, freemem: () => 2 ** 33, loadavg: () => [0, 0, 0], uptime: () => 1, hostname: () => 'h', platform: () => 'darwin', arch: () => 'arm64', release: () => '25', now: () => 1 }
+describe('3. the memory reading and the beacon wait a quarter of a second at most for the optional reads', () => {
+  const system: MacSystem = { net: null, disk: null, gpu: { percent: 3 }, battery: null }
+  const os: OsSource = { cpus: () => [], totalmem: () => 2 ** 34, freemem: () => 2 ** 33, loadavg: () => [0, 0, 0], uptime: () => 1, hostname: () => 'h', platform: () => 'darwin', arch: () => 'arm64', release: () => '25', now: () => 1 }
+  const memory = { read: async () => null }
+
+  test('prepare() gives network, disk, GPU and battery SYSTEM_WAIT_MS, then settles without them', async () => {
     const time = new FakeTime()
-    const memory = { read: async () => null }
     const sampler = new LocalSampler(os, memory, time.now, time, { refresh: () => new Promise<void>(() => {}), snapshot: () => system })
     let settled = false
     void sampler.prepare().then(() => (settled = true))
     await flush()
-    assert.equal(settled, true, 'not held for the hung system read (nor for its 2.75 s deadline)')
+    assert.equal(settled, false, 'the reads may still make this sample')
+    time.advance(SYSTEM_WAIT_MS - 1)
+    await flush()
+    assert.equal(settled, false)
+    time.advance(1)
+    await flush()
+    assert.equal(settled, true, 'not held for the hung system read past that (nor for memory\'s 2.75 s deadline)')
     assert.deepEqual(sampler.sample().system, system, 'what it last read rides on the sample')
+  })
+
+  test('reads that answer in time are on this sample, not the next', async () => {
+    const time = new FakeTime()
+    let read: MacSystem | null = null
+    const reader = {
+      refresh: async () => {
+        read = system
+      },
+      snapshot: () => read
+    }
+    const sampler = new LocalSampler(os, memory, time.now, time, reader)
+    await sampler.prepare()
+    assert.deepEqual(sampler.sample().system, system)
+    // No timer is left behind once the reads have answered.
+    let late = false
+    void sampler.prepare().then(() => (late = true))
+    await flush()
+    assert.equal(late, true)
+  })
+
+  test('a reader that throws holds nothing up', async () => {
+    const time = new FakeTime()
+    const sampler = new LocalSampler(os, null, time.now, time, {
+      refresh: () => {
+        throw new Error('boom')
+      },
+      snapshot: () => null
+    })
+    await sampler.prepare()
+    assert.equal(sampler.sample().system, undefined)
   })
 })
 

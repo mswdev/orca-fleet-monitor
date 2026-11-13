@@ -26,7 +26,7 @@
 //                                  // the memory line, already past its 5 % floor; ageSec: how old the figure is
 // }
 // ProcessesModel = {
-//   state: 'loading' | 'ready' | 'failed'
+//   state: 'loading' | 'ready' | 'failed' | 'blocked'
 //   top: boolean                   // a remote machine's own top list, not every process
 //   truncated: boolean             // this computer had more processes than one answer carries
 //   total: number | null           // every process on the machine, when known
@@ -127,6 +127,8 @@ function processesOf(machine, list, ui, now) {
   if (model.state === 'loading' || model.state === 'waiting' || (model.state === 'unavailable' && model.reason === 'not-read-yet')) {
     return { ...base, state: 'loading' }
   }
+  // This computer cannot read its own list (Windows, where PowerShell may not run the reader).
+  if (model.state === 'unavailable' && model.reason === 'no-reader') return { ...base, state: 'blocked' }
   if (model.state !== 'ok') return { ...base, state: 'failed' }
   const rows = rowsOf(model.rows, now)
   const energy = rows.some((r) => r.energy !== null)
@@ -171,9 +173,15 @@ export function toActivityModel({ machine, list, ui = { sort: 'cpu', query: '' }
   // Fleet Monitor there is too old to read these: before 1.2 on a Mac, before 1.3 anywhere else.
   const older = live && !tabs && machine.processes?.state === 'unavailable' && machine.processes.reason === 'outdated'
   const needs = machine.platform === 'darwin' ? '1.2' : '1.3'
+  // Its Fleet Monitor is new enough, and says it cannot read them there.
+  const blocked = live && !tabs && machine.processes?.state === 'unavailable' && machine.processes.reason === 'no-reader'
   return {
     tabs,
-    notice: older ? `Update Fleet Monitor on ${machine.name} to ${needs} or later to see its network, disk and processes here.` : null,
+    notice: older
+      ? `Update Fleet Monitor on ${machine.name} to ${needs} or later to see its network, disk and processes here.`
+      : blocked
+        ? `Fleet Monitor on ${machine.name} cannot read its network, disk and processes: Windows PowerShell is not able to run its reader there.`
+        : null,
     tiles,
     processes,
     suggest: suggestOf(machine)
@@ -629,6 +637,8 @@ export function processesSection(p, { shown, matches, open, tabStop, machineName
   const nodes = [h('div', { class: 'fm-proc-top', 'data-key': 'proc-top' }, h('h2', {}, 'Processes'), h('span', { class: 'fm-sub' }, countText(p, matches)), toolbar(p))]
   if (p.state === 'loading') {
     nodes.push(h('div', { class: 'fm-proc-list', 'data-key': 'proc-loading' }, head(p), skeleton(p)))
+  } else if (p.state === 'blocked') {
+    nodes.push(h('p', { class: 'fm-note', 'data-key': 'proc-blocked' }, 'The process list cannot be read on this computer: Windows PowerShell is not able to run Fleet Monitor’s reader. It is tried again once an hour.'))
   } else if (p.state === 'failed') {
     nodes.push(h('p', { class: 'fm-note', 'data-key': 'proc-failed' }, 'The process list could not be read just now. It is asked for again in a few seconds.'))
   } else if (query && matches === 0) {

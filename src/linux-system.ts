@@ -48,7 +48,14 @@ export const NVIDIA_GPUS_PATH = '/proc/driver/nvidia/gpus'
 export const NVIDIA_SMI_PATH = '/usr/bin/nvidia-smi'
 export const NVIDIA_SMI_ARGS = ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'] as const
 /** The main volume. */
-export const LINUX_SPACE_PATH = '/'
+/** The main volume: `/`, except where `/` is a small read-only image (Fedora Atomic and CoreOS
+ *  mount a composefs of a few MB there, always full) and the real disk is under `/sysroot` and
+ *  `/var`. The first of these with at least SPACE_MIN_BYTES is taken, else the first readable. */
+export const LINUX_SPACE_PATHS = ['/', '/sysroot', '/var'] as const
+export const SPACE_MIN_BYTES = 2 ** 30
+/** A refresh still running after this long is no longer waited for (a read of a driver's file
+ *  can hang in the kernel). The part that hung is not read again until that read returns. */
+export const REFRESH_DEADLINE_MS = 5_000
 const TIMEOUT_MS = 2_000
 /** `nvidia-smi` prints one short line for each GPU. */
 const NVIDIA_SMI_MAX_BYTES = 4 * 1024
@@ -435,6 +442,9 @@ export class LinuxSystemReader {
   private space: Held<{ total: number; used: number }> | null = null
   private spaceTriedAt = Number.NEGATIVE_INFINITY
   private running: Promise<void> | null = null
+  private runningSince = 0
+  /** Parts whose last read has not returned. */
+  private readonly busy = new Set<string>()
 
   constructor(options: LinuxSystemOptions = {}) {
     this.readFile = options.readFile ?? ((path) => readTextBounded(path))
@@ -446,13 +456,33 @@ export class LinuxSystemReader {
     this.heavyAllowed = options.heavyAllowed ?? (() => true)
   }
 
-  /** Reads what is due. A refresh still running is joined, not started again. */
+  /** Reads what is due. A refresh still running is joined, not started again, until
+   *  REFRESH_DEADLINE_MS: one stuck on a file that never answers is then left behind, so the
+   *  parts that do answer are read again. */
   refresh(): Promise<void> {
     if (this.platform !== 'linux') return Promise.resolve()
-    this.running ??= this.readDue().finally(() => {
-      this.running = null
-    })
+    const now = this.mono()
+    if (this.running && (now - this.runningSince >= REFRESH_DEADLINE_MS || now < this.runningSince)) this.running = null
+    if (!this.running) {
+      this.runningSince = now
+      const run: Promise<void> = this.readDue().finally(() => {
+        if (this.running === run) this.running = null
+      })
+      this.running = run
+    }
     return this.running
+  }
+
+  /** Runs one part's read, unless its last one has not returned: a read hung in the kernel holds
+   *  one of Node's few file threads, and a second and a third would leave none for anything else. */
+  private part(name: string, job: () => Promise<void>): Promise<void> | null {
+    if (this.busy.has(name)) return null
+    this.busy.add(name)
+    return job()
+      .catch(() => undefined)
+      .finally(() => {
+        this.busy.delete(name)
+      })
   }
 
   /** What is known now: each part with its age, or null where there is nothing young enough. */
@@ -463,15 +493,12 @@ export class LinuxSystemReader {
 
   private async readDue(): Promise<void> {
     const now = this.mono()
-    const jobs: Promise<void>[] = []
-    if (!this.iface || now - this.iface.at >= SYSTEM_CADENCE.routeMs || now < this.iface.at) {
-      jobs.push(this.readRoute().then(() => this.readNet()))
-    } else {
-      jobs.push(this.readNet())
-    }
-    if (due(this.diskIoTriedAt, now, SYSTEM_CADENCE.diskIoMs)) jobs.push(this.readDiskIo(now))
-    if (due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs) && this.heavy()) jobs.push(this.readGpu(now))
-    if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.readBattery(now))
+    const jobs: (Promise<void> | null)[] = []
+    const route = !this.iface || now - this.iface.at >= SYSTEM_CADENCE.routeMs || now < this.iface.at
+    jobs.push(this.part('net', () => (route ? this.readRoute().then(() => this.readNet()) : this.readNet())))
+    if (due(this.diskIoTriedAt, now, SYSTEM_CADENCE.diskIoMs)) jobs.push(this.part('disk', () => this.readDiskIo(now)))
+    if (due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs) && this.heavy()) jobs.push(this.part('gpu', () => this.readGpu(now)))
+    if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.part('battery', () => this.readBattery(now)))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
     await Promise.all(jobs)
   }
@@ -633,13 +660,22 @@ export class LinuxSystemReader {
 
   private readSpace(now: number): void {
     this.spaceTriedAt = now
-    let space: { total: number; used: number } | null = null
-    try {
-      space = diskSpaceOf(this.statfs(LINUX_SPACE_PATH))
-    } catch {
-      space = null
+    let first: { total: number; used: number } | null = null
+    for (const path of LINUX_SPACE_PATHS) {
+      let space: { total: number; used: number } | null = null
+      try {
+        space = diskSpaceOf(this.statfs(path))
+      } catch {
+        space = null
+      }
+      if (!space) continue
+      first ??= space
+      if (space.total >= SPACE_MIN_BYTES) {
+        this.space = { value: space, at: now }
+        return
+      }
     }
-    if (space) this.space = { value: space, at: now }
+    if (first) this.space = { value: first, at: now }
   }
 }
 

@@ -5,7 +5,8 @@
 //
 //   node tools/smoke-system.ts
 //
-// A runner has no GPU and no battery, so those are printed but never required.
+// A runner has no battery, and no GPU but a software display adapter, so those are printed but
+// never required.
 import os from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { LinuxProcessSampler } from '../src/linux-processes.ts'
@@ -104,7 +105,9 @@ async function main(): Promise<void> {
     check(table.cpuWindowMs !== null && table.cpuWindowMs >= 3_000 && table.cpuWindowMs <= 15_000, 'processes: CPU measured over the time between two readings')
     check(rows.filter((r) => r.cpu !== null).length >= rows.length / 2, 'processes: most have a CPU figure')
     check(rows.filter((r) => isCount(r.mem) && r.mem! > 0).length >= rows.length / 2, 'processes: most have a memory figure')
-    check(rows.every((r) => r.name.length > 0 && !/[\\/]/.test(r.name.slice(0, 1))), 'processes: every one has a name that is not a path')
+    // macOS allows a `/` inside a process's short name; nowhere does a name hold a directory.
+    const pathLike = (name: string): boolean => name.includes('\\') || name.startsWith('/') || (platform !== 'darwin' && name.includes('/'))
+    check(rows.every((r) => r.name.length > 0 && !pathLike(r.name)), 'processes: every one has a name, and none is a path')
     const self = rows.find((r) => r.pid === process.pid) ?? null
     console.log(`     this process: ${self ? show(self) : 'not found'}; node says rss ${Math.round(process.memoryUsage().rss / 2 ** 20)} MB, started ${Math.round(process.uptime())} s ago`)
     check(self !== null, 'processes: this process is in the list')

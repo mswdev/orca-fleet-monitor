@@ -1,4 +1,4 @@
-// The process line: a Mac's top processes, one log line about every 30 s, read back by a paired
+// The process line: a machine's top processes, one log line about every 30 s, read back by a paired
 // desktop from the same `orca plugin logs` answer as the beacons. It has a prefix of its own, so a
 // beacon reader (Fleet Monitor 1.0 and 1.1 included) skips it.
 //

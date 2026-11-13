@@ -88,6 +88,7 @@ export function processAvailability(input: Pick<MergeInput, 'kind' | 'status' | 
     return none('basic')
   }
   if (!PROCESS_PLATFORMS.has(fresh.platform)) return none('not-mac')
+  if (fresh.cannotListProcesses) return none('no-reader')
   // A copy that lists processes there (1.2 on a Mac, 1.3 on Linux and Windows) and publishes its
   // readings always says it publishes its processes.
   if (!fresh.publishesProcesses) return none('outdated')

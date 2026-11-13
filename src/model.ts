@@ -168,10 +168,15 @@ export type BeaconRecord = {
   coreGroups: CoreGroup[] | null
   /** Only from a Mac running Fleet Monitor 1.1 or later; absent or null otherwise. */
   macMemory?: MacMemory | null
-  /** Only from a Mac running Fleet Monitor 1.2 or later; absent or null otherwise. */
+  /** From a machine whose Fleet Monitor reads them (1.2 on a Mac, 1.3 on Linux and Windows);
+   *  absent or null otherwise. */
   system?: MacSystem | null
-  /** The beacon says its writer also publishes process lines (1.2, a Mac, publishing on). */
+  /** The beacon says its writer also publishes process lines (publishing on; 1.2 on a Mac, 1.3 on
+   *  Linux and Windows). */
   publishesProcesses?: boolean
+  /** The beacon says its writer cannot list its processes at all (1.3: a Windows machine whose
+   *  PowerShell cannot run the reader). */
+  cannotListProcesses?: boolean
   /** When the remote Orca appended the log line (remote clock). */
   loggedAt: number
 }
@@ -223,6 +228,7 @@ export type ProcessUnavailable =
   | 'not-mac' // a platform Fleet Monitor lists no processes on (the name is from 1.2, when only macOS did)
   | 'basic' // Fleet Monitor is not installed there, or installed but not running
   | 'outdated' // Fleet Monitor there is too old to list them: before 1.2 on a Mac, 1.3 elsewhere
+  | 'no-reader' // the machine cannot read its own list (Windows, when PowerShell cannot run the reader)
   | 'publishing-off' // it runs there, but its readings are not arriving (publishing off)
   | 'not-read-yet' // not known yet: still connecting, or its plugins or log not read yet
   | 'offline'

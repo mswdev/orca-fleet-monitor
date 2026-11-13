@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { assert, describe, test } from 'orca/testing'
 import {
   isRuntimeSuspended,
+  LINUX_SPACE_PATHS,
   LinuxSystemReader,
   listDir,
   NVIDIA_SMI_ARGS,
@@ -17,14 +18,15 @@ import {
   parseProcNetIpv6Route,
   parseProcNetRoute,
   physicalDisks,
+  type PowerSupply,
   readBytesBounded,
   readTextBounded,
-  type PowerSupply
+  REFRESH_DEADLINE_MS
 } from '../src/linux-system.ts'
 import type { ExecFile } from '../src/mac-memory.ts'
 import { SYSTEM_CADENCE, SYSTEM_MAX_AGE } from '../src/mac-system.ts'
 import type { SystemReader } from '../src/sampler.ts'
-import { fixtureText } from './helpers.ts'
+import { fixtureText, flush } from './helpers.ts'
 
 const ROUTE_HEAD = 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT'
 const routeRow = (iface: string, destination = '00000000', flags = '0003', metric = 100, mask = '00000000'): string =>
@@ -678,6 +680,84 @@ describe('LinuxSystemReader', () => {
     const snapshot = pc.reader.snapshot()!
     assert.deepEqual(snapshot.net, { iface: 'enp3s0', rxBytesPerSec: 10_000, txBytesPerSec: 1_000 })
     assert.deepEqual([snapshot.disk?.readBytesPerSec, snapshot.disk?.writeBytesPerSec], [(400 * 512) / 20, (40 * 512) / 20])
+  })
+})
+
+describe('a Linux that does not behave', () => {
+  test('a file that never answers holds up only its own part, and is not read a second time', async () => {
+    const pc = laptop()
+    const never = new Promise<string | null>(() => {})
+    const hung = '/sys/class/power_supply/BAT0/type'
+    let hangs = 0
+    const reader = new LinuxSystemReader({
+      readFile: (path) => {
+        if (path === hung) {
+          hangs += 1
+          return never
+        }
+        pc.state.reads.push(path)
+        return Promise.resolve(pc.files.get(path) ?? null)
+      },
+      readDir: async (path) => (path === '/sys/block' ? ['nvme0n1'] : path === '/sys/class/power_supply' ? ['AC', 'BAT0'] : null),
+      mono: () => pc.state.t,
+      statfs: () => pc.state.space,
+      platform: 'linux'
+    })
+    const first = reader.refresh()
+    await flush(20)
+    assert.equal(hangs, 1)
+    assert.equal(reader.snapshot()?.net?.iface, 'enp3s0', 'the network was read all the same')
+    // The refresh is still waiting on the battery: until the deadline, a new one joins it.
+    pc.state.t = REFRESH_DEADLINE_MS - 1
+    assert.equal(reader.refresh(), first)
+    // Past it, the parts that answer are read again, and the network has rates.
+    pc.state.t = REFRESH_DEADLINE_MS
+    pc.net.rx += 50_000
+    pc.write()
+    const second = reader.refresh()
+    assert.notEqual(second, first)
+    await second
+    assert.equal(reader.snapshot()?.net?.rxBytesPerSec, 10_000)
+    // The battery is due again a minute later, and is left alone: its first read never returned.
+    pc.state.t = 120_000
+    await reader.refresh()
+    assert.equal(hangs, 1)
+    assert.equal(reader.snapshot()?.battery, null)
+  })
+
+  test('disk space is the real disk where / is a small image that is always full', () => {
+    const GIB = 2 ** 30
+    const at = (volumes: Record<string, { bsize: number; blocks: number; bavail: number } | null>) => {
+      const asked: string[] = []
+      const reader = new LinuxSystemReader({
+        readFile: async () => null,
+        readDir: async () => null,
+        mono: () => 0,
+        statfs: (path) => {
+          asked.push(path)
+          return volumes[path] ?? null
+        },
+        platform: 'linux'
+      })
+      return { reader, asked }
+    }
+    const image = { bsize: 4096, blocks: 2_000, bavail: 0 } // about 8 MB, full: a composefs root
+    const disk = { bsize: 4096, blocks: 100 * (GIB / 4096), bavail: 60 * (GIB / 4096) }
+    // An ordinary machine: `/` is the disk, and nothing else is asked.
+    const usual = at({ '/': disk })
+    void usual.reader.refresh()
+    assert.deepEqual(usual.asked, ['/'])
+    assert.deepEqual([usual.reader.snapshot()?.disk?.totalBytes, usual.reader.snapshot()?.disk?.usedBytes], [100 * GIB, 40 * GIB])
+    // Fedora Atomic: the real disk is at /sysroot.
+    const atomic = at({ '/': image, '/sysroot': disk, '/var': disk })
+    void atomic.reader.refresh()
+    assert.deepEqual(atomic.asked, ['/', '/sysroot'])
+    assert.equal(atomic.reader.snapshot()?.disk?.totalBytes, 100 * GIB)
+    // Nothing of a real size anywhere (a tiny container): `/` as it is, rather than nothing.
+    const tiny = at({ '/': image })
+    void tiny.reader.refresh()
+    assert.deepEqual(tiny.asked, [...LINUX_SPACE_PATHS])
+    assert.equal(tiny.reader.snapshot()?.disk?.totalBytes, 4096 * 2_000)
   })
 })
 

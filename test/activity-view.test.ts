@@ -296,7 +296,8 @@ describe('Overview | Activity', () => {
   })
 
   test('no tabs on a basic machine (the install hint says what installing adds), offline, connecting, or a machine with nothing to show', () => {
-    const linux = base({ id: 'env-linux', name: 'Linux Box', host: { ...base().host, platform: 'linux' }, processes: { state: 'unavailable', reason: 'not-mac', takenAt: null } })
+    // A platform Fleet Monitor reads no activity on (it reads a Mac, Linux and Windows).
+    const linux = base({ id: 'env-linux', name: 'BSD Box', host: { ...base().host, platform: 'freebsd' }, processes: { state: 'unavailable', reason: 'not-mac', takenAt: null } })
     const v = mount(
       viewOf([
         local(),
@@ -322,6 +323,24 @@ describe('Overview | Activity', () => {
     v.handle.show('env-studio')
     assert.equal($(v.root, '[role="tablist"]'), null)
     assert.equal(text($(v.root, '[data-key="activity-notice"]')), 'Update Fleet Monitor on Studio to 1.2 or later to see its network, disk and processes here.')
+  })
+
+  test('a Linux or Windows machine needs 1.3 for it, and the notice says so', () => {
+    for (const platform of ['linux', 'win32']) {
+      const box = base({ id: 'env-box', name: 'Box', host: { ...base().host, platform }, system: null, processes: { state: 'unavailable', reason: 'outdated', takenAt: null } })
+      const v = mount(viewOf([local(), box]))
+      v.handle.show('env-box')
+      assert.equal($(v.root, '[role="tablist"]'), null)
+      assert.equal(text($(v.root, '[data-key="activity-notice"]')), 'Update Fleet Monitor on Box to 1.3 or later to see its network, disk and processes here.', platform)
+    }
+  })
+
+  test('a Windows machine whose PowerShell cannot run the reader says that, and does not ask for an update', () => {
+    const box = base({ id: 'env-box', name: 'Locked Box', host: { ...base().host, platform: 'win32' }, system: null, processes: { state: 'unavailable', reason: 'no-reader', takenAt: null } })
+    const v = mount(viewOf([local(), box]))
+    v.handle.show('env-box')
+    assert.equal($(v.root, '[role="tablist"]'), null)
+    assert.match(text($(v.root, '[data-key="activity-notice"]')), /^Fleet Monitor on Locked Box cannot read its network, disk and processes: Windows PowerShell/)
   })
 })
 
@@ -530,6 +549,14 @@ describe('the Processes card', () => {
     await activity(v, 'local')
     assert.match(text($(v.root, '[data-key="proc-failed"]')), /could not be read just now/)
     assert.equal($(v.root, '.fm-procs'), null)
+  })
+
+  test('this computer, where PowerShell cannot run the reader: said once, not as a passing failure', async () => {
+    const v = mount(viewOf([local()]), () => listOf([], { state: 'unavailable', reason: 'no-reader', takenAt: null, ageMs: null, total: null }))
+    await activity(v, 'local')
+    assert.match(text($(v.root, '[data-key="proc-blocked"]')), /cannot be read on this computer: Windows PowerShell/)
+    assert.equal($(v.root, '[data-key="proc-failed"]'), null)
+    assert.equal($(v.root, '[data-key="proc-loading"]'), null)
   })
 })
 

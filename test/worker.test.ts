@@ -10,7 +10,7 @@ import * as worker from '../src/worker.ts'
 import type { JsonValue, OrcaWorkerApi } from 'orca/worker'
 import { diagnosticsFor, envelope, FakeCli, FakeTime, flush, localSample, okResult } from './helpers.ts'
 
-function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | null; platform?: string } = {}): MonitorDeps {
+function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | null; platform?: string; more?: Partial<MonitorDeps> } = {}): MonitorDeps {
   let reading = 0
   let last: ReturnType<typeof localSample> | null = null
   return {
@@ -36,7 +36,8 @@ function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | n
     runId: () => 'cafe01',
     workerFile: '/home/u/code/orca-fleet-monitor/src/worker.ts',
     declaredCommands: ['fleet.show'],
-    platform: override.platform ?? 'darwin'
+    platform: override.platform ?? 'darwin',
+    ...override.more
   }
 }
 
@@ -217,6 +218,63 @@ test('declaredCommands follows the manifest and fails closed', () => {
     throw new Error('no file')
   }), [])
   assert.ok(worker.declaredCommands().includes('fleet.show'), 'this repository declares it')
+})
+
+// Windows: the PowerShell process the readers share is stopped by nothing else.
+test('stopping the monitor stops the process list and whatever the readers keep running', async () => {
+  const time = new FakeTime()
+  const cli = fakeCli(time)
+  const stopped: string[] = []
+  const processes = { supported: true, setPublishing: () => {}, localTable: async () => null, publishTable: async () => null, stop: () => void stopped.push('processes') }
+  const mounted = await mountWorker(
+    {
+      default: async (orca) => {
+        const monitor = await startFleetMonitor(orca, fakeDeps(time, cli, { platform: 'win32', more: { processes, dispose: () => void stopped.push('dispose') } }))
+        await monitor.stop()
+      },
+      deactivate: async () => {}
+    },
+    { host: mockHost({ settings: {} }) }
+  )
+  assert.deepEqual(stopped, ['processes', 'dispose'])
+  await mounted.deactivate()
+})
+
+// Windows, where PowerShell cannot run the reader: said in the answer and in the beacon.
+test('a process list that cannot be read here is answered and published as that, not as waiting', async () => {
+  const time = new FakeTime()
+  const cli = fakeCli(time)
+  let asked = 0
+  const processes = {
+    supported: true,
+    setPublishing: () => {},
+    localTable: async () => {
+      asked += 1
+      return null
+    },
+    publishTable: async () => null,
+    stop: () => {},
+    unavailable: () => true
+  }
+  let monitor: FleetMonitor | null = null
+  const mounted = await mountWorker(
+    {
+      default: async (orca) => {
+        monitor = await startFleetMonitor(orca, fakeDeps(time, cli, { platform: 'win32', more: { processes } }))
+      },
+      deactivate: async () => monitor?.stop()
+    },
+    { host: mockHost({ settings: {} }) }
+  )
+  const answer = (await mounted.request('fleet.processes', { id: 'local' })) as { state: string; reason: string }
+  assert.deepEqual([answer.state, answer.reason], ['unavailable', 'no-reader'])
+  assert.equal(asked, 0, 'nothing is read')
+  time.advance(5_000)
+  await flush()
+  const beacons = mounted.logs.filter((line) => line.startsWith(BEACON_PREFIX))
+  assert.ok(beacons.length > 0)
+  assert.ok(beacons.every((line) => line.includes('"pl":2')), 'the beacon says it cannot list them')
+  await mounted.deactivate()
 })
 
 test('deactivate stops every timer', async () => {

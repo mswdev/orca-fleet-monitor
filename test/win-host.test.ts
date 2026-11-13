@@ -4,6 +4,8 @@ import { assert, describe, test } from 'orca/testing'
 import {
   HOST_COMMANDS,
   HOST_FLAGS,
+  HOST_GIVE_UP_MS,
+  HOST_GIVE_UP_STARTS,
   HOST_LINE_MAX,
   HOST_QUEUE_MAX,
   HOST_RESTART_MAX_MS,
@@ -35,12 +37,17 @@ describe('the script', () => {
       assert.ok(HOST_SCRIPT.includes(`'${name}'`), name)
     }
     assert.ok(HOST_SCRIPT.includes('[Console]::In.ReadLine()'))
-    assert.equal(/Get-Process|Get-CimInstance|Get-WmiObject|CommandLine|MainWindowTitle|\.Path\b/i.test(HOST_SCRIPT), false, 'nothing that reads a path, a command line or a title')
+    assert.equal(/Get-Process|Get-WmiObject|Win32_Process|CommandLine|MainWindowTitle|\.Path\b/i.test(HOST_SCRIPT), false, 'nothing that reads a path, a command line or a title')
+    // WMI is asked one thing, once: the names of the display adapters.
+    assert.deepEqual(HOST_SCRIPT.match(/Get-CimInstance[^|\n]*/g), ['Get-CimInstance -ClassName Win32_VideoController -Property Name '])
   })
 
   test('the flags: the script as plain text, never encoded', () => {
-    assert.deepEqual([...HOST_FLAGS], ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'])
+    assert.deepEqual([...HOST_FLAGS], ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'])
     assert.equal(HOST_FLAGS.some((flag) => /^-e(nc|ncodedcommand)?$/i.test(flag)), false)
+    // No script file is run, so the execution policy has nothing to say; asking to bypass it is
+    // what security tools look for.
+    assert.equal(HOST_FLAGS.some((flag) => /executionpolicy|bypass/i.test(flag)), false)
   })
 
   test('PowerShell by its full path under the Windows folder, whatever case the variable is in', () => {
@@ -105,7 +112,7 @@ function fakePowerShell() {
 function setup(platform = 'win32', env: NodeJS.ProcessEnv = ENV) {
   const time = new FakeTime()
   const ps = fakePowerShell()
-  const host = new PowerShellHost({ spawn: ps.spawn, timers: time, platform, env })
+  const host = new PowerShellHost({ spawn: ps.spawn, timers: time, platform, env, mono: () => time.now() })
   return { time, ps, host }
 }
 
@@ -254,39 +261,84 @@ describe('the PowerShell host', () => {
     assert.equal(await first, null)
   })
 
-  test('the pause doubles until a process answers, and never passes five minutes', async () => {
+  test('the pause doubles with each failure, an answer or not, and starts over only after a process that lasted', async () => {
     const { time, ps, host } = setup()
-    void host.request('net', 1_000)
-    ps.children[0]!.exit()
-    time.advance(5_000)
-    void host.request('net', 1_000)
-    assert.equal(ps.children.length, 2)
-    ps.children[1]!.exit()
-    time.advance(9_999)
-    assert.equal(await host.request('net', 1_000), null)
-    assert.equal(ps.children.length, 2, 'the second pause is 10 s')
-    time.advance(1)
-    const third = host.request('net', 1_000)
-    assert.equal(ps.children.length, 3)
-    ps.children[2]!.say('3 1\n')
-    assert.equal(await third, 1)
-    // One that answered and then ended: 5 s again.
-    ps.children[2]!.exit()
-    time.advance(5_000)
-    void host.request('net', 1_000)
-    assert.equal(ps.children.length, 4)
-    for (let i = 0; i < 12; i += 1) {
-      ps.children.at(-1)!.exit()
-      time.advance(HOST_RESTART_MAX_MS)
-      void host.request('net', 1_000)
+    /** Starts a process, has it answer one request, then ends it `after` ms later. */
+    const answerThenEnd = async (after: number): Promise<void> => {
+      const asked = host.request('net', 1_000)
+      const child = ps.children.at(-1)!
+      child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+      assert.equal(await asked, 1)
+      time.advance(after)
+      child.exit()
     }
-    assert.equal(ps.children.length, 16, 'one start for each pause that ended')
+    await answerThenEnd(1_000)
+    time.advance(4_999)
+    assert.equal(await host.request('net', 1_000), null, 'the first pause is 5 s')
+    time.advance(1)
+    // It answered again, and stalled again: the pause still doubles (it did not start over).
+    await answerThenEnd(1_000)
+    assert.equal(ps.children.length, 2)
+    time.advance(9_999)
+    assert.equal(await host.request('net', 1_000), null, 'the second pause is 10 s, though the process answered')
+    time.advance(1)
+    await answerThenEnd(1_000)
+    time.advance(19_999)
+    assert.equal(await host.request('net', 1_000), null, 'the third is 20 s')
+    time.advance(1)
+    // One that lasted five minutes was a working PowerShell: 5 s again after it.
+    await answerThenEnd(HOST_RESTART_MAX_MS)
+    time.advance(4_999)
+    assert.equal(await host.request('net', 1_000), null)
+    time.advance(1)
+    void host.request('net', 1_000)
+    assert.equal(ps.children.length, 5)
+    assert.equal(host.unavailable, false)
+    host.stop()
+  })
+
+  test('the pause never passes five minutes while PowerShell answers at all', async () => {
+    const { time, ps, host } = setup()
+    for (let i = 0; i < 12; i += 1) {
+      const asked = host.request('net', 1_000)
+      const child = ps.children.at(-1)!
+      child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+      await asked
+      child.exit()
+      time.advance(HOST_RESTART_MAX_MS)
+    }
+    assert.equal(ps.children.length, 12, 'one start for each pause that ended')
+    void host.request('net', 1_000)
     ps.children.at(-1)!.exit()
     time.advance(HOST_RESTART_MAX_MS - 1)
     assert.equal(await host.request('net', 1_000), null)
     time.advance(1)
     void host.request('net', 1_000)
-    assert.equal(ps.children.length, 17)
+    assert.equal(ps.children.length, 14)
+    host.stop()
+  })
+
+  test('five in a row that never answer: PowerShell is unusable here, and is tried once an hour', async () => {
+    const { time, ps, host } = setup()
+    for (let i = 0; i < HOST_GIVE_UP_STARTS; i += 1) {
+      assert.equal(host.unavailable, false)
+      void host.request('net', 1_000)
+      ps.children.at(-1)!.exit()
+      if (i < HOST_GIVE_UP_STARTS - 1) time.advance(HOST_RESTART_MAX_MS)
+    }
+    assert.equal(ps.children.length, HOST_GIVE_UP_STARTS)
+    assert.equal(host.unavailable, true)
+    time.advance(HOST_GIVE_UP_MS - 1)
+    assert.equal(await host.request('net', 1_000), null)
+    assert.equal(ps.children.length, HOST_GIVE_UP_STARTS, 'nothing is started for an hour')
+    time.advance(1)
+    const asked = host.request('net', 1_000)
+    assert.equal(ps.children.length, HOST_GIVE_UP_STARTS + 1)
+    // The day it answers, it is usable again.
+    const child = ps.children.at(-1)!
+    child.say(`${child.written.at(-1)!.split(' ')[0]} 1\n`)
+    assert.equal(await asked, 1)
+    assert.equal(host.unavailable, false)
     host.stop()
   })
 

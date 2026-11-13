@@ -758,7 +758,7 @@ function systemOf(m, history, now) {
 }
 
 const PROCESS_STATES = ['full', 'top', 'waiting', 'unavailable']
-const PROCESS_REASONS = ['not-mac', 'basic', 'outdated', 'publishing-off', 'not-read-yet', 'offline', 'unknown-machine', 'failed']
+const PROCESS_REASONS = ['not-mac', 'basic', 'outdated', 'no-reader', 'publishing-off', 'not-read-yet', 'offline', 'unknown-machine', 'failed']
 
 /** Whether a machine has a process list, and the process using the most memory in its newest
  *  one, with its share of the machine's RAM. */

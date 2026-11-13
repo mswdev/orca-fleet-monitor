@@ -14,10 +14,15 @@ export const MAC_MEMORY_MAX_AGE_MS = 12_000
 /** A read that has not answered after this long is given up on, so the next sample starts a fresh
  *  one (each command has a 2 s timeout of its own; src/monitor.ts waits at most 3 s). */
 export const PREPARE_DEADLINE_MS = 2_750
+/** How long `prepare()` waits for the network, disk, GPU and battery reads, so that a sample
+ *  carries this tick's reading and not the one before. They are quick (a file or a small command);
+ *  past this they are left to finish on their own, and the sample takes what was read last. */
+export const SYSTEM_WAIT_MS = 250
 
 /** Reads a Mac's memory; src/mac-memory.ts's MacMemoryReader. */
 export type MemoryReader = { read(): Promise<MacMemory | null> }
-/** Reads a Mac's network, disk, GPU and battery; src/mac-system.ts's MacSystemReader. `refresh`
+/** Reads network, disk, GPU and battery: src/mac-system.ts's MacSystemReader, src/linux-system.ts's
+ *  LinuxSystemReader or src/win-system.ts's WindowsSystemReader. `refresh`
  *  runs what is due, `snapshot` gives what is known now with its ages. */
 export type SystemReader = { refresh(): Promise<void>; snapshot(): MacSystem | null }
 
@@ -160,11 +165,34 @@ export class LocalSampler {
    *  it is given up on (what it answers later is dropped) and the next call starts a fresh one. A
    *  failed read keeps the last good reading for `sample()` to carry. Never rejects. */
   prepare(): Promise<void> {
-    // The optional reads (network, disk, GPU, battery) run on their own: the memory reading, and
-    // so the beacon and this computer's alerts, never wait for them. sample() takes what they
-    // last read, with its age.
-    if (this.system) void this.system.refresh().catch(() => undefined)
-    if (!this.memory) return Promise.resolve()
+    const system = this.systemRead()
+    const memory = this.memoryRead()
+    return memory === null ? system : Promise.all([memory, system]).then(() => undefined)
+  }
+
+  /** Starts the optional reads (network, disk, GPU, battery) and waits for them at most
+   *  SYSTEM_WAIT_MS: the memory reading, and so the beacon and this computer's alerts, are never
+   *  held up longer than that by a slow one. sample() takes what they last read, with its age. */
+  private systemRead(): Promise<void> {
+    if (!this.system) return Promise.resolve()
+    let refresh: Promise<void>
+    try {
+      refresh = this.system.refresh().catch(() => undefined)
+    } catch {
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => {
+      const handle = this.later(resolve, SYSTEM_WAIT_MS)
+      void refresh.then(() => {
+        this.cancel(handle)
+        resolve()
+      })
+    })
+  }
+
+  /** The Mac's memory read `prepare()` waits for; null without a reader. */
+  private memoryRead(): Promise<void> | null {
+    if (!this.memory) return null
     // A read older than the deadline on this sampler's own clock is given up on here too, should
     // its timer not have fired (a host that froze timers, say).
     if (this.reading && this.mono() - this.readingSince >= PREPARE_DEADLINE_MS) {

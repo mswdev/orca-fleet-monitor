@@ -41,13 +41,16 @@ type Wire = {
   l: [number, number, number]
   /** A Mac's memory as Activity Monitor counts it (1.1 and later). See WireMac. */
   mm?: WireMac
-  /** A Mac's network, disk, GPU and battery (1.2 and later). See WireNet and the rest. */
+  /** Network, disk, GPU and battery (a Mac from 1.2, Linux and Windows from 1.3). See WireNet and
+   *  the rest. */
   nw?: WireNet
   dk?: WireDisk
   gp?: WireGpu
   bt?: WireBattery
-  /** 1 when this copy also writes process lines (1.2, a Mac, publishing on). */
-  pl?: 1
+  /** 1 when this copy also writes process lines (publishing on; a Mac from 1.2, Linux and Windows
+   *  from 1.3). 2 when it cannot list its processes at all (1.3: a Windows machine whose PowerShell
+   *  cannot run the reader); an older reader takes that for "does not publish them", which is so. */
+  pl?: 1 | 2
 }
 
 /** `nw`: the default interface and its bytes per second in (`r`) and out (`t`), absent on the
@@ -338,10 +341,10 @@ const round2 = (value: number): number => Math.round(value * 100) / 100
 const clip = (text: string, max: number): string => (text.length > max ? text.slice(0, max) : text)
 
 /** One beacon line for `orca.log`, or null when even the trimmed form will not fit. `processes`
- *  says that this copy also writes process lines. */
+ *  says that this copy also writes process lines, or (`'unavailable'`) that it cannot list them. */
 export function encodeBeacon(
   sample: LocalSample,
-  meta: { run: string; seq: number; intervalMs: number; processes?: boolean },
+  meta: { run: string; seq: number; intervalMs: number; processes?: boolean | 'unavailable' },
   maxChars = BEACON_MAX_CHARS
 ): string | null {
   const wire: Wire = {
@@ -365,7 +368,7 @@ export function encodeBeacon(
     l: [round2(sample.load[0]), round2(sample.load[1]), round2(sample.load[2])],
     ...(sample.macMemory ? { mm: encodeMac(sample.macMemory) } : {}),
     ...encodeSystem(sample.system),
-    ...(meta.processes ? { pl: 1 as const } : {})
+    ...(meta.processes === 'unavailable' ? { pl: 2 as const } : meta.processes ? { pl: 1 as const } : {})
   }
   // Degrade in steps: per-core values (and the groups over them) first, then the network, disk,
   // GPU and battery figures, then long free-text fields. The Mac memory figures (about 200
@@ -461,7 +464,7 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
     macMemory: decodeMac(w.mm),
     // Only where a 1.2 beacon has them, so an older one decodes exactly as it always did.
     ...(system ? { system } : {}),
-    ...(w.pl === 1 ? { publishesProcesses: true } : {}),
+    ...(w.pl === 1 ? { publishesProcesses: true } : w.pl === 2 ? { cannotListProcesses: true } : {}),
     loggedAt: loggedAt ?? t
   }
 }

@@ -78,6 +78,13 @@ describe('merge', () => {
       const onOneTwo = decodeBeacon(encodeBeacon(localSample({ platform }), { run: 'r', seq: 1, intervalMs: 5_000 }))!
       assert.equal(merge({ beacon: beacon(onOneTwo) }).processes?.reason, 'outdated', platform)
     }
+    // A Windows machine whose PowerShell cannot run the reader says so, in a key an older reader
+    // takes for "publishes none".
+    const line = encodeBeacon(localSample({ platform: 'win32' }), { run: 'r', seq: 1, intervalMs: 5_000, processes: 'unavailable' })!
+    assert.match(line, /"pl":2/)
+    const blocked = decodeBeacon(line)!
+    assert.deepEqual([blocked.publishesProcesses, blocked.cannotListProcesses], [undefined, true])
+    assert.equal(merge({ beacon: beacon(blocked) }).processes?.reason, 'no-reader')
     const other = decodeBeacon(encodeBeacon(localSample({ platform: 'freebsd' }), { run: 'r', seq: 1, intervalMs: 5_000, processes: true }))!
     assert.equal(merge({ beacon: beacon(other) }).processes?.reason, 'not-mac')
     assert.deepEqual(processAvailability({ kind: 'local', status: 'online', platform: 'darwin' }, null), { state: 'full', reason: null, takenAt: null, largest: null, largestAt: null, memAgeMs: null })

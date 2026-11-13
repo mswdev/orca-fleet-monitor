@@ -263,3 +263,12 @@ describe('the Windows process sampler', () => {
     assert.deepEqual([table.rows[0]!.name, table.rows[0]!.cpu, table.rows[0]!.start], ['new-tool', 10, NOV_12 + 3_602])
   })
 })
+
+test('the sampler says when PowerShell cannot run the reader, as the host does', () => {
+  const answering = new WindowsProcessSampler({ host: { request: async () => null, unavailable: false }, platform: 'win32' })
+  assert.equal(answering.unavailable(), false)
+  const blocked = new WindowsProcessSampler({ host: { request: async () => null, unavailable: true }, platform: 'win32' })
+  assert.equal(blocked.unavailable(), true)
+  // A host given without that word (a test's fake) is taken to work.
+  assert.equal(new WindowsProcessSampler({ host: { request: async () => null }, platform: 'win32' }).unavailable(), false)
+})

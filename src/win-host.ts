@@ -22,7 +22,10 @@
 //          "GPU Engine" counters (Windows 10 1709 and later); null on the first request. A GPU
 //          has several engines (3D, copy, video decode, ...), each with one counter per process
 //          using it: an engine's figure is the sum over its processes, and the GPU's is its
-//          busiest engine, which is the one figure Task Manager shows for a GPU
+//          busiest engine, which is the one figure Task Manager shows for a GPU. A computer
+//          whose only display adapters are Microsoft's own software ones (a virtual machine or
+//          a server without a GPU: "Microsoft Basic Display Adapter", "Microsoft Hyper-V Video")
+//          gets no figure, though those too have engine counters; that is asked of WMI once
 //   bat    the power line, the battery's charge and flags, and the seconds it has left
 //          (System.Windows.Forms.SystemInformation.PowerStatus)
 //   proc   every process from one read of the "Process" counters: pid, parent pid, name,
@@ -38,6 +41,7 @@
 // first use of the performance counters in a process can take a second or more.
 import { spawn as nodeSpawn } from 'node:child_process'
 import path from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { StringDecoder } from 'node:string_decoder'
 import type { Timers } from './processes.ts'
 
@@ -68,6 +72,7 @@ $q = [string][char]34
 $bad = [regex]'[\x00-\x1f]'
 $global:fmDisk = $null
 $global:fmGpu = $null
+$global:fmHasGpu = $null
 $global:fmForms = $false
 
 function FmJson($value) {
@@ -112,6 +117,14 @@ function FmDisk {
 }
 
 function FmGpu {
+  if ($null -eq $global:fmHasGpu) {
+    $global:fmHasGpu = $true
+    try {
+      $real = @(Get-CimInstance -ClassName Win32_VideoController -Property Name | Where-Object { $_.Name -and $_.Name -notlike 'Microsoft *' })
+      $global:fmHasGpu = ($real.Count -gt 0)
+    } catch { }
+  }
+  if (-not $global:fmHasGpu) { return $null }
   if (-not [System.Diagnostics.PerformanceCounterCategory]::Exists('GPU Engine')) { return $null }
   $now = (New-Object System.Diagnostics.PerformanceCounterCategory('GPU Engine')).ReadCategory()['utilization percentage']
   if ($null -eq $now) { return $null }
@@ -199,7 +212,7 @@ while ($true) {
 /** Before the script: no banner, no profile (a person's own could print or take seconds), no
  *  prompt ever, and `-Command` with the script as plain text. Never `-EncodedCommand`, which
  *  security tools take for something hiding. */
-export const HOST_FLAGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'] as const
+export const HOST_FLAGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'] as const
 
 const DEFAULT_SYSTEM_ROOT = 'C:\\Windows'
 
@@ -258,6 +271,11 @@ export const HOST_START_MS = 10_000
  *  loop. */
 export const HOST_RESTART_MIN_MS = 5_000
 export const HOST_RESTART_MAX_MS = 5 * 60_000
+/** After this many processes in a row that never answered anything, PowerShell is taken to be
+ *  unusable here (blocked by policy, or in Constrained Language Mode, where the script cannot
+ *  run): it is tried again only every HOST_GIVE_UP_MS, and `unavailable` says so meanwhile. */
+export const HOST_GIVE_UP_STARTS = 5
+export const HOST_GIVE_UP_MS = 60 * 60_000
 /** Longest answer line, in characters. A process list is about 80 bytes a process. */
 export const HOST_LINE_MAX = 4 * 1024 * 1024
 /** Requests that may wait at once; each reader asks for one thing at a time, so a handful do. */
@@ -294,9 +312,14 @@ export class PowerShellHost {
   private nextId = 1
   private pause: unknown = null
   private restartDelay = HOST_RESTART_MIN_MS
+  /** When the running process was started, and how many in a row have ended without answering. */
+  private startedAt = 0
+  private barren = 0
   private stopped = false
+  private readonly mono: () => number
 
-  constructor(deps: { spawn?: SpawnHost; timers?: Timers; platform?: string; env?: NodeJS.ProcessEnv } = {}) {
+  constructor(deps: { spawn?: SpawnHost; timers?: Timers; platform?: string; env?: NodeJS.ProcessEnv; mono?: () => number } = {}) {
+    this.mono = deps.mono ?? (() => performance.now())
     this.spawnHost = deps.spawn ?? realSpawnHost
     this.timers = deps.timers ?? realTimers
     this.platform = deps.platform ?? process.platform
@@ -327,6 +350,12 @@ export class PowerShellHost {
     })
   }
 
+  /** True while PowerShell looks unusable on this computer: HOST_GIVE_UP_STARTS processes in a
+   *  row ended without answering anything. It is still tried again, once an hour. */
+  get unavailable(): boolean {
+    return this.barren >= HOST_GIVE_UP_STARTS
+  }
+
   /** Kills the process and answers everything waiting with null. For good: a request made after
    *  this is answered null and starts nothing, so a late one cannot leave a PowerShell running. */
   stop(): void {
@@ -341,6 +370,8 @@ export class PowerShellHost {
   private send(): void {
     if (this.active || this.queue.length === 0) return
     if (!this.child && !this.start()) {
+      // Nothing started at all: as barren as a process that never answered.
+      this.answered = false
       this.failed()
       return
     }
@@ -390,6 +421,7 @@ export class PowerShellHost {
     this.decoder = new StringDecoder('utf8')
     this.buffer = ''
     this.answered = false
+    this.startedAt = this.mono()
     return true
   }
 
@@ -422,7 +454,7 @@ export class PowerShellHost {
     this.timers.clearTimeout(active.timer)
     this.active = null
     this.answered = true
-    this.restartDelay = HOST_RESTART_MIN_MS
+    this.barren = 0
     let value: unknown = null
     try {
       value = JSON.parse(text.slice(space + 1))
@@ -437,11 +469,17 @@ export class PowerShellHost {
   /** This process is of no more use (it ended, stalled, or wrote a line too long), or none could
    *  be started: it is killed, everything waiting is answered null, and the pause begins. */
   private failed(): void {
+    // The pause grows with each failure and starts over only after a process that lasted: one
+    // answer does not count, or a PowerShell that answers `net` and then stalls on a counter
+    // would be started again every few seconds for good.
+    const lasted = this.child !== null && this.mono() - this.startedAt >= HOST_RESTART_MAX_MS
+    if (!this.answered) this.barren += 1
     this.kill()
     this.release()
     if (this.stopped || this.pause !== null) return
-    const delay = this.restartDelay
-    this.restartDelay = Math.min(HOST_RESTART_MAX_MS, delay * 2)
+    if (lasted) this.restartDelay = HOST_RESTART_MIN_MS
+    const delay = this.barren >= HOST_GIVE_UP_STARTS ? HOST_GIVE_UP_MS : this.restartDelay
+    this.restartDelay = Math.min(HOST_RESTART_MAX_MS, this.restartDelay * 2)
     this.pause = this.timers.setTimeout(() => {
       this.pause = null
     }, delay)

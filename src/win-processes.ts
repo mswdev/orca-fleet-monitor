@@ -159,7 +159,7 @@ export function buildWindowsTable(current: WindowsProcessReading, previous: Wind
 }
 
 export type WindowsProcessSamplerDeps = {
-  host?: Pick<PowerShellHost, 'request'>
+  host?: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean }
   mono?: () => number
   wall?: () => number
   platform?: string
@@ -173,7 +173,7 @@ export type WindowsProcessSamplerDeps = {
  * it is handed in and never stopped here. Nothing is asked on any other platform.
  */
 export class WindowsProcessSampler {
-  private readonly host: Pick<PowerShellHost, 'request'>
+  private readonly host: Pick<PowerShellHost, 'request'> & { readonly unavailable?: boolean }
   private readonly mono: () => number
   private readonly wall: () => number
   private readonly platform: string
@@ -218,6 +218,11 @@ export class WindowsProcessSampler {
 
   /** Nothing of this sampler's own runs; whoever made the PowerShell host stops it. */
   stop(): void {}
+
+  /** True while PowerShell cannot run the reader here (src/win-host.ts `unavailable`). */
+  unavailable(): boolean {
+    return this.host.unavailable === true
+  }
 
   private async tableNow(): Promise<ProcessTable | null> {
     const cached = this.table
