@@ -109,6 +109,28 @@ describe('when qprocess is run', () => {
     assert.equal(state.runs, 2, 'not straight away')
     state.t += OWNER_REFRESH_MS
     assert.equal((await owners.lookup(null)).owners.get(22548), 'other')
+    // Runs that give nothing: no sooner than the usual cadence (not for each newer process), and
+    // after three in a row, an hour.
+    state.run = 'failed'
+    const runs = state.runs
+    for (let i = 0; i < 4; i += 1) {
+      state.t += OWNER_MIN_GAP_MS + 1
+      state.wall += OWNER_MIN_GAP_MS + 1
+      await owners.lookup(state.wall / 1000 + 1)
+    }
+    assert.equal(state.runs, runs + 1, 'a newer process does not bring on a run after one that gave nothing')
+    state.t += OWNER_REFRESH_MS
+    await owners.lookup(null)
+    state.t += OWNER_REFRESH_MS
+    await owners.lookup(null)
+    assert.equal(state.runs, runs + 3)
+    state.t += OWNER_REFRESH_MS
+    await owners.lookup(null)
+    assert.equal(state.runs, runs + 3, 'three in a row: left alone')
+    assert.equal((await owners.lookup(null)).owners.get(22548), 'other', 'what was known is still known')
+    state.run = { output: OUTPUT }
+    state.t += OWNER_RETRY_MS
+    assert.equal((await owners.lookup(null)).owners.get(22548), 'Matt')
     const thrown = new WindowsOwners({ run: async () => { throw new Error('no') }, mono: () => 0, me: null })
     assert.equal((await thrown.lookup(null)).owners.size, 0)
   })

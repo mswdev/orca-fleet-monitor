@@ -31,6 +31,9 @@ export const OWNER_MIN_GAP_MS = 2_000
 export const OWNER_RETRY_MS = 60 * 60_000
 /** How long one run may take before it is given up on (and the list goes on without owners). */
 export const OWNER_TIMEOUT_MS = 3_000
+/** Runs in a row that gave nothing before qprocess is left alone for OWNER_RETRY_MS, as when it is
+ *  missing. Until then, one that gave nothing is tried again only at OWNER_REFRESH_MS. */
+export const OWNER_FAILURE_LIMIT = 3
 /** Longest output read: about 100 characters a process. */
 const OUTPUT_MAX = 2 * 1024 * 1024
 const USER_COLUMNS = 22
@@ -82,9 +85,12 @@ function realRun(env: NodeJS.ProcessEnv): RunQprocess {
   return () =>
     new Promise((resolve) => {
       execFile(file, ['*'], { windowsHide: true, timeout: OWNER_TIMEOUT_MS, maxBuffer: OUTPUT_MAX, encoding: 'latin1', env }, (error, stdout) => {
-        const code = (error as NodeJS.ErrnoException | null)?.code
+        const failure = error as (NodeJS.ErrnoException & { killed?: boolean; signal?: string | null }) | null
+        const code = failure?.code
         if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM') resolve('missing')
-        else if (error) resolve('failed')
+        // Killed (too slow) or cut off (too much output): what it printed may be partial.
+        else if (failure && (failure.killed || failure.signal || typeof code !== 'number')) resolve('failed')
+        // Done, whatever its exit code: what it printed is the whole list.
         else resolve({ output: typeof stdout === 'string' ? stdout : '' })
       })
     })
@@ -104,8 +110,11 @@ export class WindowsOwners {
    *  were read (wall clock, against processes' start times). */
   private triedAt = Number.NEGATIVE_INFINITY
   private readWall = Number.NEGATIVE_INFINITY
-  /** When qprocess could not be started: not tried again for OWNER_RETRY_MS. */
+  /** When qprocess could not be started, or gave nothing OWNER_FAILURE_LIMIT times in a row: not
+   *  tried again for OWNER_RETRY_MS. */
   private missingAt = Number.NEGATIVE_INFINITY
+  /** Runs in a row that gave nothing. */
+  private failures = 0
   private running: Promise<void> | null = null
 
   constructor(deps: { run?: RunQprocess; mono?: () => number; wall?: () => number; me?: string | null; env?: NodeJS.ProcessEnv } = {}) {
@@ -131,7 +140,8 @@ export class WindowsOwners {
     const now = this.mono()
     if (!(now - this.missingAt < OWNER_RETRY_MS && now >= this.missingAt)) {
       const stale = now - this.triedAt >= OWNER_REFRESH_MS || now < this.triedAt
-      const newer = newestStart !== null && newestStart * 1000 > this.readWall - 1_000 && now - this.triedAt >= OWNER_MIN_GAP_MS
+      // A newer process is no reason to run again a qprocess that has just given nothing.
+      const newer = this.failures === 0 && newestStart !== null && newestStart * 1000 > this.readWall - 1_000 && now - this.triedAt >= OWNER_MIN_GAP_MS
       if (stale || newer) await this.read()
     }
     return { owners: this.owners, readAt: this.readWall }
@@ -152,9 +162,18 @@ export class WindowsOwners {
         this.owners = new Map()
         return
       }
-      // A run that failed keeps what is known; the next comes at the usual cadence.
+      // A run that failed keeps what is known; the next comes at the usual cadence, and after a few
+      // in a row, an hour later.
       const owners = run === 'failed' ? null : parseQprocess(run.output, this.me)
-      if (!owners || owners.size === 0) return
+      if (!owners || owners.size === 0) {
+        this.failures += 1
+        if (this.failures >= OWNER_FAILURE_LIMIT) {
+          this.failures = 0
+          this.missingAt = this.mono()
+        }
+        return
+      }
+      this.failures = 0
       this.owners = owners
       this.readWall = wall
     })().finally(() => {

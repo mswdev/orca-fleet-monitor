@@ -8,6 +8,8 @@
 // A runner has no battery, and no GPU but a software display adapter, so those are printed but
 // never required.
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import os from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { LinuxProcessSampler } from '../src/linux-processes.ts'
@@ -143,8 +145,9 @@ async function main(): Promise<void> {
       check(near, `processes: its CPU is what Node says it used (${self.cpu}% against ${expected === null ? 'none' : expected.toFixed(1) + '%'})`)
       const age = self.start === null ? null : Date.now() / 1000 - self.start
       check(age !== null && Math.abs(age - process.uptime()) < 30, `processes: its start time is right (${age === null ? 'none' : Math.round(age) + ' s ago'})`)
-      // Windows names owners through qprocess, which not every edition has: checked where it gave any.
-      if (platform !== 'win32' || rows.some((r) => r.user !== null)) check(self.user === os.userInfo().username, `processes: its owner is this user (${self.user})`)
+      // Windows names owners through qprocess, which not every edition has: checked where it is.
+      const qprocess = platform === 'win32' && existsSync(path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'qprocess.exe'))
+      if (platform !== 'win32' || qprocess) check(self.user === os.userInfo().username, `processes: its owner is this user (${self.user})`)
       else console.log('     owners: none (qprocess is not on this Windows)')
     }
   }
