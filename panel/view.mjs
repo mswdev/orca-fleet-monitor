@@ -202,11 +202,17 @@ function pairHint(open) {
   )
 }
 
+/** The zero line across a sparkline's whole width, under its series: a machine with a few minutes
+ *  of history draws only at the right-hand end (each slot is a minute of the last 30), and the
+ *  line says the rest is time not yet seen rather than a glitch. */
+export const SPARK_RAIL = 'M0 26 L100 26'
+
 function spark(values, tone) {
   const paths = seriesPaths(values, 100, 28, 2)
   return s(
     'svg',
     { class: 'fm-spark', viewBox: '0 0 100 28', preserveAspectRatio: 'none', 'aria-hidden': 'true', focusable: 'false' },
+    s('path', { class: 'fm-spark-rail', d: SPARK_RAIL }),
     s('path', { class: 'fm-area', d: paths.area || 'M0 0' }),
     s('path', { class: 'fm-line', d: paths.line || 'M0 0' })
   )
@@ -605,6 +611,20 @@ function macRows(m) {
   return h('dl', { class: 'fm-facts fm-mem-facts', 'data-key': 'mem-facts' }, rows.map(factRow))
 }
 
+/** Rows under a Windows computer's own reading, as Task Manager's memory page has them. */
+function winRows(m) {
+  const w = m.mem.win
+  const rows = [
+    { k: 'In use', v: size(w.inUseBytes) },
+    { k: 'Available', v: size(w.availableBytes) },
+    { k: 'Committed', v: size(w.committedBytes), note: w.committedBytes !== null && w.commitLimitBytes !== null ? `of ${size(w.commitLimitBytes)}` : '' },
+    { k: 'Cached', v: size(w.cachedBytes) },
+    { k: 'Paged pool', v: size(w.pagedPoolBytes) },
+    { k: 'Non-paged pool', v: size(w.nonPagedPoolBytes) }
+  ]
+  return h('dl', { class: 'fm-facts fm-mem-facts', 'data-key': 'mem-facts' }, rows.map(factRow))
+}
+
 const PRESSURE_NOTES = {
   install: 'Installing Fleet Monitor on that machine adds real RAM usage, swap and pressure.',
   enable: 'Turning Fleet Monitor on there adds real RAM usage, swap and pressure.',
@@ -615,7 +635,8 @@ const PRESSURE_NOTES = {
 
 function memorySection(m, suggest = null) {
   const value = m.mem.reliable ? m.mem.pct : null
-  const used = m.mem.kind === 'used'
+  // A Mac's own reading, or a Windows computer's: RAM in use, as Activity Monitor or Task Manager.
+  const used = m.mem.kind === 'used' || Boolean(m.mem.win)
   // With the install row on screen, it says what installing adds; the note does not repeat it.
   const note =
     m.mem.kind === 'pressure' && m.mem.pressureNote ? (m.mem.pressureNote === 'install' && m.install ? '' : PRESSURE_NOTES[m.mem.pressureNote]) : null
@@ -633,7 +654,8 @@ function memorySection(m, suggest = null) {
       ? h('p', { class: 'fm-note', 'data-key': 'carried-note' }, `Some of these figures are ${m.mem.carriedSec} s old: reading them on that Mac failed.`)
       : null,
     chart(m.mem.history, m.mem.tone, chartLabel(used ? 'RAM used' : m.mem.label, value, m.mem.stats)),
-    used && m.mem.mac ? macRows(m) : null
+    used && m.mem.mac ? macRows(m) : null,
+    m.mem.win ? winRows(m) : null
   )
 }
 

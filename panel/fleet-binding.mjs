@@ -696,6 +696,25 @@ function macDetailOf(mac) {
   }
 }
 
+/** A Windows computer's memory as Task Manager shows it, from its own reading; null for any
+ *  other machine, or one not online. `total` is the machine's memory, for "In use". */
+function winDetailOf(m, total) {
+  const w = m.online === true && m.system && typeof m.system === 'object' ? m.system.winMemory : null
+  if (!w || typeof w !== 'object' || !finite(w.available) || w.available < 0) return null
+  const available = finite(total) && total > 0 ? Math.min(w.available, total) : w.available
+  const limit = bytesOrNull(w.commitLimit)
+  const committed = bytesOrNull(w.committed)
+  return {
+    inUseBytes: finite(total) && total > 0 ? Math.max(0, total - available) : null,
+    availableBytes: available,
+    committedBytes: committed !== null && (limit === null || committed <= limit) ? committed : null,
+    commitLimitBytes: limit,
+    cachedBytes: bytesOrNull(w.cached),
+    pagedPoolBytes: bytesOrNull(w.pagedPool),
+    nonPagedPoolBytes: bytesOrNull(w.nonPagedPool)
+  }
+}
+
 /** Why a memory pressure reading is all there is for a Mac, and what would add RAM in use. */
 function pressureNoteOf(m, local, basic) {
   if (local) return 'own'
@@ -887,6 +906,7 @@ function toMachine(m, thresholds, now, context) {
       history: bucketHistory(history, memKey, now),
       stats: windowStats(history, memKey, now),
       mac,
+      win: memKind === 'used' || memKind === 'pressure' || memKind === 'unavailable' ? null : winDetailOf(m, m.memory && finite(m.memory.total) ? m.memory.total : null),
       /** Memory pressure (100 − available) beside RAM in use, for a Mac's own reading. */
       pressurePct: memKind === 'used' ? percent(m.memory.pressurePercent) : null,
       pressureNote: memKind === 'pressure' ? pressureNoteOf(m, local, basic) : null

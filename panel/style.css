@@ -434,6 +434,13 @@ body {
   overflow: visible;
   color: var(--fm-tone);
 }
+/* The zero line under a sparkline, across its whole width (see SPARK_RAIL in view.mjs). */
+.fm-spark-rail {
+  fill: none;
+  stroke: var(--fm-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
 .fm-area {
   fill: currentColor;
   fill-opacity: 0.12;

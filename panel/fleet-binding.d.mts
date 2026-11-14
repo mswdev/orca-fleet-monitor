@@ -86,6 +86,17 @@ export type MacDetail = {
   availablePct: number | null
 }
 
+/** A Windows computer's memory as Task Manager's memory page shows it. Bytes. */
+export type WinDetail = {
+  inUseBytes: number | null
+  availableBytes: number
+  committedBytes: number | null
+  commitLimitBytes: number | null
+  cachedBytes: number | null
+  pagedPoolBytes: number | null
+  nonPagedPoolBytes: number | null
+}
+
 export type MachineModel = {
   id: string
   name: string
@@ -148,6 +159,8 @@ export type MachineModel = {
     history: (number | null)[]
     stats: Stats | null
     mac: MacDetail | null
+    /** A Windows computer running Fleet Monitor 1.3: Task Manager's memory figures. */
+    win: WinDetail | null
     /** For the `used` kind, how many seconds old figures carried over a failed read are. */
     carriedSec: number | null
     /** Memory pressure % beside RAM in use, for the `used` kind. */

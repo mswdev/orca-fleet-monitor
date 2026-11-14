@@ -439,6 +439,36 @@ describe('memory (1.1)', () => {
     assert.equal(text($(v.root, '.fm-reasons')!), 'Strained: macOS memory pressure warning, 12% available')
   })
 
+  test('the detail of a Windows computer: RAM in use, and Task Manager\'s memory rows', () => {
+    const gb = 2 ** 30
+    const pc = machine({
+      id: 'env-pc',
+      name: 'PC',
+      host: { hostname: 'pc', platform: 'win32', arch: 'x64', cpuModel: 'AMD Ryzen 9', cores: 32, uptimeSec: 100 },
+      memory: { total: 96 * gb, used: 26 * gb, available: 70 * gb, percent: 27.1, source: 'orca', reliable: true },
+      system: { net: null, disk: null, gpu: null, battery: null, winMemory: { available: 70 * gb, committed: 40 * gb, commitLimit: 110 * gb, cached: 50 * gb, pagedPool: gb, nonPagedPool: gb / 2 } }
+    })
+    const v = mount(viewOf([local(), pc]))
+    v.handle.show('env-pc')
+    const section = $(v.root, '[data-key="memory"]')!
+    assert.equal(text($(section, 'h2')!), 'Memory')
+    assert.match(text($(section, '.fm-reading')!), /^27%used/)
+    const rows = $(section, '[data-key="mem-facts"]')!.querySelectorAll('.fm-fact').map((row) => [text($(row, 'dt')!), text($(row, 'dd')!)])
+    assert.deepEqual(rows, [
+      ['In use', '26 GB'],
+      ['Available', '70 GB'],
+      ['Committed', '40 GBof 110 GB'],
+      ['Cached', '50 GB'],
+      ['Paged pool', '1 GB'],
+      ['Non-paged pool', '512 MB']
+    ])
+    // Without the reading (1.2 there, or not read yet): no rows, and nothing called used.
+    const older = mount(viewOf([local(), { ...pc, system: null }]))
+    older.handle.show('env-pc')
+    assert.equal($($(older.root, '[data-key="memory"]')!, '[data-key="mem-facts"]'), null)
+    assert.ok(!/used/.test(text($(older.root, '[data-key="memory"] .fm-reading')!)))
+  })
+
   test('the detail of a basic Mac: memory pressure, and what installing Fleet Monitor there adds', () => {
     const v = mount(viewOf([local(), pressureMac()]))
     v.handle.show('env-b')

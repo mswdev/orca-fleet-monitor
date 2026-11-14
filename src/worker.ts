@@ -17,6 +17,7 @@ import { startFleetMonitor, type FleetMonitor, type MonitorDeps, type ProcessSou
 import { LocalSampler, realOs, type SystemReader } from './sampler.ts'
 import { createStar } from './star.ts'
 import { PowerShellHost } from './win-host.ts'
+import { WindowsOwners } from './win-owners.ts'
 import { WindowsProcessSampler } from './win-processes.ts'
 import { WindowsSystemReader } from './win-system.ts'
 
@@ -86,7 +87,7 @@ export function realDeps(): MonitorDeps {
     processes = new LinuxProcessSampler({ cores })
   } else if (host) {
     system = new WindowsSystemReader({ host })
-    processes = new WindowsProcessSampler({ host, cores })
+    processes = new WindowsProcessSampler({ host, cores, owners: new WindowsOwners() })
   }
   const sampler = new LocalSampler(realOs, memory, undefined, {}, system)
   own.sampler = sampler

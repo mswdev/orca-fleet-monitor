@@ -9,8 +9,9 @@
 //                                     over the time between them, by the readings' own time
 //                                     stamps: percent of one core, as on a Mac (Task Manager
 //                                     shows percent of the whole computer instead)
-//   Working Set - Private             bytes: what Task Manager's Memory column is meant to show
-//                                     (not checked on a Windows machine)
+//   Working Set - Private             bytes: Task Manager's "Memory (private working set)" (the
+//                                     same figure as the process's PrivateWorkingSetSize, checked
+//                                     on a desktop with 430 processes)
 //   Elapsed Time                      its raw value: when the process started, taken to be a
 //                                     Windows file time (100 ns units since 1601, UTC). It tells
 //                                     a process from a later one with the same pid, which needs
@@ -18,16 +19,18 @@
 //   the instance name                 the image's file name without `.exe`, with `#1`, `#2` added
 //                                     by .NET to tell several of one name apart
 //
-// The owner of a process is not read (another user's needs elevation), nor is any energy figure.
+// The owner of a process comes from `qprocess` (src/win-owners.ts), which needs no elevation, when
+// the worker hands one in; no energy figure is read.
 // No path, command line or window title is read at all, so none can be published, answered or
 // logged.
 //
-// Cost, on a 4-core CI machine with about 150 processes: a read is answered in about 10 ms. Not
-// measured on a desktop with several hundred.
+// Cost: a read is answered in about 10 ms on a 4-core CI machine with about 150 processes, and in
+// about 30 ms on a desktop with 430.
 import { performance } from 'node:perf_hooks'
 import type { ProcessRow } from './model.ts'
 import { LIST_CACHE_MS, MAX_PROCESSES, NAME_MAX, oneLineName, type ProcessTable } from './processes.ts'
 import { PowerShellHost } from './win-host.ts'
+import type { WindowsOwners } from './win-owners.ts'
 
 /** Readings in a row without a list before the list is taken to be unreadable here, and how
  *  long before it is tried again. */
@@ -178,6 +181,8 @@ export type WindowsProcessSamplerDeps = {
   cores?: () => number
   /** For the overall deadline of a list (a test seam). */
   timers?: { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void }
+  /** Who each process belongs to (src/win-owners.ts); without it, rows have no user. */
+  owners?: Pick<WindowsOwners, 'lookup'> | null
 }
 
 /**
@@ -192,6 +197,7 @@ export class WindowsProcessSampler {
   private readonly wall: () => number
   private readonly platform: string
   private readonly cores: () => number
+  private readonly owners: Pick<WindowsOwners, 'lookup'> | null
   private current: WindowsProcessReading | null = null
   private previous: WindowsProcessReading | null = null
   private reading: Promise<WindowsProcessReading | null> | null = null
@@ -208,6 +214,7 @@ export class WindowsProcessSampler {
     this.mono = deps.mono ?? (() => performance.now())
     this.wall = deps.wall ?? Date.now
     this.cores = deps.cores ?? (() => 0)
+    this.owners = deps.owners ?? null
     this.later =
       deps.timers?.setTimeout ??
       ((fn, ms) => {
@@ -284,12 +291,31 @@ export class WindowsProcessSampler {
 
   private async fresh(): Promise<ProcessTable | null> {
     const reading = await this.read()
-    if (!reading) return null
-    // Callers that shared the reading share its table too.
-    if (this.table?.of === reading) return this.table.table
-    const table = buildWindowsTable(reading, this.previous, safeCores(this.cores))
-    this.table = { table, of: reading }
-    return table
+    // The shared read made the table, owners and all, so callers that shared it share the table.
+    return reading && this.table?.of === reading ? this.table.table : null
+  }
+
+  /** The rows with their owners, where they are known; the table as it is otherwise. A process
+   *  known to have started after the owners were read gets none: its pid may have changed hands. */
+  private async withOwners(table: ProcessTable): Promise<ProcessTable> {
+    if (!this.owners) return table
+    let newest: number | null = null
+    for (const r of table.rows) if (r.start !== null && (newest === null || r.start > newest)) newest = r.start
+    let found: { owners: ReadonlyMap<number, string>; readAt: number } | null = null
+    try {
+      found = await this.owners.lookup(newest)
+    } catch {
+      found = null
+    }
+    if (!found || found.owners.size === 0) return table
+    const { owners, readAt } = found
+    return {
+      ...table,
+      rows: table.rows.map((r) => {
+        const user = owners.get(r.pid)
+        return user === undefined || (r.start !== null && r.start * 1000 > readAt) ? r : { ...r, user }
+      })
+    }
   }
 
   /** One `proc` request, shared by every caller while it runs. */
@@ -319,6 +345,11 @@ export class WindowsProcessSampler {
       const reading: WindowsProcessReading = { ...answer, at: this.mono(), wallAt: this.wall() }
       this.previous = this.current
       this.current = reading
+      // The table, owners included, before the read is over: a caller that comes while the owners
+      // are looked up joins this read rather than starting another a moment after it (one too
+      // close to this to give any process a CPU figure).
+      const table = await this.withOwners(buildWindowsTable(reading, this.previous, safeCores(this.cores)))
+      this.table = { table, of: reading }
       return reading
     })().finally(() => {
       this.reading = null

@@ -24,7 +24,13 @@ export type MemoryReader = { read(): Promise<MacMemory | null> }
 /** Reads network, disk, GPU and battery: src/mac-system.ts's MacSystemReader, src/linux-system.ts's
  *  LinuxSystemReader or src/win-system.ts's WindowsSystemReader. `refresh`
  *  runs what is due, `snapshot` gives what is known now with its ages. */
-export type SystemReader = { refresh(): Promise<void>; snapshot(): MacSystem | null }
+export type SystemReader = {
+  refresh(): Promise<void>
+  snapshot(): MacSystem | null
+  /** Windows only: Task Manager's CPU figure (src/win-system.ts), which a sample uses in place of
+   *  Node's while it is there; null when there is none young enough. */
+  cpuUtility?(): { total: number; perCore: number[]; ageMs: number } | null
+}
 
 export type CpuTimes = { user: number; nice: number; sys: number; idle: number; irq: number }
 export type CpuInfo = { model: string; times: CpuTimes }
@@ -240,7 +246,9 @@ export class LocalSampler {
     const src = this.source
     const cpus = this.readCpus()
     const readAt = this.mono()
-    const delta = cpuDelta(this.previous, cpus, { platform: String(src.platform() ?? ''), elapsedMs: readAt - this.previousAt })
+    const platform = String(src.platform() ?? '')
+    // Node's count is always kept going, so that it can stand in for a reading Windows did not give.
+    const delta = this.taskManagerCpu(platform, cpuDelta(this.previous, cpus, { platform, elapsedMs: readAt - this.previousAt }), cpus.length)
     this.previous = cpus
     this.previousAt = readAt
     const load = src.loadavg()
@@ -285,6 +293,27 @@ export class LocalSampler {
     }
     this.last = sample
     return sample
+  }
+
+  /**
+   * On Windows, the CPU as Task Manager shows it ("% Processor Utility", from the system reader)
+   * in place of Node's time busy, which reads lower on a CPU running above its base speed. The
+   * per-core figures are taken too when there is one for each of Node's cores; otherwise Node's
+   * stay. Node's figure stands whenever there is no reading young enough (the first sample, or
+   * PowerShell cannot run here).
+   */
+  private taskManagerCpu(platform: string, delta: { total: number; perCore: number[] } | null, cores: number): { total: number; perCore: number[] } | null {
+    if (platform !== 'win32' || !this.system?.cpuUtility) return delta
+    let reading: { total: number; perCore: number[] } | null = null
+    try {
+      reading = this.system.cpuUtility()
+    } catch {
+      reading = null
+    }
+    if (!reading) return delta
+    const total = clampPercent(reading.total)
+    const fits = reading.perCore.length > 0 && reading.perCore.length === (delta?.perCore.length ?? cores)
+    return { total, perCore: fits ? reading.perCore.map(clampPercent) : (delta?.perCore ?? []) }
   }
 
   private readCpus(): CpuInfo[] {

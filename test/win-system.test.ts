@@ -3,7 +3,7 @@
 import { assert, describe, test } from 'orca/testing'
 import { isInterfaceName, SYSTEM_CADENCE, SYSTEM_MAX_AGE } from '../src/mac-system.ts'
 import type { SystemReader } from '../src/sampler.ts'
-import { interfaceLabel, parseBatteryAnswer, parseDiskAnswer, parseGpuAnswer, parseNetAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
+import { CPU_MAX_AGE_MS, interfaceLabel, parseBatteryAnswer, parseCpuAnswer, parseDiskAnswer, parseGpuAnswer, parseMemAnswer, parseNetAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
 
 describe('answers', () => {
   test('net: the adapter and its two counters, or nothing', () => {
@@ -59,6 +59,40 @@ describe('answers', () => {
     assert.equal(parseGpuAnswer({ p: Number.NaN }), null)
     assert.equal(parseGpuAnswer(null), null, 'no GPU counters, or the first request')
     assert.equal(parseGpuAnswer(12), null)
+  })
+
+  test('cpu: Task Manager\'s figure, capped at 100 as Task Manager caps it', () => {
+    assert.deepEqual(parseCpuAnswer({ t: 36.3, c: [18.5, 60.8, 0] }), { total: 36.3, perCore: [18.5, 60.8, 0] })
+    assert.deepEqual(parseCpuAnswer({ t: 104.27, c: [131.5, 99.94] }), { total: 100, perCore: [100, 99.9] }, 'utility passes 100 above the base speed')
+    assert.deepEqual(parseCpuAnswer({ t: 12 }), { total: 12, perCore: [] }, 'no cores listed')
+    assert.deepEqual(parseCpuAnswer({ t: 12, c: [1, 'x'] }), { total: 12, perCore: [] }, 'a core out of shape: none of them')
+    assert.deepEqual(parseCpuAnswer({ t: 12, c: [1, -2] }), { total: 12, perCore: [] })
+    assert.deepEqual(parseCpuAnswer({ t: 12, c: new Array(5_000).fill(1) }), { total: 12, perCore: [] }, 'more than Windows can have')
+    assert.equal(parseCpuAnswer(null), null, 'the first request, or no counters')
+    assert.equal(parseCpuAnswer({ t: -1, c: [] }), null)
+    assert.equal(parseCpuAnswer({ t: Number.NaN }), null)
+    assert.equal(parseCpuAnswer({ t: '12' }), null)
+    assert.equal(parseCpuAnswer([12]), null)
+  })
+
+  test('mem: Task Manager\'s memory figures; a figure out of shape is left out', () => {
+    const gb = 2 ** 30
+    assert.deepEqual(parseMemAnswer({ a: 70 * gb, c: 40 * gb, cl: 110 * gb, k: 50 * gb, pp: gb, np: gb / 2 }), {
+      available: 70 * gb,
+      committed: 40 * gb,
+      commitLimit: 110 * gb,
+      cached: 50 * gb,
+      pagedPool: gb,
+      nonPagedPool: gb / 2
+    })
+    assert.deepEqual(parseMemAnswer({ a: 70 * gb, c: null, cl: null, k: null, pp: null, np: null }), { available: 70 * gb, committed: null, commitLimit: null, cached: null, pagedPool: null, nonPagedPool: null }, 'a counter missing')
+    assert.equal(parseMemAnswer({ a: 70 * gb, c: 120 * gb, cl: 110 * gb })?.committed, null, 'more committed than the limit')
+    assert.equal(parseMemAnswer({ a: 70 * gb, k: -1 })?.cached, null)
+    assert.equal(parseMemAnswer({ a: 70 * gb, pp: 1.5 })?.pagedPool, null)
+    assert.equal(parseMemAnswer({ a: 2 ** 60 }), null, 'more than Windows can have')
+    assert.equal(parseMemAnswer({ c: gb }), null, 'no available figure')
+    assert.equal(parseMemAnswer(null), null)
+    assert.equal(parseMemAnswer('70'), null)
   })
 
   test('battery: each state, a computer without one, and what Windows does not know', () => {
@@ -135,7 +169,7 @@ describe('WindowsSystemReader', () => {
     assert.deepEqual(win.paths, ['D:\\'], 'the system drive')
     assert.equal(first.gpu?.percent, 20)
     assert.deepEqual(first.battery, { present: true, percent: 70, state: 'charging', source: 'ac', minutesRemaining: null })
-    assert.deepEqual(win.calls, ['net', 'disk', 'gpu', 'bat'], 'the network is asked for first')
+    assert.deepEqual(win.calls, ['net', 'cpu', 'mem', 'disk', 'gpu', 'bat'], 'the network first (no counters), then the CPU and the memory')
     win.state.t = 5_000
     win.state.net = { n: 'Ethernet 2', rx: 3_500_000, tx: 550_000 }
     await win.reader.refresh()
@@ -265,13 +299,48 @@ describe('WindowsSystemReader', () => {
     let heavy = false
     const win = fakeWindows({ heavyAllowed: () => heavy })
     await win.reader.refresh()
-    assert.deepEqual(win.calls, ['net', 'bat'])
+    assert.deepEqual(win.calls, ['net', 'cpu', 'mem', 'bat'], 'the CPU and memory are not optional')
     assert.equal(win.reader.snapshot()!.gpu, null)
     assert.equal(win.reader.snapshot()!.disk?.totalBytes, 1_024_000_000_000, 'space needs no request')
     heavy = true
     win.state.t = 5_000
     await win.reader.refresh()
-    assert.deepEqual(win.calls, ['net', 'bat', 'net', 'disk', 'gpu'])
+    assert.deepEqual(win.calls, ['net', 'cpu', 'mem', 'bat', 'net', 'cpu', 'mem', 'disk', 'gpu'])
+  })
+
+  test('the CPU: each reading asks, the newest answer is used while young enough', async () => {
+    const win = fakeWindows()
+    await win.reader.refresh()
+    assert.equal(win.reader.cpuUtility(), null, 'the first answer is always null')
+    win.state.t = 5_000
+    ;(win.state as Record<string, unknown>).cpu = { t: 41.2, c: [80, 2.4] }
+    await win.reader.refresh()
+    assert.deepEqual(win.reader.cpuUtility(), { total: 41.2, perCore: [80, 2.4], ageMs: 0 })
+    win.state.t = 10_000
+    win.state.fail.add('cpu')
+    await win.reader.refresh()
+    assert.deepEqual(win.reader.cpuUtility(), { total: 41.2, perCore: [80, 2.4], ageMs: 5_000 }, 'a failed answer leaves the last one, with its age')
+    win.state.t = 5_000 + CPU_MAX_AGE_MS + 1
+    assert.equal(win.reader.cpuUtility(), null, 'too old: the sampler falls back on Node')
+    assert.equal(win.count('cpu'), 3)
+    const mac = new WindowsSystemReader({ host: { request: async () => ({ t: 50, c: [] }) }, platform: 'darwin' })
+    await mac.refresh()
+    assert.equal(mac.cpuUtility(), null)
+  })
+
+  test('the memory: read with every reading, carried with its age, then dropped', async () => {
+    const win = fakeWindows()
+    const gb = 2 ** 30
+    ;(win.state as Record<string, unknown>).mem = { a: 70 * gb, c: 40 * gb, cl: 110 * gb, k: 50 * gb, pp: gb, np: gb / 2 }
+    await win.reader.refresh()
+    assert.deepEqual(win.reader.snapshot()!.winMemory, { available: 70 * gb, committed: 40 * gb, commitLimit: 110 * gb, cached: 50 * gb, pagedPool: gb, nonPagedPool: gb / 2 })
+    win.state.fail.add('mem')
+    win.state.t = 5_000
+    await win.reader.refresh()
+    assert.equal(win.reader.snapshot()!.winMemory?.ageMs, 5_000)
+    win.state.t = 12_001
+    assert.equal(win.reader.snapshot()!.winMemory, undefined)
+    assert.equal(win.count('mem'), 2)
   })
 
   test('a refresh still running is joined; anything but Windows asks nothing', async () => {

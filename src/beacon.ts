@@ -3,12 +3,12 @@
 //
 // Compatibility: the version stays 1 for as long as fields are only added. A reader ignores keys
 // it does not know, and every key added after the first release (`cg`; `mm` in 1.1; `nw`, `dk`,
-// `gp`, `bt` and `pl` in 1.2) is optional, so an older Fleet Monitor on either side keeps working.
+// `gp`, `bt` and `pl` in 1.2; `wm` in 1.3) is optional, so an older Fleet Monitor on either side keeps working.
 // The process list travels in lines of its own (src/process-line.ts), which beacon readers skip.
 import { clipText, COUNT_LIMITS, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
 import { isInterfaceName } from './mac-system.ts'
-import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel } from './model.ts'
+import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel, WinMemory } from './model.ts'
 
 export const BEACON_PREFIX = 'FLEETMON1 '
 export const BEACON_VERSION = 1
@@ -47,6 +47,8 @@ type Wire = {
   dk?: WireDisk
   gp?: WireGpu
   bt?: WireBattery
+  /** A Windows computer's memory as Task Manager shows it (1.3). See WireWinMemory. */
+  wm?: WireWinMemory
   /** 1 when this copy also writes process lines (publishing on; a Mac from 1.2, Linux and Windows
    *  from 1.3). 2 when it cannot list its processes at all (1.3: a Windows machine whose PowerShell
    *  cannot run the reader); an older reader takes that for "does not publish them", which is so. */
@@ -66,6 +68,11 @@ type WireGpu = { u: number; a?: number }
  *  (`ps`); minutes remaining (`m`); age in ms (`a`). */
 type WireBattery = { b: 0 | 1; p?: number; st?: 'c' | 'd' | 'f' | 'n'; ps?: 'a' | 'b' | 'u'; m?: number; a?: number }
 
+/** `wm`: bytes available (`a`), committed (`c`) of the commit limit (`cl`), cached (`k`), paged
+ *  (`pp`) and non-paged pool (`np`); a figure that could not be read is left out; `ag`, how old in
+ *  ms, only when carried over a failed read. */
+type WireWinMemory = { a: number; c?: number; cl?: number; k?: number; pp?: number; np?: number; ag?: number }
+
 const WIRE_STATE: Record<NonNullable<BatteryReading['state']>, NonNullable<WireBattery['st']>> = { charging: 'c', discharging: 'd', charged: 'f', 'not-charging': 'n' }
 const WIRE_SOURCE: Record<NonNullable<BatteryReading['source']>, NonNullable<WireBattery['ps']>> = { ac: 'a', battery: 'b', ups: 'u' }
 
@@ -74,10 +81,10 @@ function opt<K extends string>(key: K, value: number | null | undefined, round =
   return (value === null || value === undefined || !Number.isFinite(value) ? {} : { [key]: round ? Math.round(value) : value }) as { [P in K]?: number }
 }
 
-function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt'> {
+function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'wm'> {
   if (!system) return {}
-  const out: Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt'> = {}
-  const { net, disk, gpu, battery } = system
+  const out: Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'wm'> = {}
+  const { net, disk, gpu, battery, winMemory } = system
   if (net && isInterfaceName(net.iface)) out.nw = { i: net.iface, ...opt('r', net.rxBytesPerSec), ...opt('t', net.txBytesPerSec), ...opt('a', net.ageMs) }
   if (disk) {
     const dk: WireDisk = {
@@ -99,6 +106,17 @@ function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | '
       ...(battery.source ? { ps: WIRE_SOURCE[battery.source] } : {}),
       ...opt('m', battery.minutesRemaining),
       ...opt('a', battery.ageMs)
+    }
+  }
+  if (winMemory && Number.isFinite(winMemory.available)) {
+    out.wm = {
+      a: Math.round(winMemory.available),
+      ...opt('c', winMemory.committed),
+      ...opt('cl', winMemory.commitLimit),
+      ...opt('k', winMemory.cached),
+      ...opt('pp', winMemory.pagedPool),
+      ...opt('np', winMemory.nonPagedPool),
+      ...opt('ag', winMemory.ageMs)
     }
   }
   return out
@@ -177,7 +195,25 @@ function decodeSystem(w: Record<string, unknown>): MacSystem | null {
       ...(age === undefined ? {} : { ageMs: age })
     }
   }
-  return net || disk || gpu || battery ? { net, disk, gpu, battery } : null
+  let winMemory: WinMemory | null = null
+  const wm = record(w.wm)
+  const available = wm ? within(wm.a, 0, MAX_MEMORY_BYTES) : null
+  if (wm && available !== null) {
+    const commitLimit = within(wm.cl, 0, MAX_MEMORY_BYTES)
+    const committed = within(wm.c, 0, commitLimit ?? MAX_MEMORY_BYTES)
+    const age = ageOf(wm.ag)
+    winMemory = {
+      available,
+      committed,
+      commitLimit,
+      cached: within(wm.k, 0, MAX_MEMORY_BYTES),
+      pagedPool: within(wm.pp, 0, MAX_MEMORY_BYTES),
+      nonPagedPool: within(wm.np, 0, MAX_MEMORY_BYTES),
+      ...(age === undefined ? {} : { ageMs: age })
+    }
+  }
+  if (!(net || disk || gpu || battery || winMemory)) return null
+  return winMemory ? { net, disk, gpu, battery, winMemory } : { net, disk, gpu, battery }
 }
 
 /** `mm`: bytes, except `ps` (page size), the page rates and `pl`. Only `t` and `u` are always
@@ -371,10 +407,10 @@ export function encodeBeacon(
     ...(meta.processes === 'unavailable' ? { pl: 2 as const } : meta.processes ? { pl: 1 as const } : {})
   }
   // Degrade in steps: per-core values (and the groups over them) first, then the network, disk,
-  // GPU and battery figures, then long free-text fields. The Mac memory figures (about 200
+  // GPU, battery and Windows memory figures, then long free-text fields. The Mac memory figures (about 200
   // characters) stay in every step: they are what health and alerts are judged on.
   const bare = { ...wire, pc: undefined, cg: undefined }
-  const plain = { ...bare, nw: undefined, dk: undefined, gp: undefined, bt: undefined }
+  const plain = { ...bare, nw: undefined, dk: undefined, gp: undefined, bt: undefined, wm: undefined }
   const attempts: Wire[] = [wire, bare, plain, { ...plain, h: clip(wire.h, TEXT_LIMIT), m: clip(wire.m, TEXT_LIMIT), rl: clip(wire.rl, 32) }]
   for (const attempt of attempts) {
     const line = BEACON_PREFIX + JSON.stringify(attempt)

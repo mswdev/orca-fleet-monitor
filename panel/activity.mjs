@@ -319,6 +319,7 @@ function sparkSvg(series, label) {
   return s(
     'svg',
     { class: 'fm-spark', viewBox: '0 0 100 28', preserveAspectRatio: 'none', role: 'img', 'aria-label': label, focusable: 'false' },
+    s('path', { class: 'fm-spark-rail', d: 'M0 26 L100 26' }),
     s('path', { class: 'fm-area', d: a.area || 'M0 0' }),
     b ? s('path', { class: 'fm-line fm-line--second', d: b.line || 'M0 0' }) : null,
     s('path', { class: 'fm-line', d: a.line || 'M0 0' })

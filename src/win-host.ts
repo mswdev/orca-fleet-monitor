@@ -13,6 +13,15 @@
 // The script ends when its standard input closes, which is what happens when the worker dies, so
 // it is never left behind. The commands:
 //
+//   cpu    Task Manager's CPU figure: "% Processor Utility" from the "Processor Information"
+//          counters between this request and the one before, for the whole computer (_Total)
+//          and each logical processor in (group, number) order; null on the first request.
+//          Utility is time busy scaled by the clock speed against the base speed, so on a CPU
+//          that boosts it reads above "% Processor Time" (and Node's os.cpus()), and can pass 100
+//          (src/win-system.ts caps it there, as Task Manager does)
+//   mem    the raw "Memory" counters Task Manager's memory page is made of: available bytes,
+//          commit charge and limit, paged and non-paged pool, and its "Cached" (the standby
+//          lists and the modified list)
 //   net    the adapter that is up, is neither loopback nor a tunnel, and has a default gateway
 //          (the first with an IPv4 one): its name and cumulative bytes received and sent
 //          (System.Net.NetworkInformation)
@@ -46,8 +55,10 @@
 // Cost, measured on a 4-core CI machine with about 150 processes (tools/smoke-system.ts): the
 // first answer comes about 4.5 s after the first request, PowerShell's start and its first use of
 // the counters included; each later request is answered in 10 to 20 ms; the process holds about
-// 65 MB and used under 1% of one core, asked every 7 s. Not measured on a desktop with several
-// hundred processes, nor with a real GPU.
+// 65 MB and used under 1% of one core, asked every 7 s. On a Windows 11 desktop with 32 logical
+// processors, an RTX 4090 and about 430 processes: the first answer took 6 to 7 s, later ones 10
+// to 50 ms; the process held about 150 MB (130 MB private) and used 0.2% of one core with nobody
+// looking, 1.2% with this computer's process list asked for every 3 s.
 import { spawn as nodeSpawn } from 'node:child_process'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -55,7 +66,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { Timers } from './processes.ts'
 
 /** What the script answers to; anything else is answered `null`. */
-export const HOST_COMMANDS = ['net', 'disk', 'gpu', 'bat', 'proc'] as const
+export const HOST_COMMANDS = ['cpu', 'mem', 'net', 'disk', 'gpu', 'bat', 'proc'] as const
 
 /**
  * The script, as powershell.exe is given it after `-Command`. Three things it must never hold:
@@ -81,6 +92,7 @@ $q = [string][char]34
 $bad = [regex]'[\x00-\x1f]'
 $global:fmDisk = $null
 $global:fmGpu = $null
+$global:fmCpu = $null
 $global:fmHasGpu = $null
 $global:fmReset = [DateTime]::MinValue
 $global:fmForms = $false
@@ -166,6 +178,48 @@ function FmGpu {
   FmJson @{ p = $best }
 }
 
+function FmCpu {
+  $now = (New-Object System.Diagnostics.PerformanceCounterCategory('Processor Information')).ReadCategory()['% processor utility']
+  if ($null -eq $now) { return $null }
+  $old = $global:fmCpu
+  $keep = @{}
+  $total = $null
+  $cores = @{}
+  foreach ($e in $now.GetEnumerator()) {
+    $d = $e.Value
+    $n = $d.InstanceName
+    $s = $d.Sample
+    $keep[$n] = $s
+    if ($null -eq $old -or -not $old.ContainsKey($n)) { continue }
+    $v = $null
+    try { $v = [System.Diagnostics.CounterSampleCalculator]::ComputeCounterValue($old[$n], $s) } catch { continue }
+    if ($n -eq '_Total') { $total = $v }
+    elseif ($n -match '^(\d+),(\d+)$') { $cores[[int]$Matches[1] * 65536 + [int]$Matches[2]] = $v }
+  }
+  $global:fmCpu = $keep
+  if ($null -eq $total) { return $null }
+  $list = New-Object System.Collections.Generic.List[double]
+  foreach ($k in ($cores.Keys | Sort-Object)) { $list.Add([Math]::Round([double]$cores[$k], 1)) }
+  FmJson @{ t = [Math]::Round([double]$total, 1); c = $list.ToArray() }
+}
+
+function FmMem {
+  $data = (New-Object System.Diagnostics.PerformanceCounterCategory('Memory')).ReadCategory()
+  $v = @{}
+  foreach ($k in 'available bytes', 'committed bytes', 'commit limit', 'pool paged bytes', 'pool nonpaged bytes', 'standby cache reserve bytes', 'standby cache normal priority bytes', 'standby cache core bytes', 'modified page list bytes') {
+    $v[$k] = $null
+    $c = $data[$k]
+    if ($null -eq $c) { continue }
+    foreach ($e in $c.GetEnumerator()) { $v[$k] = $e.Value.RawValue; break }
+  }
+  if ($null -eq $v['available bytes']) { return $null }
+  $k = $null
+  if ($null -ne $v['standby cache reserve bytes'] -and $null -ne $v['standby cache normal priority bytes'] -and $null -ne $v['standby cache core bytes'] -and $null -ne $v['modified page list bytes']) {
+    $k = $v['standby cache reserve bytes'] + $v['standby cache normal priority bytes'] + $v['standby cache core bytes'] + $v['modified page list bytes']
+  }
+  FmJson @{ a = $v['available bytes']; c = $v['committed bytes']; cl = $v['commit limit']; pp = $v['pool paged bytes']; np = $v['pool nonpaged bytes']; k = $k }
+}
+
 function FmBat {
   if (-not $global:fmForms) {
     Add-Type -AssemblyName System.Windows.Forms
@@ -206,6 +260,8 @@ while ($true) {
     switch ($line.Substring($at + 1)) {
       'net' { $r = FmNet }
       'disk' { $r = FmDisk }
+      'cpu' { $r = FmCpu }
+      'mem' { $r = FmMem }
       'gpu' { $r = FmGpu }
       'bat' { $r = FmBat }
       'proc' { $r = FmProc }
@@ -213,6 +269,7 @@ while ($true) {
   } catch {
     $r = $null
     if ($line.EndsWith(' gpu')) { $global:fmGpu = $null }
+    if ($line.EndsWith(' cpu')) { $global:fmCpu = $null }
     if (([DateTime]::UtcNow - $global:fmReset).TotalSeconds -ge 60) {
       $global:fmReset = [DateTime]::UtcNow
       $global:fmDisk = $null
@@ -296,6 +353,14 @@ export const HOST_GIVE_UP_MS = 60 * 60_000
  *  PowerShell is killed and every other reading waits. */
 export const HOST_STALL_LIMIT = 3
 export const HOST_FIRST_REFUSAL_MS = 10 * 60_000
+/** Commands left alone after their first stall instead: asked with every reading, so each stall
+ *  would cost every other reading its PowerShell every few seconds, and each has a stand-in (the
+ *  CPU falls back on Node's figure; the memory rows are only detail). */
+const STALL_LIMIT_OF: Readonly<Record<string, number>> = Object.freeze({ cpu: 1, mem: 1 })
+/** How many stalls in a row leave `command` alone. */
+export function stallLimitOf(command: string): number {
+  return Object.hasOwn(STALL_LIMIT_OF, command) ? STALL_LIMIT_OF[command]! : HOST_STALL_LIMIT
+}
 /** Longest answer line, in characters. A process list is about 80 bytes a process. */
 export const HOST_LINE_MAX = 4 * 1024 * 1024
 /** Requests that may wait at once; each reader asks for one thing at a time, so a handful do. */
@@ -390,7 +455,7 @@ export class PowerShellHost {
       if (this.mono() < refused) return Promise.resolve(UNASKED)
       // Its hour is up: one more try, and one more stall puts it back.
       this.refusedUntil.delete(command)
-      this.stalls.set(command, HOST_STALL_LIMIT - 1)
+      this.stalls.set(command, stallLimitOf(command) - 1)
     }
     return new Promise((resolve) => {
       this.queue.push({ command, timeoutMs: Math.min(timeoutMs, TIMEOUT_MAX_MS), resolve })
@@ -444,7 +509,7 @@ export class PowerShellHost {
         if (this.worked) {
           const stalls = (this.stalls.get(next.command) ?? 0) + 1
           this.stalls.set(next.command, stalls)
-          if (stalls >= HOST_STALL_LIMIT) {
+          if (stalls >= stallLimitOf(next.command)) {
             // Ten minutes the first time (it may have been a bad moment), an hour after that.
             const before = this.refusals.get(next.command) ?? 0
             this.refusals.set(next.command, before + 1)

@@ -91,3 +91,39 @@ describe('compatibility', () => {
     assert.deepEqual(decodeBeacon(withMemory)!.macMemory, v110.decodeBeacon(withMemory)!.macMemory)
   })
 })
+
+describe('the 1.3 key: Windows memory', () => {
+  const gb = 2 ** 30
+  const WIN: MacSystem = {
+    ...SYSTEM,
+    battery: { present: false, percent: null, state: null, source: 'ac', minutesRemaining: null },
+    winMemory: { available: 70 * gb, committed: 40 * gb, commitLimit: 110 * gb, cached: 50 * gb, pagedPool: gb, nonPagedPool: gb / 2 }
+  }
+  const win = (system: MacSystem = WIN) => localSample({ platform: 'win32', system })
+
+  test('round-trip, with the age of a carried reading', () => {
+    assert.deepEqual(decodeBeacon(encodeBeacon(win(), meta)!)!.system, WIN)
+    const carried: MacSystem = { ...WIN, winMemory: { ...WIN.winMemory!, cached: null, ageMs: 5_000 } }
+    assert.deepEqual(decodeBeacon(encodeBeacon(win(carried), meta)!)!.system, carried)
+    const only: MacSystem = { net: null, disk: null, gpu: null, battery: null, winMemory: WIN.winMemory }
+    assert.deepEqual(decodeBeacon(encodeBeacon(win(only), meta)!)!.system, only, 'on its own')
+    assert.equal('winMemory' in decodeBeacon(encodeBeacon(mac(), meta)!)!.system!, false, 'absent elsewhere')
+  })
+
+  test('hostile values are bounded or dropped', () => {
+    const line = (wm: unknown) => `${BEACON_PREFIX}${JSON.stringify({ ...JSON.parse(encodeBeacon(win(), meta)!.slice(BEACON_PREFIX.length)), wm })}`
+    assert.equal(decodeBeacon(line({ a: -1 }))!.system!.winMemory, undefined, 'no available figure')
+    assert.equal(decodeBeacon(line({ a: 2 ** 60 }))!.system!.winMemory, undefined)
+    assert.equal(decodeBeacon(line('x'))!.system!.winMemory, undefined)
+    const odd = decodeBeacon(line({ a: gb, c: 9 * gb, cl: 4 * gb, k: 'x', pp: -1, np: 2 ** 61, ag: 'old' }))!.system!.winMemory!
+    assert.deepEqual(odd, { available: gb, committed: null, commitLimit: 4 * gb, cached: null, pagedPool: null, nonPagedPool: null, ageMs: 3_600_000 })
+  })
+
+  test('a line too long sheds it with the other system keys, and older versions ignore it', () => {
+    const room = encodeBeacon(localSample({ platform: 'win32' }), meta)!.length + 10
+    const tight = decodeBeacon(encodeBeacon(win(), meta, room)!)!
+    assert.equal(tight.system, undefined)
+    const line = encodeBeacon(win(), meta)!
+    for (const old of [v100, v110]) assert.equal(old.decodeBeacon(line)!.memTotal, win().memory.total)
+  })
+})

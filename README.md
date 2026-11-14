@@ -15,7 +15,7 @@ Live CPU, memory, per-core load and the busiest workspaces for this computer and
 <a href="https://github.com/mswdev/orca-fleet-monitor/actions/workflows/ci.yml?query=branch%3Amain"><img alt="Line coverage of src and panel" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmswdev%2Forca-fleet-monitor%2Fbadges%2Fcoverage-summary.json&query=%24.total.lines.pct&suffix=%25&label=coverage&color=2ea043&style=flat-square"></a>
 <img alt="Requires Orca 1.4.248 or later" src="https://img.shields.io/badge/Orca-1.4.248%2B-3b82f6?style=flat-square">
 <img alt="Fleet Monitor is built and tested on macOS" src="https://img.shields.io/badge/macOS-supported-2ea043?style=flat-square">
-<img alt="Linux and Windows work as of 1.2.1, confirmed by a user" src="https://img.shields.io/badge/Linux%20and%20Windows-working-2ea043?style=flat-square">
+<img alt="Linux and Windows work: confirmed by a user on 1.2.1, and 1.3 checked on a Windows 11 desktop" src="https://img.shields.io/badge/Linux%20and%20Windows-working-2ea043?style=flat-square">
 <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-6e7781?style=flat-square"></a>
 </p>
 
@@ -53,7 +53,7 @@ orca plugin install mswdev.fleet-monitor
 [Install](#install) has the command for a paired server.
 
 > [!NOTE]
-> Fleet Monitor is built and tested on macOS. It also runs on Linux and Windows: a user confirmed both on 1.2.1, each as this computer and as a paired server, and 1.3 gives them the Activity tab. A few readings are still a Mac's only, and [Requirements and limits](#requirements-and-limits) lists them. It needs the Orca desktop app, version 1.4.248 or later.
+> Fleet Monitor is built and tested on macOS. It also runs on Linux and Windows: a user confirmed both on 1.2.1, each as this computer and as a paired server, and 1.3 gives them the Activity tab. 1.3 was checked on a Windows 11 desktop against Task Manager, both as this computer and as a server paired with a Mac. A few readings are still a Mac's only, and [Requirements and limits](#requirements-and-limits) lists them. It needs the Orca desktop app, version 1.4.248 or later.
 
 ## What it shows
 
@@ -67,8 +67,8 @@ The panel opens on an overview with one card per machine. Click a card for that 
 
 - Each card has the machine's health, its CPU and memory, and a 30-minute sparkline of each.
 - The detail has CPU and memory charts with the average and peak, the load on every core (P-cores and E-cores apart on Apple silicon), the five busiest workspaces, load averages, uptime, the chip, and what Orca itself is using.
-- On a Mac running Fleet Monitor, memory is real RAM usage with its breakdown, swap and the kernel's pressure level. [Memory](#memory) has the details.
-- On a Mac running Fleet Monitor, the detail has two tabs. **Overview** is everything above. **Activity** has network, disk, GPU and battery readings and the machine's processes, to search and sort. [Activity](#activity) has the details.
+- On a Mac running Fleet Monitor, memory is real RAM usage with its breakdown, swap and the kernel's pressure level. On a Windows computer running it, memory has the figures from Task Manager's memory page. [Memory](#memory) has the details.
+- On any machine running Fleet Monitor, the detail has two tabs. **Overview** is everything above. **Activity** has network, disk, GPU and battery readings and the machine's processes, to search and sort. [Activity](#activity) has the details.
 - While a machine's memory is strained or critical, its Memory card names the process using the most memory and how much it uses, when that is at least 5% of the machine's RAM. A machine short of memory can pause reading its processes; the card then gives the last figure it has, for up to 15 minutes, and says how old it is.
 - Health has four levels: OK, busy, strained and critical. It is the worse of the CPU level and the memory level, and the detail says why, for example "Strained: CPU 86% ≥ 85%".
 - A desktop notification tells you when a machine's memory reaches Strained or Critical, and when a machine stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details.
@@ -103,9 +103,9 @@ A paired server appears at the basic level as soon as Orca reaches it. Install F
 | | Basic | Full |
 | --- | --- | --- |
 | Needs on the remote | Nothing | Fleet Monitor installed and running |
-| CPU | An estimate from the load average, labelled as one | Measured |
+| CPU | An estimate from the load average, labelled as one | Measured. On Windows, the figure Task Manager shows |
 | Per-core load, P-cores and E-cores | No | Yes |
-| Memory | What Orca reports: memory used, or for a Mac its memory-pressure percentage, labelled "memory pressure" | RAM used out of the total. On a Mac, also its breakdown, swap and the kernel's pressure level |
+| Memory | What Orca reports: memory used, or for a Mac its memory-pressure percentage, labelled "memory pressure" | RAM used out of the total. On a Mac, also its breakdown, swap and the kernel's pressure level. On Windows, also available, committed, cached and the two pools |
 | Network, disk, GPU and battery | No | Yes, each where the machine reports it |
 | Processes | No | Every process on this computer, the busiest 60 or so on a paired server |
 | Busiest workspaces | Yes | Yes |
@@ -136,7 +136,9 @@ What a machine reports about memory depends on its level.
 
 A Mac running Fleet Monitor reports real RAM usage. The figure is computed the way Activity Monitor computes Memory Used. In a five-minute side-by-side check on a 64 GB Mac, the two differed by 0.1 GB on average, and swap used matched exactly. With it come app memory, wired memory, compressed memory, cached files, swap used, and the kernel's memory pressure level, which is normal, warning or critical.
 
-A machine without Fleet Monitor reports only Orca's memory-pressure percentage. The panel labels that figure "memory pressure", because it does not measure memory used.
+A Windows computer running Fleet Monitor 1.3 reports RAM in use as Task Manager does (the total less what is available), with the other figures on Task Manager's memory page: available, committed out of the commit limit, cached (the standby and modified lists), paged pool and non-paged pool. Windows has no pressure level to report, so its memory level is RAM in use measured against the memory thresholds (75, 88 and 95% by default).
+
+A Mac without Fleet Monitor reports only Orca's memory-pressure percentage. The panel labels that figure "memory pressure", because it does not measure memory used.
 
 The memory level is there to warn you before a machine locks up. Kernel pressure at warning makes a machine Strained, and at critical makes it Critical. RAM used above a threshold you can change, 90% by default, makes it Busy. Memory pressure has its own thresholds (75, 88 and 95% by default), and sustained swapping counts as well.
 
@@ -163,10 +165,11 @@ The top of the tab has a reading for each of these that the machine reports. One
 
 Network is read every 5 seconds, disk traffic every 20, the GPU every 30, and the battery and disk space every 60.
 
-Below them is the machine's list of processes. It shows the first 25, and **Show all** shows the rest. You can search by name or process ID, and sort by CPU, memory or name, and on a Mac by energy impact. A row opens to show its process ID, its owner (Windows gives none) and how long it has been running. The list keeps its order while a row is open or the keyboard is in it, so rows do not move under you.
+Below them is the machine's list of processes. It shows the first 25, and **Show all** shows the rest. You can search by name or process ID, and sort by CPU, memory or name, and on a Mac by energy impact. A row opens to show its process ID, its owner and how long it has been running. The list keeps its order while a row is open or the keyboard is in it, so rows do not move under you.
 
 - Names are program names, and no command line or path is ever shown or published. On a Mac they are the system's short process names, at most 16 characters, so a name can be cut short: Google Chrome Helper shows as `Google Chrome He`. On Linux a process of yours is named by its executable's file name; another user's shows the kernel's short name for it, at most 15 characters, which a process can set itself. So your own scripts show as their interpreter (`python3`, `bash`), and every tool of a multi-call binary shows as that binary (`busybox`). On Windows the name is the program's file name without `.exe`.
-- CPU is a share of one core, so a process busy on four cores shows 400%.
+- CPU is a share of one core, so a process busy on four cores shows 400%. Task Manager's Details tab shows a share of the whole computer instead: on a computer with 32 logical processors, divide by 32 to compare.
+- On Windows the owner comes from `qprocess`, which lists every process's user without administrator rights. Windows editions without it (some Home editions) show no owners.
 - Memory is the figure each system's own tool shows. On a Mac it is the footprint in Activity Monitor's Memory column, and a process started in the last two minutes may not have a figure yet and shows a dash. On Windows it is the private working set, as in Task Manager's Memory column. On Linux it is the resident size (`RES` in `top`), which counts memory shared between processes once for each of them.
 - Energy impact is the figure `top` reports. Only a Mac has it.
 
@@ -249,7 +252,7 @@ On a Linux desktop, type `orca-ide` where these commands say `orca`.
 | RAM used busy at | 90&nbsp;% | A machine whose RAM used passes this counts as Busy. [Memory](#memory) has the other memory rules. |
 | Alert when memory runs short | On | Sends a desktop notification when a machine's memory reaches Strained or Critical, or when it stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details. |
 | Orca CLI path | Empty | Leave it empty to find the CLI that ships with this Orca. On Windows that is `orca.exe`; a path to `orca.cmd` uses the `orca.exe` beside it. |
-| Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. On a Mac it also writes the names and owners of its top processes about every 30 seconds. |
+| Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. It also writes the names and owners of its top processes about every 30 seconds. |
 | Monitor in the background | On | Reads machines on the slow interval while no panel is open, to keep the status bar current and to send memory alerts for paired machines. Off, paired machines alert only while a panel is open. |
 
 ## In the background
@@ -271,7 +274,7 @@ Reading a machine means running the Orca CLI, one short-lived process per read. 
 - Fleet Monitor retries an unreachable machine with a growing delay, up to 5 minutes.
 - While a machine's Activity tab is on screen, the panel asks for its processes every 5 seconds for this computer and every 10 seconds for a paired machine. The full list for this computer is read only while asked for; its lighter 30-second reading, which names the largest process and feeds the published top list, runs in the background.
 
-Measured on a Mac, the worker uses about 1% of one core with nobody looking. While this computer's Activity tab is open, it uses about 8% of one core to read its processes, and stops 20 seconds after the tab closes. On Linux everything is read from files, under `/proc` and `/sys` and, for the names of process owners, `/etc/passwd`: reading 1,000 processes took about a tenth of a second of CPU in a test VM. On Windows the figures come from one PowerShell process that Fleet Monitor starts with its first reading and keeps running; on a CI machine it held about 65 MB of memory and answered each request in a few hundredths of a second. Its cost on a real desktop has not been measured yet.
+Measured on a Mac, the worker uses about 1% of one core with nobody looking. While this computer's Activity tab is open, it uses about 8% of one core to read its processes, and stops 20 seconds after the tab closes. On Linux everything is read from files, under `/proc` and `/sys` and, for the names of process owners, `/etc/passwd`: reading 1,000 processes took about a tenth of a second of CPU in a test VM. On Windows the figures come from one PowerShell process that Fleet Monitor starts with its first reading and keeps running. On a Windows 11 desktop with 32 logical processors and about 430 processes, it held about 150 MB (130 MB private) and answered each request in 10 to 50 ms, after a first answer that took 6 to 7 seconds. With nobody looking, it and the worker used about 0.6% of one core between them. With this computer's Activity tab open, they used about 1.3%, and a full process list took about 30 ms.
 
 ### What a machine publishes
 
@@ -283,7 +286,7 @@ With **Publish this machine's readings** on, which is the default, the worker wr
 - the network, disk, GPU and battery readings listed under [Activity](#activity), including the name of the network interface in use;
 - a random id for the worker run, a sequence number and the time.
 
-About every 30 seconds it also writes a line starting `FLEETPS1` with its top processes, about 60 by memory and CPU, and the number of processes running. For each one it holds the process ID, the parent's process ID, the name as described under [Activity](#activity) (never arguments or a path, though on Linux another user's process can have set its own short name), the owner's user name (Windows gives none), CPU, memory, the start time and, on a Mac, energy impact.
+About every 30 seconds it also writes a line starting `FLEETPS1` with its top processes, about 60 by memory and CPU, and the number of processes running. For each one it holds the process ID, the parent's process ID, the name as described under [Activity](#activity) (never arguments or a path, though on Linux another user's process can have set its own short name), the owner's user name, CPU, memory, the start time and, on a Mac, energy impact.
 
 The same log gets one line for each memory alert the machine shows, with the alert's title, which names the machine the alert is about, and whether Orca delivered it.
 
@@ -297,7 +300,7 @@ Fleet Monitor is a full-access (`trusted-worker`) plugin: its worker runs as a N
 - It asks for two capabilities: `settings:own`, and `notifications:show` for the memory notifications. It adds one panel, one status bar item and two commands, **Show Fleet Monitor** and **Fleet Monitor: Send a test alert**.
 - It runs these Orca CLI commands, all read-only: `environment list`, `host list`, `diagnostics memory`, `plugin list` and `plugin logs`. The last three also run against paired servers.
 - It runs `plugin open` on this machine when you click the status bar item.
-- On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. It also runs `ps` and `top` for the process list, `netstat` and `route` for the network, `ioreg` for disk traffic and the GPU, and `pmset` for the battery. On Linux it reads files under `/proc` and `/sys`, among them the name of each process's executable, and `/etc/passwd` for the names of process owners, and runs `nvidia-smi` for the GPU figure when an NVIDIA driver is loaded. On Windows it keeps one Windows PowerShell process running and asks it for the network, disk, GPU, battery and process figures, which come from .NET and the system's performance counters, and it runs `taskkill` to end a CLI call that timed out.
+- On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. It also runs `ps` and `top` for the process list, `netstat` and `route` for the network, `ioreg` for disk traffic and the GPU, and `pmset` for the battery. On Linux it reads files under `/proc` and `/sys`, among them the name of each process's executable, and `/etc/passwd` for the names of process owners, and runs `nvidia-smi` for the GPU figure when an NVIDIA driver is loaded. On Windows it keeps one Windows PowerShell process running and asks it for the CPU, memory, network, disk, GPU, battery and process figures, which come from .NET and the system's performance counters. It runs `qprocess *` for the names of process owners, at most every 2 seconds and usually every 10, and `taskkill` to end a CLI call that timed out.
 
 </details>
 
@@ -318,8 +321,8 @@ Fleet Monitor treats a paired server, the CLI's answers about it and the lines i
 
 - Orca 1.4.248 or later.
 - The Orca desktop app. The panel is not made for Orca's browser client (`orca serve` opened in a web browser).
-- macOS, Linux or Windows, for this computer and for paired servers. Fleet Monitor is built and tested on macOS. On Linux and Windows it has had one user's check so far: a Windows desktop and a Linux machine on 1.2.1, each showing the other at the full level. Windows needs 1.2.1 or later, because earlier versions could not run the Orca CLI there. The Activity readings 1.3 adds run on Linux, Windows and macOS machines in CI with every change, but those machines have no GPU worth the name and no battery, so those two readings are unchecked on real Linux and Windows hardware.
-- Some readings are a Mac's only: the breakdown of RAM in use, swap and the kernel's pressure level, the split into P-cores and E-cores, and energy impact. Windows also has no load average and gives no process owners.
+- macOS, Linux or Windows, for this computer and for paired servers. Fleet Monitor is built and tested on macOS. On Linux and Windows it has had one user's check so far: a Windows desktop and a Linux machine on 1.2.1, each showing the other at the full level. 1.3 was also checked on a Windows 11 desktop with an NVIDIA GPU: CPU, GPU, memory and process figures against Task Manager's counters, and the view of it from a paired Mac. Windows needs 1.2.1 or later, because earlier versions could not run the Orca CLI there. The Activity readings 1.3 adds run on Linux, Windows and macOS machines in CI with every change, but those machines have no GPU worth the name and no battery. The GPU reading has been checked on Windows with an NVIDIA GPU; it and the battery are still unchecked on real Linux hardware, and the battery on a Windows laptop.
+- Some readings are a Mac's only: swap and the kernel's pressure level, the split into P-cores and E-cores, and energy impact. Windows has its own memory breakdown (Task Manager's) and no load average.
 - History covers the last 30 minutes. The worker keeps it in memory, so it starts again whenever Orca or the plugin restarts. So does what it has already alerted about: after a restart, a machine that is still short of memory alerts again.
 - When a machine reaches the full level, the readings still in its log, about the last 14 minutes on a machine that also publishes its processes (16 otherwise), fill the gaps in its history. They are added only where there is no reading yet.
 - The Activity tab (network, disk, GPU, battery and processes) needs Fleet Monitor 1.2 or later on a Mac and 1.3 or later on Linux and Windows. That goes for both ends: the paired machine's copy reads the figures, and this computer's copy shows them. A 1.2 desktop shows a 1.3 Linux or Windows server's network, disk, GPU and battery, but no processes. On a Windows machine where PowerShell or the performance counters are not available to Fleet Monitor (a locked-down machine, or a standard user's background service), Activity has disk space and little else, and the panel says why.
@@ -366,6 +369,13 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$TMPDIR" ELECTRON_RUN_AS_NODE=1 \
 
 ```sh
 node tools/smoke-system.ts
+```
+
+To see what the panel would show with real figures, `tools/capture-snapshot.ts` runs the worker on this computer against the real Orca CLI for a minute and writes what the panel would be given: every paired machine's state and process list. `tools/preview/shoot-capture.mjs` renders a capture with the real panel, at a sidebar's width and in both themes. Capturing on two paired computers shows each one's own view next to the other's view of it. A capture holds real host and process names, so keep it under `.orca/`, which git ignores.
+
+```sh
+ELECTRON_RUN_AS_NODE=1 /Applications/Orca.app/Contents/MacOS/Orca tools/capture-snapshot.ts --out .orca/captures/here.json
+node tools/preview/shoot-capture.mjs --file .orca/captures/here.json --out /tmp/shots --playwright <path to playwright-core>
 ```
 
 ### Layout

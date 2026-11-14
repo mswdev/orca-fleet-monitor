@@ -10,25 +10,35 @@
 //   GPU       `gpu` about every 30 s: the "GPU Engine" counters' utilisation between two
 //             requests, the busiest GPU when there are several; none before Windows 10 1709
 //   battery   `bat` about once a minute: power line, charge, charging or not, time remaining
+//   CPU       `cpu` every reading, after the network: Task Manager's figure ("% Processor Utility") for
+//             the whole computer and each logical processor, which this computer's own samples
+//             use in place of Node's (src/sampler.ts), so the panel and the beacon read as Task
+//             Manager does; capped at 100 as Task Manager caps it
+//   memory    `mem` every reading: what Task Manager's memory page shows besides "In use"
+//             (available, committed, cached, paged and non-paged pool)
 //
 // What is read less often than every reading is carried until the next read, with its age; a
 // read that fails carries the last value for a while longer, then the value is dropped. Every
 // answer is parsed defensively: a figure out of shape is left out, never guessed.
 //
-// Cost, on a 4-core CI machine (src/win-host.ts has the figures): once PowerShell is running, a
-// refresh is answered in about 20 ms. Not measured on a desktop, nor with a real GPU, where `gpu`
-// reads one counter for each process using each engine.
+// Cost (src/win-host.ts has the figures): once PowerShell is running, a refresh is answered in 10
+// to 50 ms, on a desktop with an RTX 4090 too, where `gpu` reads about 1,300 engine counters. The
+// GPU figure matched Windows' own counters and nvidia-smi under load there (50% against 50%).
 import { performance } from 'node:perf_hooks'
 import { diskSpaceOf, due, interfaceLabel, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
 
 export { interfaceLabel }
-import type { BatteryReading, MacSystem, NetReading } from './model.ts'
+import type { BatteryReading, MacSystem, NetReading, WinMemory } from './model.ts'
 import { PowerShellHost } from './win-host.ts'
 
 /** How long PowerShell has to answer one request. Long, because a slow answer costs nothing
  *  (readings are never waited for) while giving up kills PowerShell, and its first use of the
  *  performance counters can take seconds. */
 const REQUEST_TIMEOUT_MS = 10_000
+/** A `cpu` answer older than this is not used: two readings and a bit. */
+export const CPU_MAX_AGE_MS = 12_000
+/** The memory figures are dropped once this old (a reading is every 5 s). */
+const WIN_MEMORY_MAX_AGE_MS = 12_000
 /** Longest adapter name kept to tell one adapter from another; Windows allows 255 characters. */
 const ADAPTER_NAME_MAX = 256
 
@@ -61,6 +71,43 @@ export function parseDiskAnswer(answer: unknown): { read: number; write: number 
 export function parseGpuAnswer(answer: unknown): number | null {
   const p = record(answer)?.p
   return typeof p === 'number' && p >= 0 && p <= 100 ? Math.round(p) : null
+}
+
+/** Logical processors a `cpu` answer may list (Windows supports 2,048). */
+const MAX_CPU_COUNT = 4096
+/** A CPU figure as Task Manager shows it: 0 to 100, to one decimal. Utility passes 100 on a core
+ *  that runs above its base speed; Task Manager caps it, and so does this. */
+const utility = (value: number): number => Math.round(Math.min(100, Math.max(0, value)) * 10) / 10
+
+/** `cpu`'s answer, `{ t, c }`: "% Processor Utility" for the whole computer and for each logical
+ *  processor; null on the first request (no previous samples) or when out of shape. */
+export function parseCpuAnswer(answer: unknown): { total: number; perCore: number[] } | null {
+  const a = record(answer)
+  if (!a || typeof a.t !== 'number' || !Number.isFinite(a.t) || a.t < 0) return null
+  const cores = Array.isArray(a.c) && a.c.length <= MAX_CPU_COUNT && a.c.every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0) ? (a.c as number[]) : []
+  return { total: utility(a.t), perCore: cores.map(utility) }
+}
+
+/** Physical memory or a commit limit beyond this is nonsense (Windows' limit is 128 TB). */
+const MAX_MEMORY_BYTES = 2 ** 50
+
+/** `mem`'s answer, `{ a, c, cl, pp, np, k }`: available bytes, the commit charge and limit, paged
+ *  and non-paged pool, and the standby and modified lists; null without an available figure. */
+export function parseMemAnswer(answer: unknown): WinMemory | null {
+  const a = record(answer)
+  const bytes = (value: unknown): number | null => (isCount(value) && value <= MAX_MEMORY_BYTES ? value : null)
+  const available = a ? bytes(a.a) : null
+  if (!a || available === null) return null
+  const commitLimit = bytes(a.cl)
+  const committed = bytes(a.c)
+  return {
+    available,
+    committed: committed !== null && (commitLimit === null || committed <= commitLimit) ? committed : null,
+    commitLimit,
+    cached: bytes(a.k),
+    pagedPool: bytes(a.pp),
+    nonPagedPool: bytes(a.np)
+  }
 }
 
 /** BatteryChargeStatus: flags, except that 255 is "unknown" and not all of them at once. */
@@ -133,6 +180,8 @@ export class WindowsSystemReader {
   private battery: Held<BatteryReading> | null = null
   private batteryTriedAt = Number.NEGATIVE_INFINITY
   private space: Held<{ total: number; used: number }> | null = null
+  private cpu: Held<{ total: number; perCore: number[] }> | null = null
+  private memory: Held<WinMemory> | null = null
   private spaceTriedAt = Number.NEGATIVE_INFINITY
   private running: Promise<void> | null = null
 
@@ -168,14 +217,31 @@ export class WindowsSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'win32') return null
-    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, gpu: this.gpu, battery: this.battery }, this.mono())
+    const now = this.mono()
+    const system = systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, gpu: this.gpu, battery: this.battery }, now)
+    const memory = this.memory
+    const age = memory ? Math.max(0, Math.round(now - memory.at)) : null
+    if (!memory || age === null || age > WIN_MEMORY_MAX_AGE_MS) return system
+    return { ...system, winMemory: age >= 1_000 ? { ...memory.value, ageMs: age } : memory.value }
+  }
+
+  /** Task Manager's CPU figure from the last `cpu` answer, with its age in ms; null when there is
+   *  none yet (the first answer is always null) or it is older than CPU_MAX_AGE_MS, so the sampler
+   *  falls back on Node's figure. */
+  cpuUtility(): { total: number; perCore: number[]; ageMs: number } | null {
+    if (this.platform !== 'win32' || !this.cpu) return null
+    const ageMs = Math.max(0, this.mono() - this.cpu.at)
+    return ageMs <= CPU_MAX_AGE_MS ? { ...this.cpu.value, ageMs } : null
   }
 
   private async readDue(): Promise<void> {
     const now = this.mono()
     const heavy = this.heavyAllowed()
-    // PowerShell answers one request at a time, in the order asked: the network first.
-    const jobs: Promise<void>[] = [this.readNet()]
+    // PowerShell answers one request at a time, in the order asked. The network first: it reads no
+    // performance counters, so a new PowerShell has answered something before any counter read
+    // can stall, which is what lets the host leave a stalling command alone (src/win-host.ts).
+    // Then the CPU, which a sample waits for (src/sampler.ts SYSTEM_WAIT_MS), and the memory.
+    const jobs: Promise<void>[] = [this.readNet(), this.readCpu(), this.readMemory()]
     if (heavy && due(this.diskIoTriedAt, now, SYSTEM_CADENCE.diskIoMs)) jobs.push(this.readDiskIo(now))
     if (heavy && due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs)) jobs.push(this.readGpu(now))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.readBattery(now))
@@ -189,6 +255,16 @@ export class WindowsSystemReader {
     } catch {
       return null
     }
+  }
+
+  private async readCpu(): Promise<void> {
+    const cpu = parseCpuAnswer(await this.ask('cpu'))
+    if (cpu) this.cpu = { value: cpu, at: this.mono() }
+  }
+
+  private async readMemory(): Promise<void> {
+    const memory = parseMemAnswer(await this.ask('mem'))
+    if (memory) this.memory = { value: memory, at: this.mono() }
   }
 
   private async readNet(): Promise<void> {

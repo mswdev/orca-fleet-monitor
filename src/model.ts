@@ -111,6 +111,22 @@ export type BatteryReading = {
   ageMs?: number
 }
 
+/** A Windows computer's memory as Task Manager's memory page shows it, from the "Memory"
+ *  performance counters (src/win-system.ts). Bytes. In use is the machine's total less `available`. */
+export type WinMemory = {
+  /** "Available": free, zeroed and standby pages. */
+  available: number
+  /** "Committed": the commit charge and the commit limit (physical memory plus page files). */
+  committed: number | null
+  commitLimit: number | null
+  /** "Cached": the standby lists and the modified list. */
+  cached: number | null
+  /** "Paged pool" and "Non-paged pool": the kernel's own allocations. */
+  pagedPool: number | null
+  nonPagedPool: number | null
+  /** How old these figures are, in ms, when carried over a failed read; absent when fresh. */
+  ageMs?: number
+}
 /** A machine's network, disk, GPU and battery readings (the name is from 1.2, when only a Mac
  *  had them; Linux and Windows have since 1.3). Each part is null when it could not be read or
  *  the machine has no such thing. */
@@ -119,6 +135,8 @@ export type MacSystem = {
   disk: DiskReading | null
   gpu: GpuReading | null
   battery: BatteryReading | null
+  /** Windows only (1.3): its memory as Task Manager shows it. Absent elsewhere. */
+  winMemory?: WinMemory | null
 }
 
 /** One reading of the machine this worker runs on, from `node:os` only. */
@@ -132,7 +150,8 @@ export type LocalSample = {
   cpuModel: string
   cores: number
   uptimeSec: number
-  /** Percent busy since the previous reading, 0..100; null on the first reading. */
+  /** Percent busy since the previous reading, 0..100; null on the first reading. On Windows it is
+   *  Task Manager's figure ("% Processor Utility", src/win-system.ts) whenever there is one. */
   cpu: { total: number; perCore: number[] } | null
   /** `os.freemem()` is not "available" memory on macOS, so this is a fallback only. */
   memory: { total: number; free: number }
@@ -194,7 +213,7 @@ export type ProcessRow = {
    *  read it, else the kernel's short name (15 characters, which a process can set itself).
    *  Windows: the image's file name without `.exe`. */
   name: string
-  /** The owner's user name; null on Windows, where it cannot be read without elevation. */
+  /** The owner's user name; on Windows from `qprocess` (src/win-owners.ts), null where it has none. */
   user: string | null
   /** Percent of one core over the list's `cpuWindowMs` (Activity Monitor's "% CPU"): it can pass 100. */
   cpu: number | null
