@@ -9,6 +9,7 @@ export const TAB_IDS: Readonly<{ overview: string; activity: string }>
 export const TAB_PANEL_ID: string
 export const SORT_SPOKEN: Readonly<Record<SortKey, string>>
 export const CPU_HEAD: string
+export const CPU_HEAD_COMPUTER: string
 
 export type SortKey = 'cpu' | 'memory' | 'energy' | 'name'
 
@@ -23,7 +24,8 @@ export type ProcRow = {
   pid: number
   name: string
   user: string | null
-  /** Percent of one core, as Activity Monitor shows it: can exceed 100. */
+  /** Percent of one core, as Activity Monitor shows it, so it can exceed 100; on a Windows machine
+   *  (`cpuScale` is `computer`), percent of the whole computer, as Task Manager shows it. */
   cpu: number | null
   memory: number | null
   energy: number | null
@@ -39,6 +41,8 @@ export type ProcessesModel = {
   total: number | null
   listed: number
   energy: boolean
+  /** What a row's CPU is a share of: one core, or (Windows, as Task Manager) the whole computer. */
+  cpuScale: 'core' | 'computer'
   takenAt: number | null
   sort: SortKey
   query: string

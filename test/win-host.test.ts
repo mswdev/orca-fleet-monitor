@@ -604,10 +604,10 @@ describe('the PowerShell host', () => {
   })
 })
 
-test('the CPU and memory are left alone after one stall; other commands after three', async () => {
+test('the memory is left alone after one stall; other commands after three', async () => {
   const { stallLimitOf, HOST_STALL_LIMIT } = await import('../src/win-host.ts')
-  assert.equal(stallLimitOf('cpu'), 1)
   assert.equal(stallLimitOf('mem'), 1)
+  assert.equal(stallLimitOf('cpu'), HOST_STALL_LIMIT, 'no longer a command')
   assert.equal(stallLimitOf('gpu'), HOST_STALL_LIMIT)
   assert.equal(stallLimitOf('constructor'), HOST_STALL_LIMIT, 'only its own keys')
 })

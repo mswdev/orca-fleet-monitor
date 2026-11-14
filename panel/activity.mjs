@@ -32,6 +32,8 @@
 //   total: number | null           // every process on the machine, when known
 //   listed: number                 // rows in this list
 //   energy: boolean                // energy impact is reported (a Mac): its column and sort option
+//   cpuScale: 'core' | 'computer'  // what a row's CPU is a share of: one core (Activity Monitor,
+//                                  // top) or, on Windows, the whole computer (Task Manager)
 //   takenAt: number | null         // when the list was taken, worker clock ("Updated 8s ago")
 //   sort: 'cpu' | 'memory' | 'energy' | 'name'
 //   query: string                  // the search text as typed
@@ -40,7 +42,8 @@
 // ProcRow = {
 //   key: string                    // `${pid}:${start}`, stable for one process
 //   pid: number, name: string, user: string | null
-//   cpu: number | null             // percent of ONE core, as Activity Monitor shows it: can exceed 100
+//   cpu: number | null             // percent of ONE core, as Activity Monitor shows it, so it can exceed
+//                                  // 100; on Windows, percent of the whole computer, as Task Manager
 //   memory: number | null          // bytes (memory footprint on a Mac)
 //   energy: number | null          // energy impact (a Mac)
 //   runningSec: number | null
@@ -88,8 +91,9 @@ function tilesOf(machine) {
   }
 }
 
-/** View rows from toProcessList's rows. */
-function rowsOf(rows, now) {
+/** View rows from toProcessList's rows. `share`, when set, is the machine's logical processors: a
+ *  row's CPU (percent of one core, as every machine sends it) becomes a share of the whole computer. */
+function rowsOf(rows, now, share = null) {
   const out = []
   const seen = new Set()
   for (const r of rows) {
@@ -103,7 +107,7 @@ function rowsOf(rows, now) {
       pid: r.pid,
       name: r.name || `Process ${r.pid}`,
       user: r.user || null,
-      cpu: orNull(r.cpuPct),
+      cpu: share === null || !finite(r.cpuPct) ? orNull(r.cpuPct) : Math.min(100, r.cpuPct / share),
       // A process a minute or two old may have no figure yet: absent, not zero.
       memory: orNull(r.memBytes),
       energy: orNull(r.energy),
@@ -120,7 +124,11 @@ function rowsOf(rows, now) {
 function processesOf(machine, list, ui, now) {
   const summary = machine.processes
   if (!summary || !['full', 'top', 'waiting'].includes(summary.state)) return null
-  const base = { top: summary.topList, truncated: false, total: null, listed: 0, energy: false, takenAt: null, sort: ui.sort, query: ui.query, rows: [] }
+  // Windows people read a process's CPU off Task Manager, as a share of the whole computer (CPU time
+  // over elapsed time and logical processors). Everywhere else it is a share of one core.
+  const share = machine.platform === 'win32' && finite(machine.cores) && machine.cores >= 1 ? machine.cores : null
+  const cpuScale = share === null ? 'core' : 'computer'
+  const base = { top: summary.topList, truncated: false, total: null, listed: 0, energy: false, takenAt: null, sort: ui.sort, query: ui.query, cpuScale, rows: [] }
   if (list === undefined || list === null) return { ...base, state: 'loading' }
   // Every row, unfiltered: sort, search and the cut are the view's (its order can hold still).
   const model = toProcessList(list, {}, now)
@@ -130,7 +138,7 @@ function processesOf(machine, list, ui, now) {
   // This computer cannot read its own list (Windows, where PowerShell may not run the reader).
   if (model.state === 'unavailable' && model.reason === 'no-reader') return { ...base, state: 'blocked' }
   if (model.state !== 'ok') return { ...base, state: 'failed' }
-  const rows = rowsOf(model.rows, now)
+  const rows = rowsOf(model.rows, now, share)
   const energy = rows.some((r) => r.energy !== null)
   return {
     ...base,
@@ -192,7 +200,7 @@ export function toActivityModel({ machine, list, ui = { sort: 'cpu', query: '' }
 
 // --- numbers, as the design writes them --------------------------------------------------------------
 
-/** A process's CPU, percent of one core: "38%", "5.4%", "<0.1%", "0%", "312%". */
+/** A process's CPU, percent of one core or of the computer: "38%", "5.4%", "<0.1%", "0%", "312%". */
 export function procCpu(value) {
   if (!finite(value)) return '–'
   if (value <= 0) return '0%'
@@ -479,6 +487,10 @@ export const SORT_SPOKEN = {
 }
 /** The CPU column's label: a process's CPU is percent of one core, so 100% is one core busy. */
 export const CPU_HEAD = '% of core'
+/** On Windows: a share of the whole computer, as Task Manager labels it. */
+export const CPU_HEAD_COMPUTER = 'CPU'
+/** How a row's CPU is said, after its figure. */
+const cpuOf = (p) => (p.cpuScale === 'computer' ? 'of the computer' : 'of one core')
 
 /** "8 processes match chrome". */
 export function matchesSpoken(count, query) {
@@ -543,7 +555,14 @@ function head(p) {
     { class: 'fm-proc-head', 'aria-hidden': 'true', 'data-key': 'proc-head' },
     h('span', { class: key('name') }, 'Name'),
     h('span', { class: 'fm-proc-hint' }),
-    h('span', { class: ['fm-proc-cpu', key('cpu') ?? (p.sort === 'name' ? 'is-key' : null)], title: 'Percent of one core: a process busy on four cores shows 400%' }, CPU_HEAD),
+    h(
+      'span',
+      {
+        class: ['fm-proc-cpu', key('cpu') ?? (p.sort === 'name' ? 'is-key' : null)],
+        title: p.cpuScale === 'computer' ? 'Share of the whole computer, as Task Manager shows it: 100% is every core busy' : 'Percent of one core: a process busy on four cores shows 400%'
+      },
+      p.cpuScale === 'computer' ? CPU_HEAD_COMPUTER : CPU_HEAD
+    ),
     p.energy ? h('span', { class: ['fm-proc-energy', key('energy')] }, 'Energy') : null,
     h('span', { class: ['fm-proc-mem', key('memory')] }, 'Memory')
   )
@@ -551,7 +570,7 @@ function head(p) {
 
 /** A row's accessible name: complete at every width, whatever columns show. */
 function rowLabel(r, p) {
-  const parts = [r.name, `CPU ${procCpu(r.cpu)} of one core`]
+  const parts = [r.name, `CPU ${procCpu(r.cpu)} ${cpuOf(p)}`]
   if (p.energy && p.sort === 'energy') parts.push(`energy impact ${energyText(r.energy)}`)
   parts.push(`memory ${size(r.memory)}`)
   return parts.join(', ')
@@ -561,7 +580,7 @@ const moreId = (r) => `fm-proc-more-${r.key.replace(/[^0-9]/g, '-')}`
 
 function rowFacts(r, p) {
   const facts = [
-    { k: 'CPU', v: `${procCpu(r.cpu)} of one core`, cls: 'fm-fact--cpu' },
+    { k: 'CPU', v: `${procCpu(r.cpu)} ${cpuOf(p)}`, cls: 'fm-fact--cpu' },
     { k: 'Memory', v: size(r.memory), cls: 'fm-fact--mem' },
     p.energy ? { k: 'Energy impact', v: energyText(r.energy), cls: 'fm-fact--energy' } : null,
     { k: 'PID', v: String(r.pid) },

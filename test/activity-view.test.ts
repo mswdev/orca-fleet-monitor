@@ -501,6 +501,31 @@ describe('the Processes card', () => {
     assert.deepEqual([procCpu(5.43), procCpu(38.4), procCpu(0), procCpu(null)], ['5.4%', '38%', '0%', '–'])
   })
 
+  test("on Windows a process's CPU is its share of the whole computer, as Task Manager shows it", async () => {
+    // 32 logical processors: a process busy on one whole core is 3.1% of the computer.
+    const winHost = { hostname: 'pc', platform: 'win32', arch: 'x64', cpuModel: 'AMD Ryzen 9', cores: 32, uptimeSec: 100 }
+    const v = mount(viewOf([local({ host: winHost })]), () =>
+      listOf([
+        { pid: 7, name: 'node', cpu: 100, mem: GIB },
+        { pid: 8, name: 'compiler', cpu: 3_200, mem: GIB },
+        { pid: 9, name: 'idle', cpu: 1, mem: GIB }
+      ])
+    )
+    await activity(v, 'local')
+    const head = $(v.root, '.fm-proc-head .fm-proc-cpu')!
+    assert.equal(text(head), 'CPU')
+    assert.match(head.getAttribute('title') ?? '', /whole computer, as Task Manager/)
+    const rows = $$(v.root, '.fm-proc-row')
+    assert.deepEqual(rows.map((r) => text($(r, '.fm-proc-cpu')!)), ['100%', '3.1%', '<0.1%'], 'busiest first; every core of 32 is 100% at most')
+    assert.equal(rows[1]!.getAttribute('aria-label'), 'node, CPU 3.1% of the computer, memory 1 GB')
+    // A Windows machine seen from elsewhere reads the same: the scale goes with the machine.
+    const pc = base({ id: 'env-pc', name: 'PC', host: winHost, system: SYSTEM, processes: { state: 'top', reason: null, takenAt: NOW - 8_000 }, history: HISTORY })
+    const remote = mount(viewOf([local(), pc]), () => listOf([{ pid: 7, name: 'node', cpu: 100, mem: GIB }]))
+    await activity(remote, 'env-pc')
+    assert.equal(text($(remote.root, '.fm-proc-head .fm-proc-cpu')!), 'CPU')
+    assert.equal(text($($$(remote.root, '.fm-proc-row')[0]!, '.fm-proc-cpu')!), '3.1%')
+  })
+
   test('sort by memory, energy and name; the live region says so, and energy is offered only where it is reported', async () => {
     const v = mount(viewOf([local()]), () =>
       listOf([

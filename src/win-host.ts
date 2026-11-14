@@ -13,12 +13,6 @@
 // The script ends when its standard input closes, which is what happens when the worker dies, so
 // it is never left behind. The commands:
 //
-//   cpu    Task Manager's CPU figure: "% Processor Utility" from the "Processor Information"
-//          counters between this request and the one before, for the whole computer (_Total)
-//          and each logical processor in (group, number) order; null on the first request.
-//          Utility is time busy scaled by the clock speed against the base speed, so on a CPU
-//          that boosts it reads above "% Processor Time" (and Node's os.cpus()), and can pass 100
-//          (src/win-system.ts caps it there, as Task Manager does)
 //   mem    the raw "Memory" counters Task Manager's memory page is made of: available bytes,
 //          commit charge and limit, paged and non-paged pool, and its "Cached" (the standby
 //          lists and the modified list)
@@ -66,7 +60,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { Timers } from './processes.ts'
 
 /** What the script answers to; anything else is answered `null`. */
-export const HOST_COMMANDS = ['cpu', 'mem', 'net', 'disk', 'gpu', 'bat', 'proc'] as const
+export const HOST_COMMANDS = ['mem', 'net', 'disk', 'gpu', 'bat', 'proc'] as const
 
 /**
  * The script, as powershell.exe is given it after `-Command`. Three things it must never hold:
@@ -92,7 +86,6 @@ $q = [string][char]34
 $bad = [regex]'[\x00-\x1f]'
 $global:fmDisk = $null
 $global:fmGpu = $null
-$global:fmCpu = $null
 $global:fmHasGpu = $null
 $global:fmReset = [DateTime]::MinValue
 $global:fmForms = $false
@@ -178,31 +171,6 @@ function FmGpu {
   FmJson @{ p = $best }
 }
 
-function FmCpu {
-  $now = (New-Object System.Diagnostics.PerformanceCounterCategory('Processor Information')).ReadCategory()['% processor utility']
-  if ($null -eq $now) { return $null }
-  $old = $global:fmCpu
-  $keep = @{}
-  $total = $null
-  $cores = @{}
-  foreach ($e in $now.GetEnumerator()) {
-    $d = $e.Value
-    $n = $d.InstanceName
-    $s = $d.Sample
-    $keep[$n] = $s
-    if ($null -eq $old -or -not $old.ContainsKey($n)) { continue }
-    $v = $null
-    try { $v = [System.Diagnostics.CounterSampleCalculator]::ComputeCounterValue($old[$n], $s) } catch { continue }
-    if ($n -eq '_Total') { $total = $v }
-    elseif ($n -match '^(\d+),(\d+)$') { $cores[[int]$Matches[1] * 65536 + [int]$Matches[2]] = $v }
-  }
-  $global:fmCpu = $keep
-  if ($null -eq $total) { return $null }
-  $list = New-Object System.Collections.Generic.List[double]
-  foreach ($k in ($cores.Keys | Sort-Object)) { $list.Add([Math]::Round([double]$cores[$k], 1)) }
-  FmJson @{ t = [Math]::Round([double]$total, 1); c = $list.ToArray() }
-}
-
 function FmMem {
   $data = (New-Object System.Diagnostics.PerformanceCounterCategory('Memory')).ReadCategory()
   $v = @{}
@@ -260,7 +228,6 @@ while ($true) {
     switch ($line.Substring($at + 1)) {
       'net' { $r = FmNet }
       'disk' { $r = FmDisk }
-      'cpu' { $r = FmCpu }
       'mem' { $r = FmMem }
       'gpu' { $r = FmGpu }
       'bat' { $r = FmBat }
@@ -269,7 +236,6 @@ while ($true) {
   } catch {
     $r = $null
     if ($line.EndsWith(' gpu')) { $global:fmGpu = $null }
-    if ($line.EndsWith(' cpu')) { $global:fmCpu = $null }
     if (([DateTime]::UtcNow - $global:fmReset).TotalSeconds -ge 60) {
       $global:fmReset = [DateTime]::UtcNow
       $global:fmDisk = $null
@@ -354,9 +320,9 @@ export const HOST_GIVE_UP_MS = 60 * 60_000
 export const HOST_STALL_LIMIT = 3
 export const HOST_FIRST_REFUSAL_MS = 10 * 60_000
 /** Commands left alone after their first stall instead: asked with every reading, so each stall
- *  would cost every other reading its PowerShell every few seconds, and each has a stand-in (the
- *  CPU falls back on Node's figure; the memory rows are only detail). */
-const STALL_LIMIT_OF: Readonly<Record<string, number>> = Object.freeze({ cpu: 1, mem: 1 })
+ *  would cost every other reading its PowerShell every few seconds, and they are only detail (the
+ *  memory rows). */
+const STALL_LIMIT_OF: Readonly<Record<string, number>> = Object.freeze({ mem: 1 })
 /** How many stalls in a row leave `command` alone. */
 export function stallLimitOf(command: string): number {
   return Object.hasOwn(STALL_LIMIT_OF, command) ? STALL_LIMIT_OF[command]! : HOST_STALL_LIMIT

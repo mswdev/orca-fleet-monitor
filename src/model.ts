@@ -150,8 +150,8 @@ export type LocalSample = {
   cpuModel: string
   cores: number
   uptimeSec: number
-  /** Percent busy since the previous reading, 0..100; null on the first reading. On Windows it is
-   *  Task Manager's figure ("% Processor Utility", src/win-system.ts) whenever there is one. */
+  /** Percent busy since the previous reading, 0..100; null on the first reading. On Windows this is
+   *  CPU time over elapsed time, the figure Task Manager shows on Windows 11 since 2025. */
   cpu: { total: number; perCore: number[] } | null
   /** `os.freemem()` is not "available" memory on macOS, so this is a fallback only. */
   memory: { total: number; free: number }
