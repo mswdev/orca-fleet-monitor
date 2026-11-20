@@ -59,7 +59,8 @@ export function createFakeOrca({ state = 'live', live = false, now = () => Date.
             snapshot = {
               ...snapshot,
               cli: { ...snapshot.cli, version },
-              machines: snapshot.machines.map((m) => (m.kind === 'remote' && m.id !== 'mini' ? { ...m, beacon: { ...m.beacon, version } } : m))
+              // A worker of 1.4 says null for a beacon that names no version (from before 1.4).
+              machines: snapshot.machines.map((m) => (m.kind === 'remote' ? { ...m, beacon: { ...m.beacon, version: m.id === 'mini' ? null : version } } : m))
             }
           }
           return Promise.resolve(snapshot)

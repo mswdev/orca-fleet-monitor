@@ -725,6 +725,15 @@ describe('health colour contrast', () => {
     assert.equal(needsStrongerHealth([hex('#2a62e0')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), true, 'a dark grey track')
     assert.equal(needsStrongerHealth([hex('#1d4ed8')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), false, 'the stronger blue there')
   })
+
+  test('where no theme colour stands out on a light card and a dark track, a grey between them does', async () => {
+    const { bestOn, worstContrast, MIN_GRAPHIC_CONTRAST } = await import('../panel/contrast.mjs')
+    const hex = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
+    const surfaces = [hex('#ffffff'), hex('#fafafa'), hex('#343434')]
+    const greys = Array.from({ length: 33 }, (_, i) => Math.min(255, i * 8)).map((v) => [v, v, v])
+    const best = bestOn([hex('#1d4ed8'), hex('#0a0a0a'), hex('#737373'), ...greys], surfaces)!
+    assert.ok(worstContrast(best, surfaces) >= MIN_GRAPHIC_CONTRAST, `best ${best} at ${worstContrast(best, surfaces).toFixed(2)}`)
+  })
 })
 
 describe('memory the panel must not misstate', () => {

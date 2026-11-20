@@ -32,13 +32,14 @@
 import { open, readdir, type FileHandle } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import { createRunBounded, type ExecFile } from './mac-memory.ts'
-import { diskSpaceOf, due, interfaceLabel, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
-import type { BatteryReading, MacSystem, NetReading } from './model.ts'
+import { diskSpaceOf, due, interfaceLabel, MAX_VOLUMES, readVolumes, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
+import type { BatteryReading, MacSystem, NetReading, VolumeReading } from './model.ts'
 
 export const PROC_NET_ROUTE_PATH = '/proc/net/route'
 export const PROC_NET_IPV6_ROUTE_PATH = '/proc/net/ipv6_route'
 export const PROC_NET_DEV_PATH = '/proc/net/dev'
 export const PROC_DISKSTATS_PATH = '/proc/diskstats'
+export const PROC_MOUNTS_PATH = '/proc/self/mounts'
 export const SYS_BLOCK_PATH = '/sys/block'
 export const SYS_DRM_PATH = '/sys/class/drm'
 export const SYS_PCI_DEVICES_PATH = '/sys/bus/pci/devices'
@@ -407,6 +408,44 @@ function isEntryName(name: string): boolean {
   return /^[^/\u0000-\u001f]{1,128}$/.test(name) && name !== '.' && name !== '..'
 }
 
+// --- volumes -------------------------------------------------------------------------------
+
+/** Filesystems that hold a person's files on a disk of this machine. Network (nfs, cifs), virtual
+ *  (proc, tmpfs, overlay, squashfs of a snap) and FUSE ones are left out: statfs of a stale network
+ *  mount can block. */
+const DISK_FS = new Set(['ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'zfs', 'f2fs', 'jfs', 'reiserfs', 'bcachefs', 'vfat', 'exfat', 'ntfs', 'ntfs3', 'hfsplus', 'apfs'])
+/** Mounts no one counts as a disk of theirs: the system's own, boot partitions, snaps, containers. */
+const SKIPPED_MOUNTS = ['/proc', '/sys', '/dev', '/run', '/boot', '/snap', '/var/snap', '/var/lib/docker', '/var/lib/containers', '/var/lib/kubelet']
+
+/** A path from /proc/self/mounts, where a space, tab, newline and backslash are octal escapes. */
+function unescapeMount(path: string): string {
+  return path.replace(/\\([0-7]{3})/g, (_, code: string) => String.fromCharCode(parseInt(code, 8)))
+}
+
+/**
+ * The volumes a person thinks of as this machine's disks, from /proc/self/mounts: each local
+ * filesystem on a block device (not a loop device), once per device (a btrfs disk mounted at
+ * several subvolumes is one disk), named by where it is mounted. The main one is the first of
+ * LINUX_SPACE_PATHS among them, else the first.
+ */
+export function linuxVolumePlaces(text: unknown): { path: string; name: string; main?: boolean }[] {
+  if (typeof text !== 'string') return []
+  const seen = new Set<string>()
+  const places: { path: string; name: string; main?: boolean }[] = []
+  for (const line of text.split('\n')) {
+    const [device, rawPath, type] = line.split(' ')
+    if (!device || !rawPath || !type || !device.startsWith('/dev/') || /^\/dev\/(loop|zram|ram)\d/.test(device) || !DISK_FS.has(type)) continue
+    const path = unescapeMount(rawPath)
+    if (!path.startsWith('/') || SKIPPED_MOUNTS.some((p) => path === p || path.startsWith(`${p}/`)) || seen.has(device)) continue
+    seen.add(device)
+    places.push({ path, name: path })
+    if (places.length >= MAX_VOLUMES * 4) break
+  }
+  const main = LINUX_SPACE_PATHS.map((p) => places.find((v) => v.path === p)).find(Boolean) ?? places[0]
+  if (main) main.main = true
+  return [...(main ? [main] : []), ...places.filter((v) => v !== main)]
+}
+
 // --- the reader ------------------------------------------------------------------------------
 
 
@@ -448,6 +487,8 @@ export class LinuxSystemReader {
   private batteryTriedAt = Number.NEGATIVE_INFINITY
   private space: Held<{ total: number; used: number }> | null = null
   private spaceTriedAt = Number.NEGATIVE_INFINITY
+  private volumes: Held<VolumeReading[]> | null = null
+  private volumesTriedAt = Number.NEGATIVE_INFINITY
   private running: Promise<void> | null = null
   private runningSince = 0
   /** Parts whose last read has not returned. */
@@ -495,7 +536,7 @@ export class LinuxSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'linux') return null
-    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, gpu: this.gpu, battery: this.battery }, this.mono())
+    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery }, this.mono())
   }
 
   private async readDue(): Promise<void> {
@@ -507,7 +548,15 @@ export class LinuxSystemReader {
     if (due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs) && this.heavy()) jobs.push(this.part('gpu', () => this.readGpu(now)))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.part('battery', () => this.readBattery(now)))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
+    if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.part('volumes', () => this.readVolumes(now)))
     await Promise.all(jobs)
+  }
+
+  /** Every local volume (linuxVolumePlaces), each with its space. */
+  private async readVolumes(now: number): Promise<void> {
+    this.volumesTriedAt = now
+    const volumes = readVolumes(linuxVolumePlaces(await this.file(PROC_MOUNTS_PATH)), this.statfs)
+    if (volumes.length > 0) this.volumes = { value: volumes, at: now }
   }
 
   private heavy(): boolean {

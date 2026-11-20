@@ -93,7 +93,10 @@ export function applyHealthContrast(doc = document) {
     html.setAttribute('data-fm-contrast', 'more')
     // Checked again on the colour now in force: a theme can defeat the stronger blue too.
     if (dataFails()) {
-      const best = bestOn([read('--fm-data'), read('--fm-card-fg'), read('--fm-fg'), read('--fm-muted-fg')], tracks)
+      // The theme's text colours, and a ladder of greys: a grey between a light card and a dark
+      // track can stand out on both where neither text colour does.
+      const greys = Array.from({ length: 33 }, (_, i) => Math.min(255, i * 8)).map((v) => [v, v, v])
+      const best = bestOn([read('--fm-data'), read('--fm-card-fg'), read('--fm-fg'), read('--fm-muted-fg'), ...greys], tracks)
       if (best) {
         html.style.setProperty('--fm-data', `rgb(${best.join(', ')})`)
         html.setAttribute('data-fm-data', 'theme')

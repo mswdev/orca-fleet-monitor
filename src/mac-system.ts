@@ -4,7 +4,8 @@
 //             goes out of (`route -n get default`, about once a minute): bytes in and out per
 //             second from the interface's cumulative 64-bit counters
 //   disk      `statfs` of the main volume about once a minute (no child process): the APFS
-//             container's size, and used = size − available, as `df` counts available;
+//             container's size, and used = size − available, as `df` counts available; `mount`
+//             about once a minute, and `statfs` of each local volume it lists that Finder shows;
 //             `ioreg -r -d 1 -c IOBlockStorageDriver` about every 20 s: bytes read and written
 //             per second, summed over every disk, as Activity Monitor's Disk tab sums them
 //   GPU       `ioreg -r -d 1 -c IOAccelerator` about every 30 s: "Device Utilization %", the
@@ -21,12 +22,14 @@
 import { statfsSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { createRunBounded, type ExecFile } from './mac-memory.ts'
-import type { BatteryReading, DiskReading, GpuReading, MacSystem, NetReading } from './model.ts'
+import { readdirSync, readlinkSync } from 'node:fs'
+import type { BatteryReading, DiskReading, GpuReading, MacSystem, NetReading, VolumeReading } from './model.ts'
 
 export const NETSTAT_PATH = '/usr/sbin/netstat'
 export const ROUTE_PATH = '/sbin/route'
 export const IOREG_PATH = '/usr/sbin/ioreg'
 export const PMSET_PATH = '/usr/bin/pmset'
+export const MOUNT_PATH = '/sbin/mount'
 const TIMEOUT_MS = 2_000
 /** This reader's own bounded runner, apart from the memory reads' (src/mac-memory.ts). */
 export const systemRunBounded: ExecFile = createRunBounded()
@@ -208,6 +211,81 @@ export function diskSpaceOf(s: { bsize: number; blocks: number; bavail: number }
   return Number.isSafeInteger(total) ? { total, used } : null
 }
 
+/** The most volumes read and carried for one machine, and the longest name kept for one. */
+export const MAX_VOLUMES = 8
+export const VOLUME_NAME_MAX = 40
+
+/** One volume's reading from its statfs figures, or null for figures out of shape. */
+export function volumeOf(name: string, s: { bsize: number; blocks: number; bavail: number } | null, main = false): VolumeReading | null {
+  const space = diskSpaceOf(s)
+  if (!space || !name) return null
+  return { name: name.slice(0, VOLUME_NAME_MAX), totalBytes: space.total, usedBytes: space.used, ...(main ? { main: true } : {}) }
+}
+
+/** Reads each of `places` (at most MAX_VOLUMES) with `statfs`: the volumes that answer, main first. */
+export function readVolumes(places: readonly { path: string; name: string; main?: boolean }[], statfs: StatFs): VolumeReading[] {
+  const out: VolumeReading[] = []
+  for (const place of places.slice(0, MAX_VOLUMES)) {
+    let v: VolumeReading | null = null
+    try {
+      v = volumeOf(place.name, statfs(place.path), place.main === true)
+    } catch {
+      v = null
+    }
+    if (v) out.push(v)
+  }
+  return out.sort((a, b) => Number(b.main === true) - Number(a.main === true))
+}
+
+/** `mount`'s lines: `<device> on <path> (<type>, <option>, …)`. A path may hold spaces. */
+export function parseMacMounts(text: unknown): { path: string; options: string[] }[] {
+  if (typeof text !== 'string') return []
+  const out: { path: string; options: string[] }[] = []
+  for (const line of text.split('\n')) {
+    const m = /^\S.*? on (\/.*) \(([^()]*)\)$/.exec(line.trim())
+    if (!m) continue
+    out.push({ path: m[1]!, options: m[2]!.split(',').map((o) => o.trim()) })
+    if (out.length >= 256) break
+  }
+  return out
+}
+
+/**
+ * Which of a Mac's mounts are volumes a person thinks of as its disks: the Data volume (the start-up
+ * disk, named `mainName`, "Macintosh HD"), then each local volume under /Volumes that Finder shows
+ * (not `nobrowse`) and can be written to (not `read-only`: a mounted installer image, a recovery
+ * volume). Network shares are not `local`, so a stale one is never asked about.
+ */
+export function macVolumePlaces(mounts: readonly { path: string; options: string[] }[], mainName: string | null): { path: string; name: string; main?: boolean }[] {
+  const places: { path: string; name: string; main?: boolean }[] = []
+  const data = mounts.find((m) => m.path === SPACE_PATHS[0]) ?? mounts.find((m) => m.path === '/')
+  if (data) places.push({ path: data.path, name: mainName || 'Macintosh HD', main: true })
+  for (const m of mounts) {
+    if (!m.path.startsWith('/Volumes/')) continue
+    if (!m.options.includes('local') || m.options.includes('nobrowse') || m.options.includes('read-only')) continue
+    const name = m.path.slice('/Volumes/'.length)
+    if (!name || name.includes('/') || name === mainName) continue
+    places.push({ path: m.path, name })
+  }
+  return places
+}
+
+/** The start-up disk's name as Finder shows it: the entry in /Volumes that links to `/`. */
+export function macMainVolumeName(list: () => string[] = () => readdirSync('/Volumes'), link: (path: string) => string = (path) => readlinkSync(path)): string | null {
+  try {
+    for (const name of list().slice(0, 64)) {
+      try {
+        if (link(`/Volumes/${name}`) === '/') return name
+      } catch {
+        // Not a link: an ordinary mounted volume.
+      }
+    }
+  } catch {
+    // No /Volumes to list.
+  }
+  return null
+}
+
 /** A value and when it was read, on the reader's monotonic clock. */
 export type Held<T> = { value: T; at: number }
 
@@ -217,6 +295,8 @@ export type HeldSystem = {
   net: Held<NetReading> | null
   diskIo: Held<{ read: number | null; write: number | null }> | null
   space: Held<{ total: number; used: number }> | null
+  /** Every local volume, where the platform's reader lists them. */
+  volumes?: Held<VolumeReading[]> | null
   gpu: Held<number> | null
   battery: Held<BatteryReading> | null
 }
@@ -234,8 +314,10 @@ export function systemSnapshot(held: HeldSystem, now: number): MacSystem {
   const net = held.net && netAge !== null ? withAge(held.net.value, netAge, 'ageMs') : null
   const ioAge = age(held.diskIo, SYSTEM_MAX_AGE.diskIoMs)
   const spaceAge = age(held.space, SYSTEM_MAX_AGE.spaceMs)
+  const volumesAge = age(held.volumes ?? null, SYSTEM_MAX_AGE.spaceMs)
+  const volumes = volumesAge !== null && held.volumes && held.volumes.value.length > 0 ? held.volumes.value : null
   let disk: DiskReading | null = null
-  if (ioAge !== null || spaceAge !== null) {
+  if (ioAge !== null || spaceAge !== null || volumes) {
     const io = ioAge !== null && held.diskIo ? held.diskIo.value : null
     const space = spaceAge !== null && held.space ? held.space.value : null
     disk = {
@@ -244,7 +326,8 @@ export function systemSnapshot(held: HeldSystem, now: number): MacSystem {
       ...(space && spaceAge! >= 1_000 ? { spaceAgeMs: spaceAge! } : {}),
       readBytesPerSec: io?.read ?? null,
       writeBytesPerSec: io?.write ?? null,
-      ...(io && ioAge! >= 1_000 ? { ioAgeMs: ioAge! } : {})
+      ...(io && ioAge! >= 1_000 ? { ioAgeMs: ioAge! } : {}),
+      ...(volumes ? { volumes } : {})
     }
   }
   const gpuAge = age(held.gpu, SYSTEM_MAX_AGE.gpuMs)
@@ -285,14 +368,20 @@ export class MacSystemReader {
   private batteryTriedAt = Number.NEGATIVE_INFINITY
   private space: Held<{ total: number; used: number }> | null = null
   private spaceTriedAt = Number.NEGATIVE_INFINITY
+  private volumes: Held<VolumeReading[]> | null = null
+  private volumesTriedAt = Number.NEGATIVE_INFINITY
+  private readonly volumeName: () => string | null
   private running: Promise<void> | null = null
 
-  constructor(options: { exec?: ExecFile; mono?: () => number; statfs?: StatFs; platform?: string; heavyAllowed?: () => boolean } = {}) {
+  constructor(
+    options: { exec?: ExecFile; mono?: () => number; statfs?: StatFs; platform?: string; heavyAllowed?: () => boolean; volumeName?: () => string | null } = {}
+  ) {
     this.exec = options.exec ?? systemRunBounded
     this.mono = options.mono ?? (() => performance.now())
     this.statfs = options.statfs ?? realStatfs
     this.platform = options.platform ?? process.platform
     this.heavyAllowed = options.heavyAllowed ?? (() => true)
+    this.volumeName = options.volumeName ?? (() => macMainVolumeName())
   }
 
   /** Reads what is due. A refresh still running is joined, not started again. */
@@ -307,7 +396,7 @@ export class MacSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'darwin') return null
-    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, gpu: this.gpu, battery: this.battery }, this.mono())
+    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery }, this.mono())
   }
 
   private async readDue(): Promise<void> {
@@ -323,7 +412,21 @@ export class MacSystemReader {
     if (heavy && due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs)) jobs.push(this.readGpu(now))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.readBattery(now))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
+    if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.readVolumes(now))
     await Promise.all(jobs)
+  }
+
+  /** The volumes a person thinks of as this Mac's disks (macVolumePlaces), each with its space. */
+  private async readVolumes(now: number): Promise<void> {
+    this.volumesTriedAt = now
+    let name: string | null = null
+    try {
+      name = this.volumeName()
+    } catch {
+      name = null
+    }
+    const volumes = readVolumes(macVolumePlaces(parseMacMounts(await this.run(MOUNT_PATH, [])), name), this.statfs)
+    if (volumes.length > 0) this.volumes = { value: volumes, at: now }
   }
 
   private async run(file: string, args: readonly string[], maxBuffer = MAX_OUTPUT_BYTES): Promise<string | null> {

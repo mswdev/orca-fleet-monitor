@@ -18,7 +18,8 @@
 //                downTrend: Trend | null, upTrend: Trend | null,     // fleet-binding.mjs trendOf
 //                downPeak: number | null, upPeak: number | null,     // the window's highest readings
 //                now: number } | null                                // the worker's clock
-//     disk: { usedBytes: number, totalBytes: number, readBps: number | null, writeBps: number | null } | null
+//     disk: { usedBytes: number | null, totalBytes: number | null, readBps: number | null, writeBps: number | null,
+//             volumes: { name, usedBytes, totalBytes, pct, main }[] } | null   // every local volume, main first
 //     gpu: { pct: number, peak: number | null, avg: number | null, trend: Trend | null, now: number } | null
 //     battery: { pct: number, state: 'charging' | 'discharging' | 'charged' | 'not-charging',
 //                minutes: number | null, watts: number | null } | null
@@ -86,10 +87,7 @@ function tilesOf(machine, now) {
           now
         }
       : null,
-    disk:
-      disk && finite(disk.totalBytes) && disk.totalBytes > 0 && finite(disk.usedBytes)
-        ? { usedBytes: disk.usedBytes, totalBytes: disk.totalBytes, readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec) }
-        : null,
+    disk: diskOf(disk),
     gpu: gpu && finite(gpu.pct) ? { pct: gpu.pct, peak: orNull(gpu.stats?.peak), avg: orNull(gpu.stats?.avg), trend: gpu.trend ?? null, now } : null,
     battery:
       battery && battery.present && finite(battery.pct)
@@ -102,6 +100,18 @@ function tilesOf(machine, now) {
           }
         : null
   }
+}
+
+/** The disk tile's model: the main volume's space (from the volumes where they are reported),
+ *  traffic over every disk, and every volume; null with nothing to show. */
+function diskOf(disk) {
+  if (!disk) return null
+  const volumes = (disk.volumes ?? []).map((v) => ({ name: v.name, usedBytes: v.usedBytes, totalBytes: v.totalBytes, pct: v.usedPct, main: v.main }))
+  const main = volumes.find((v) => v.main) ?? null
+  const total = main ? main.totalBytes : finite(disk.totalBytes) && disk.totalBytes > 0 ? disk.totalBytes : null
+  const used = main ? main.usedBytes : finite(disk.usedBytes) ? disk.usedBytes : null
+  if (total === null || used === null) return volumes.length > 0 ? { usedBytes: null, totalBytes: null, readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec), volumes } : null
+  return { usedBytes: used, totalBytes: total, readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec), volumes }
 }
 
 /** View rows from toProcessList's rows. `share`, when set, is the machine's logical processors: a
@@ -398,20 +408,54 @@ function networkTile(net) {
   })
 }
 
+/** A volume this full is busy, this full strained: a disk near full is what anyone acts on. */
+const diskTone = (pct) => (pct >= 95 ? 'strained' : pct >= 90 ? 'busy' : 'ok')
+
+/** One disk: the Disk tile, named after its volume where the machine names it. Several: one wide
+ *  Disks tile with a row per volume. Traffic is over every disk together either way. */
 function diskTile(disk) {
-  const pct = (disk.usedBytes / disk.totalBytes) * 100
-  const space = diskSpace(disk.usedBytes, disk.totalBytes)
   const parts = [disk.readBps !== null ? `R ${rate(disk.readBps).text}` : null, disk.writeBps !== null ? `W ${rate(disk.writeBps).text}` : null].filter(Boolean)
   const spoken = [disk.readBps !== null ? `reading ${rate(disk.readBps).text}` : null, disk.writeBps !== null ? `writing ${rate(disk.writeBps).text}` : null].filter(Boolean)
+  if (disk.volumes.length > 1) return disksTile(disk, parts, spoken)
+  if (disk.totalBytes === null || disk.usedBytes === null) return null
+  const pct = (disk.usedBytes / disk.totalBytes) * 100
+  const space = diskSpace(disk.usedBytes, disk.totalBytes)
+  const name = disk.volumes[0]?.name ?? null
   return tile({
     key: 'disk',
-    label: 'Disk',
-    tone: pct >= 95 ? 'strained' : pct >= 90 ? 'busy' : 'ok',
+    label: name ? ['Disk', h('span', { class: 'fm-vol-name', title: name }, `· ${name}`)] : 'Disk',
+    tone: diskTone(pct),
     figure: bigPct(pct),
     sub: space,
     slot: meter(pct, parts.join(' · ')),
-    aria: `Disk: ${pctText(pct)}% used, ${space}${spoken.length > 0 ? `; ${spoken.join(', ')}` : ''}`
+    aria: `Disk${name ? ` ${name}` : ''}: ${pctText(pct)}% used, ${space}${spoken.length > 0 ? `; ${spoken.join(', ')}` : ''}`
   })
+}
+
+/** Several volumes: each by name with how full it is, and the traffic over all of them. */
+function disksTile(disk, parts, spoken) {
+  const rows = disk.volumes.map((v, i) => {
+    const space = diskSpace(v.usedBytes, v.totalBytes)
+    return h(
+      'li',
+      { class: 'fm-vol', data: { tone: diskTone(v.pct) }, 'data-key': `vol:${i}` },
+      h(
+        'span',
+        { class: 'fm-vol-row' },
+        h('span', { class: 'fm-vol-label', title: v.name }, v.name),
+        h('span', { class: 'fm-vol-pct' }, `${pctText(v.pct)}%`),
+        h('span', { class: 'fm-vol-space' }, space)
+      ),
+      h('span', { class: 'fm-ws-bar', 'aria-hidden': 'true' }, h('span', { style: { width: `${Math.min(100, Math.max(0, v.pct))}%` } }))
+    )
+  })
+  const said = disk.volumes.map((v) => `${v.name} ${pctText(v.pct)}% used, ${diskSpace(v.usedBytes, v.totalBytes)}`).join('; ')
+  return h(
+    'div',
+    { class: 'fm-metric fm-tile fm-tile--wide fm-disks', data: { tone: 'ok' }, role: 'group', 'aria-label': `Disks: ${said}${spoken.length > 0 ? `; ${spoken.join(', ')}` : ''}`, 'data-key': 'tile:disk' },
+    h('span', { class: 'fm-disks-head' }, h('span', { class: 'fm-metric-label' }, 'Disks'), parts.length > 0 ? h('span', { class: 'fm-tile-cap' }, parts.join(' · ')) : null),
+    h('ul', { class: 'fm-vols', 'aria-hidden': 'true' }, rows)
+  )
 }
 
 function gpuTile(gpu) {
@@ -460,10 +504,14 @@ function batteryTile(b) {
 export function tilesSection(tiles) {
   const out = []
   const names = []
+  const disk = tiles.disk ? diskTile(tiles.disk) : null
+  // Several volumes make one wide tile: it goes after the small ones, which then pair up.
+  const wide = disk !== null && tiles.disk.volumes.length > 1
   if (tiles.network) out.push(networkTile(tiles.network)), names.push('network')
-  if (tiles.disk) out.push(diskTile(tiles.disk)), names.push('disk')
+  if (disk && !wide) out.push(disk), names.push('disk')
   if (tiles.gpu) out.push(gpuTile(tiles.gpu)), names.push('GPU')
   if (tiles.battery) out.push(batteryTile(tiles.battery)), names.push('battery')
+  if (disk && wide) out.push(disk), names.push('disks')
   if (out.length === 0) return null
   const label = names.join(', ')
   return h('section', { class: 'fm-section fm-tiles', 'aria-label': label.charAt(0).toUpperCase() + label.slice(1), 'data-key': 'tiles' }, out)

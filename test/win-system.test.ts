@@ -155,7 +155,7 @@ describe('WindowsSystemReader', () => {
     assert.deepEqual(win.paths, ['D:\\'], 'the system drive')
     assert.equal(first.gpu?.percent, 20)
     assert.deepEqual(first.battery, { present: true, percent: 70, state: 'charging', source: 'ac', minutesRemaining: null })
-    assert.deepEqual(win.calls, ['net', 'mem', 'disk', 'gpu', 'bat'], 'the network first (no counters), then the memory')
+    assert.deepEqual(win.calls, ['net', 'mem', 'disk', 'gpu', 'bat', 'vol'], 'the network first (no counters), then the memory')
     win.state.t = 5_000
     win.state.net = { n: 'Ethernet 2', rx: 3_500_000, tx: 550_000 }
     await win.reader.refresh()
@@ -285,13 +285,13 @@ describe('WindowsSystemReader', () => {
     let heavy = false
     const win = fakeWindows({ heavyAllowed: () => heavy })
     await win.reader.refresh()
-    assert.deepEqual(win.calls, ['net', 'mem', 'bat'], 'the memory is not optional')
+    assert.deepEqual(win.calls, ['net', 'mem', 'bat', 'vol'], 'the memory is not optional, nor the drives (no counters)')
     assert.equal(win.reader.snapshot()!.gpu, null)
     assert.equal(win.reader.snapshot()!.disk?.totalBytes, 1_024_000_000_000, 'space needs no request')
     heavy = true
     win.state.t = 5_000
     await win.reader.refresh()
-    assert.deepEqual(win.calls, ['net', 'mem', 'bat', 'net', 'mem', 'disk', 'gpu'])
+    assert.deepEqual(win.calls, ['net', 'mem', 'bat', 'vol', 'net', 'mem', 'disk', 'gpu'])
   })
 
   test('the memory: read with every reading, carried with its age, then dropped', async () => {

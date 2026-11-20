@@ -6,10 +6,10 @@
 // `gp`, `bt` and `pl` in 1.2; `wm` in 1.3; `fv` in 1.4) is optional, so an older Fleet Monitor on
 // either side keeps working.
 // The process list travels in lines of its own (src/process-line.ts), which beacon readers skip.
-import { clipText, COUNT_LIMITS, isPluginVersion, lastEntries } from './bounds.ts'
+import { clipText, COUNT_LIMITS, firstEntries, isPluginVersion, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
-import { isInterfaceName } from './mac-system.ts'
-import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel, WinMemory } from './model.ts'
+import { isInterfaceName, MAX_VOLUMES, VOLUME_NAME_MAX } from './mac-system.ts'
+import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel, VolumeReading, WinMemory } from './model.ts'
 
 export const BEACON_PREFIX = 'FLEETMON1 '
 export const BEACON_VERSION = 1
@@ -64,8 +64,9 @@ type Wire = {
  *  first reading; `a`, how old in ms, only when carried over a failed read. */
 type WireNet = { i: string; r?: number; t?: number; a?: number }
 /** `dk`: the main volume's size (`s`) and used bytes (`u`), with their age (`sa`, ms); bytes per
- *  second read (`r`) and written (`w`) over every disk, with their age (`ia`, ms). */
-type WireDisk = { s?: number; u?: number; sa?: number; r?: number; w?: number; ia?: number }
+ *  second read (`r`) and written (`w`) over every disk, with their age (`ia`, ms); and (1.4) every
+ *  local volume (`v`): [name, size, used, 1 for the main one else 0], the main one first. */
+type WireDisk = { s?: number; u?: number; sa?: number; r?: number; w?: number; ia?: number; v?: [string, number, number, 0 | 1][] }
 /** `gp`: GPU utilisation % (`u`) and its age (`a`, ms). */
 type WireGpu = { u: number; a?: number }
 /** `bt`: a battery (`b` 1) or none (`b` 0); its charge % (`p`); state `c` charging, `d`
@@ -86,6 +87,32 @@ function opt<K extends string>(key: K, value: number | null | undefined, round =
   return (value === null || value === undefined || !Number.isFinite(value) ? {} : { [key]: round ? Math.round(value) : value }) as { [P in K]?: number }
 }
 
+/** The volumes for `dk.v`: at most MAX_VOLUMES, each named in at most VOLUME_NAME_MAX characters. */
+function encodeVolumes(volumes: readonly VolumeReading[] | undefined): Pick<WireDisk, 'v'> {
+  const v: [string, number, number, 0 | 1][] = []
+  for (const vol of volumes ?? []) {
+    if (v.length >= MAX_VOLUMES) break
+    const name = clipText(vol.name, VOLUME_NAME_MAX)
+    if (!name || !Number.isSafeInteger(vol.totalBytes) || !Number.isSafeInteger(vol.usedBytes)) continue
+    v.push([name, vol.totalBytes, vol.usedBytes, vol.main ? 1 : 0])
+  }
+  return v.length > 0 ? { v } : {}
+}
+
+/** `dk.v` back to volumes: names as text, bounded; a row out of shape is left out. */
+function decodeVolumes(raw: unknown): VolumeReading[] | null {
+  const out: VolumeReading[] = []
+  for (const row of firstEntries(raw, MAX_VOLUMES)) {
+    if (!Array.isArray(row)) continue
+    const name = str(row[0], VOLUME_NAME_MAX)
+    const total = within(row[1], 1, MAX_VOLUME_BYTES)
+    const used = total === null ? null : within(row[2], 0, total)
+    if (!name || total === null || used === null) continue
+    out.push({ name, totalBytes: total, usedBytes: used, ...(row[3] === 1 ? { main: true } : {}) })
+  }
+  return out.length > 0 ? out : null
+}
+
 function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'wm'> {
   if (!system) return {}
   const out: Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'wm'> = {}
@@ -98,7 +125,8 @@ function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | '
       ...opt('sa', disk.spaceAgeMs),
       ...opt('r', disk.readBytesPerSec),
       ...opt('w', disk.writeBytesPerSec),
-      ...opt('ia', disk.ioAgeMs)
+      ...opt('ia', disk.ioAgeMs),
+      ...encodeVolumes(disk.volumes)
     }
     if (Object.keys(dk).length > 0) out.dk = dk
   }
@@ -166,14 +194,16 @@ function decodeSystem(w: Record<string, unknown>): MacSystem | null {
     const ioAge = ageOf(dk.ia)
     const read = within(dk.r, 0, MAX_RATE)
     const write = within(dk.w, 0, MAX_RATE)
-    if (used !== null || read !== null || write !== null) {
+    const volumes = decodeVolumes(dk.v)
+    if (used !== null || read !== null || write !== null || volumes) {
       disk = {
         totalBytes: used === null ? null : total,
         usedBytes: used,
         ...(used !== null && spaceAge !== undefined ? { spaceAgeMs: spaceAge } : {}),
         readBytesPerSec: read,
         writeBytesPerSec: write,
-        ...((read !== null || write !== null) && ioAge !== undefined ? { ioAgeMs: ioAge } : {})
+        ...((read !== null || write !== null) && ioAge !== undefined ? { ioAgeMs: ioAge } : {}),
+        ...(volumes ? { volumes } : {})
       }
     }
   }
@@ -509,7 +539,8 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
     // Only where a 1.2 beacon has them, so an older one decodes exactly as it always did.
     ...(system ? { system } : {}),
     ...(w.pl === 1 ? { publishesProcesses: true } : w.pl === 2 ? { cannotListProcesses: true } : {}),
-    ...(isPluginVersion(w.fv) ? { version: w.fv } : typeof w.fv === 'string' ? { versionUnknown: true as const } : {}),
+    // Any fv at all comes from a writer of 1.4 or later: one that is not a version is not known.
+    ...(isPluginVersion(w.fv) ? { version: w.fv } : w.fv !== undefined ? { versionUnknown: true as const } : {}),
     loggedAt: loggedAt ?? t
   }
 }

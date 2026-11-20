@@ -217,6 +217,10 @@ describe('the Fleet Monitor version (added in 1.4)', () => {
       assert.equal(decodeBeacon(forged)?.version, undefined, String(bad))
     }
     assert.equal(decodeBeacon(encodeBeacon(localSample(), meta)!)?.versionUnknown, undefined, 'one from before 1.4 says nothing at all')
+    for (const odd of [null, 14]) {
+      const forged = BEACON_PREFIX + JSON.stringify({ ...JSON.parse(encodeBeacon(localSample(), meta)!.slice(BEACON_PREFIX.length)), fv: odd })
+      assert.equal(decodeBeacon(forged)?.versionUnknown, true, `fv ${odd}: present, so from 1.4 or later, but not known`)
+    }
   })
 })
 
