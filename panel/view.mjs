@@ -22,7 +22,7 @@ import { frameOf } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
 import { FIRST_VERSIONED, HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
 import { createMotion } from './motion.mjs'
-import { ago, duration, gb, loads, pct, share, size } from './format.mjs'
+import { ago, agoShort, duration, fillAgo, gb, loads, pct, share, size } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
 export const PAIR_PATH = 'Settings → Remote Orca servers → Add server'
@@ -110,8 +110,9 @@ function tag(text) {
  *  ticker, so the overview shows each machine is updating without opening it. Visual only: the
  *  card's label is not rewritten every second, and its detail says the same at the top. */
 function cardAgo(m, now) {
-  if (m.updatedAt === null) return null
-  return since('span', { class: 'fm-card-ago', title: 'When its newest reading came', 'aria-hidden': 'true' }, '{ago}', m.updatedAt, now)
+  // Only once there is a reading: a machine merely reached has nothing to be "just now".
+  if (m.readingAt === null) return null
+  return since('span', { class: 'fm-card-ago', title: 'When its newest reading came', 'aria-hidden': 'true' }, '{ago:short}', m.readingAt, now)
 }
 
 /** On a card, a small red tag where the machine's Fleet Monitor is behind the newest one in the
@@ -134,7 +135,7 @@ function big(value, large = false) {
 
 /** Text that says how long ago something was, kept current by the panel's one-second ticker. */
 function since(tagName, props, template, at, now) {
-  return h(tagName, { ...props, data: { ...(props.data ?? {}), since: at, template } }, template.replace('{ago}', ago(at, now)))
+  return h(tagName, { ...props, data: { ...(props.data ?? {}), since: at, template } }, fillAgo(template, at, now))
 }
 
 function coresText(m) {
@@ -266,7 +267,9 @@ function cardAria(m, now) {
   const mem = memAria(m)
   const why = m.reasons.length > 0 ? ` (${m.reasons.join('; ')})` : ''
   const outdated = m.fleetMonitor?.outdated ? ' Fleet Monitor is out of date there.' : ''
-  return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}${why}. ${cpu}, ${mem}.${outdated} Open details.`
+  // As of this draw (each new reading redraws the card), not ticking: a label is not a live region.
+  const fresh = m.readingAt === null ? '' : ` Newest reading ${agoShort(m.readingAt, now)}.`
+  return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}${why}. ${cpu}, ${mem}.${outdated}${fresh} Open details.`
 }
 
 /** The card of a machine that stopped answering while its memory was elevated. */
@@ -827,7 +830,9 @@ function versionWarning(m, ui) {
     { class: 'fm-section fm-version-warn', 'aria-label': 'Fleet Monitor out of date', 'data-key': 'version-warn' },
     h('h2', {}, 'Fleet Monitor is out of date here'),
     h('p', {}, `${where} ${runs}; ${fm.newestOn ?? 'another machine'} runs ${fm.newest}. Update it so every machine reports the same readings.`),
-    fm.update ? commandBox(m, ui, fm.update) : null
+    fm.update
+      ? commandBox(m, ui, fm.update)
+      : h('p', { class: 'fm-note' }, m.local ? 'Update it from Orca’s plugin settings on this computer.' : 'Update it from Orca’s plugin settings on that machine.')
   )
 }
 
@@ -884,7 +889,7 @@ function systemFacts(m) {
   if (m.orca) facts.push({ k: 'Orca itself', v: `${share(m.orca.cpuPct)} CPU · ${size(m.orca.memBytes)}` })
   const fm = m.fleetMonitor
   if (fm) {
-    const version = fm.version ?? `older than ${FIRST_VERSIONED}`
+    const version = fm.version ?? (fm.legacy ? `older than ${FIRST_VERSIONED}` : 'not known')
     facts.push({
       k: 'Fleet Monitor',
       v: fm.outdated ? h('span', { class: 'fm-version-old' }, version) : version,
@@ -954,7 +959,10 @@ function activitySections(m, act, ui, now, list) {
 function detail(m, ui, now, act, list) {
   const sections = []
   const tab = act?.tabs ? ui.tab : 'overview'
+  // Out of date here: said first on either tab, with the command that updates it.
+  const warning = m.online ? versionWarning(m, ui) : null
   if (tab === 'activity') {
+    if (warning) sections.push(warning)
     sections.push(...activitySections(m, act, ui, now, list))
     // Why part of this tab is missing (a Windows machine whose PowerShell cannot run the reader).
     if (act?.notice) sections.push(h('p', { class: 'fm-notice', 'data-key': 'activity-notice' }, act.notice))
@@ -967,7 +975,6 @@ function detail(m, ui, now, act, list) {
     if (facts.length > 0) sections.push(factsSection('Last known', facts))
   } else {
     if (m.lost) sections.push(lostSection(m, now))
-    const warning = versionWarning(m, ui)
     if (warning) sections.push(warning)
     sections.push(cpuSection(m, now), memorySection(m, now, act?.suggest ?? null))
     if (m.workspaces.length > 0) sections.push(workspacesSection(m))
@@ -1504,7 +1511,7 @@ export function mountFleetView(
     const t = workerNow()
     for (const node of root.querySelectorAll('[data-since]')) {
       const at = Number(node.getAttribute('data-since'))
-      const text = (node.getAttribute('data-template') ?? '{ago}').replace('{ago}', ago(at, t))
+      const text = fillAgo(node.getAttribute('data-template') ?? '{ago}', at, t)
       if (node.textContent !== text) node.textContent = text
     }
   }, 1_000)

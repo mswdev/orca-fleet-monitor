@@ -207,12 +207,16 @@ describe('the Fleet Monitor version (added in 1.4)', () => {
     assert.equal('version' in decodeBeacon(encodeBeacon(localSample(), meta)!)!, false)
   })
 
-  test('anything but a semantic version is neither sent nor read', () => {
-    for (const bad of ['01.4.0', '1.4.0-..', '<b>1</b>', `1.4.0-${'x'.repeat(70)}`]) {
-      assert.equal(encodeBeacon(localSample(), { ...meta, version: bad })!.includes('"fv"'), false, bad)
+  test('anything but a semantic version is neither sent nor read, and says the version is not known', () => {
+    for (const bad of ['01.4.0', '1.4.0-..', '<b>1</b>', `1.4.0-${'x'.repeat(70)}`, null]) {
+      const line = encodeBeacon(localSample(), { ...meta, version: bad })!
+      assert.ok(line.includes('"fv":""'), `${bad}: an empty version, so the writer is not taken for one older than 1.4`)
+      const back = decodeBeacon(line)!
+      assert.deepEqual([back.version, back.versionUnknown], [undefined, true], String(bad))
       const forged = BEACON_PREFIX + JSON.stringify({ ...JSON.parse(encodeBeacon(localSample(), meta)!.slice(BEACON_PREFIX.length)), fv: bad })
-      assert.equal(decodeBeacon(forged)?.version, undefined, bad)
+      assert.equal(decodeBeacon(forged)?.version, undefined, String(bad))
     }
+    assert.equal(decodeBeacon(encodeBeacon(localSample(), meta)!)?.versionUnknown, undefined, 'one from before 1.4 says nothing at all')
   })
 })
 

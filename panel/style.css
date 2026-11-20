@@ -96,11 +96,8 @@ html.dark[data-fm-contrast='more'] {
     --fm-data: #a5c0ff;
   }
 }
-/* A theme where even the stronger blue cannot be told from a surface it is drawn on: the text
- * colour, which the theme keeps readable on its own cards. */
-html[data-fm-data='text'] {
-  --fm-data: var(--fm-card-fg);
-}
+/* Where even the stronger blue cannot be told from a surface it is drawn on, contrast.mjs sets
+ * --fm-data inline (html[data-fm-data='theme']) to whichever colour stands out best on them all. */
 
 html,
 body {
@@ -429,12 +426,13 @@ body {
   font-size: 11px;
   color: var(--fm-muted-fg);
 }
-/* macOS memory pressure when it is not normal: one quiet word beside the memory label. */
+/* macOS memory pressure when it is not normal: one quiet word beside the memory label; it wraps
+ * under the label rather than push a narrow panel sideways. */
 .fm-pressure {
   margin-left: 6px;
   font-size: 10px;
   font-weight: 600;
-  white-space: nowrap;
+  white-space: normal;
   color: var(--fm-level);
 }
 .fm-metric-row {
@@ -631,6 +629,7 @@ body {
 }
 .fm-version-warn p {
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 .fm-version-old {
   font-weight: 600;
@@ -1198,6 +1197,7 @@ body {
   margin-top: 2px;
   font-size: 10px;
   color: var(--fm-muted-fg);
+  overflow-wrap: anywhere;
 }
 /* What a Mac's RAM in use is made of, under its chart. */
 .fm-mem-facts {
@@ -1257,11 +1257,13 @@ body {
   margin-left: -4px;
 }
 .fm-version {
+  min-width: 0;
   margin-left: auto;
   font-family: var(--fm-mono);
   font-size: 10px;
+  text-align: right;
   color: var(--fm-muted-fg);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .fm-foot-link {
   padding: 2px 4px;

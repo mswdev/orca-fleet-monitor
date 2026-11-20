@@ -230,7 +230,7 @@ export function mergeMachine(input: MergeInput): MachineState {
       seq: beacon?.latest?.seq ?? null,
       pluginKey: beacon?.pluginKey ?? null,
       remotePlugin: input.kind === 'local' ? 'running' : (beacon?.remotePlugin ?? 'unknown'),
-      version: input.kind === 'local' ? null : (beacon?.latest?.version ?? null)
+      ...remoteVersionOf(input.kind === 'local' ? null : (beacon?.latest ?? null))
     },
     updatedAt: input.now
   }
@@ -322,6 +322,14 @@ export function systemPointOf(system: MacSystem | null | undefined): Partial<His
   put('gpu', system.gpu?.percent)
   if (system.battery?.present) put('bat', system.battery.percent)
   return out
+}
+
+/** A paired machine's Fleet Monitor version as its newest beacon gives it: the version; null for a
+ *  beacon from before 1.4, which gives none; nothing when it cannot be told (no beacon, or one
+ *  from a writer that could not read its own version). */
+function remoteVersionOf(latest: BeaconRecord | null): { version?: string | null } {
+  if (!latest || latest.versionUnknown) return {}
+  return { version: latest.version ?? null }
 }
 
 /** The history point a merged state contributes; memory only when it can be trusted. `mem` is

@@ -254,12 +254,19 @@ describe('a machine', () => {
     assert.match($(v.root, '[data-key="cpu"] .fm-section-head')?.textContent ?? '', /300 cores/)
   })
 
-  test('an online card says how long ago its newest reading came, and the ticker keeps it current', () => {
-    const v = mount(viewOf([local(), machine()]))
-    const ago = $(v.root, '[data-action="open"][data-id="env-a"] .fm-card-ago')!
+  test('an online card says how long ago its newest reading came, in a short form that keeps its width', () => {
+    const v = mount(viewOf([local(), machine({ history: { t: [NOW - 62 * 60_000, NOW - 2_000], cpu: [30, 40], mem: [20, 25] } })]))
+    const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
+    const ago = $(card, '.fm-card-ago')!
     assert.equal(ago.textContent, '2s ago')
-    assert.equal(ago.getAttribute('data-since'), String(NOW - 2_000))
-    assert.equal(ago.getAttribute('aria-hidden'), 'true', 'the card\'s label is not rewritten every second')
+    assert.deepEqual([ago.getAttribute('data-since'), ago.getAttribute('data-template')], [String(NOW - 2_000), '{ago:short}'])
+    assert.equal(ago.getAttribute('aria-hidden'), 'true', 'not rewritten every second for a screen reader…')
+    assert.match(card.getAttribute('aria-label') ?? '', /Newest reading 2s ago\. Open details\.$/, '…which hears it in the card\'s name as of each reading')
+  })
+
+  test('no age on a card before its first reading', () => {
+    const v = mount(viewOf([local(), machine({ history: { t: [], cpu: [], mem: [] } })]))
+    assert.equal($(v.root, '[data-action="open"][data-id="env-a"] .fm-card-ago'), null)
   })
 
   test("an offline card's label says when it was last seen on the worker clock, as its text does", () => {
@@ -578,7 +585,7 @@ describe('Fleet Monitor out of date on a machine', () => {
     assert.equal(sections[0], 'version-warn', 'first, above the charts')
     assert.equal(text($(warn, 'h2')!), 'Fleet Monitor is out of date here')
     assert.match(text(warn), /This machine runs Fleet Monitor 1\.3\.9; This desk runs 1\.4\.0\./)
-    assert.equal($(warn, '[data-command]')!.textContent, 'orca plugin update mswdev.fleet-monitor --environment "Build Box"')
+    assert.equal($(warn, '[data-command]')!.textContent, 'orca plugin update local.fleet-monitor --environment "Build Box"', 'the key it is installed under there')
     const row = v.root.querySelectorAll('.fm-fact').find((r) => text($(r, 'dt')!) === 'Fleet Monitor')!
     assert.equal(text($(row, '.fm-version-old')!), '1.3.9')
     assert.match(text(row), /out of date · 1\.4\.0 is newest/)
