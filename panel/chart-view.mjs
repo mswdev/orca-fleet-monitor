@@ -71,7 +71,7 @@ function flat(frame) {
  *  newest reading does. The window's end counts to the second. */
 function signature(target, spec) {
   const one = (f) =>
-    f ? `${Math.round(f.end / 1_000)}|${f.count}|${f.points.map((p) => `${p.key}:${p.t}:${p.v}:${p.lo}:${p.hi}`).join(',')}` : '-'
+    f ? `${Math.round(f.end / 1_000)}|${f.count}|${f.points.map((p) => `${p.key}:${p.t}:${p.v}:${p.lo}:${p.hi}${p.newest ? ':n' : ''}`).join(',')}` : '-'
   const peak = spec.peak ? `${spec.peak.t}:${spec.peak.v}` : '-'
   return `${one(target.main)}/${one(target.second)}/${peak}/${spec.current ?? '-'}/${spec.range ? 1 : 0}/${spec.scrub ?? ''}`
 }
@@ -276,7 +276,7 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
       if (on) {
         place(st.nodes.peak, x, yOf(peak.v, height, pad), st.box)
         // The peak may be the newest reading itself: then it is judged unrounded, as the end is.
-        const newest = st.target?.main?.points.find((q) => q.newest === true)
+        const newest = st.target?.main?.points.find((q) => q.newest === true || q.key === 'live')
         const level = levelOf(newest && newest.t === peak.t ? exactOf(st, { ...newest, v: peak.v }) : peak.v, rule)
         st.nodes.peak.style.setProperty('border-color', rule ? LEVEL_COLOR[level] : 'var(--fm-tone)')
         const text = `peak ${Math.round(peak.v)}`
@@ -426,8 +426,8 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
     const target = { main: spec.frame, second: spec.second ?? null }
     const sig = signature(target, spec)
     if (sig === st.sig) {
-      // Nothing new; but a move must not outlive motion being turned off.
-      if (moving.has(st) && !canMove()) {
+      // Nothing new; but a move must not outlive motion being turned off, nor a change of rule.
+      if (moving.has(st) && (!canMove() || restyled)) {
         moving.delete(st)
         st.shown = st.target
         paint(st)
