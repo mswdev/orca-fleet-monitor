@@ -31,12 +31,12 @@ Live CPU, memory, per-core load and the busiest workspaces for this computer and
 </p>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="media/readme/hero-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="media/readme/hero-light.svg">
-  <img src="media/readme/hero-dark.png" width="830" alt="The Fleet Monitor panel, animated: the overview with five sample machines and their health, CPU and memory, beside one machine's detail with CPU and memory charts, per-core load, the busiest workspaces and system facts. The charts advance, a reading arrives every two seconds, and one machine goes from strained to OK to busy and back.">
+  <source media="(prefers-color-scheme: dark)" srcset="media/readme/hero-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="media/readme/hero-light.png">
+  <img src="media/readme/hero-dark.png" width="830" alt="The Fleet Monitor panel: the overview with five sample machines, each with its health, how long ago its newest reading came, its CPU and memory, beside one machine's detail. Its CPU and memory charts are drawn in the colour of each level the machine was at, with bands at the health thresholds and the peak marked, above the load on each core, the busiest workspaces and system facts.">
 </picture>
 
-<p><sub>The overview, and one machine's detail, redrawn from the real panel and animated. Every image on this page shows invented sample data.</sub></p>
+<p><sub>The overview, and one machine's detail, drawn by the real panel. Every image on this page shows invented sample data.</sub></p>
 
 </div>
 
@@ -65,8 +65,8 @@ orca plugin install mswdev.fleet-monitor
 
 The panel opens on an overview with one card per machine. Click a card for that machine's detail.
 
-- Each card has the machine's health, its CPU and memory, and a 30-minute sparkline of each.
-- The detail has CPU and memory charts with the average and peak, the load on every core (P-cores and E-cores apart on Apple silicon), the five busiest workspaces, load averages, uptime, the chip, and what Orca itself is using.
+- Each card has the machine's health, its CPU and memory, a 30-minute sparkline of each, and how long ago its newest reading came, counting up every second until the next one arrives.
+- The detail has CPU and memory charts of the last 30 minutes. Each part of a line is drawn in the colour of the level it was at, faint bands mark the thresholds that health is judged on, a soft band behind the line shows each minute's lowest and highest reading, and the peak is marked where it happened. Point at a chart, or tab to it and use the arrow keys, to read any minute. The detail also has the load on every core (P-cores and E-cores apart on Apple silicon), the five busiest workspaces, load averages, uptime, the chip, and what Orca itself is using.
 - On a Mac running Fleet Monitor, memory is real RAM usage with its breakdown, swap and the kernel's pressure level. On a Windows computer running it, memory has the figures from Task Manager's memory page. [Memory](#memory) has the details.
 - On any machine running Fleet Monitor, the detail has two tabs. **Overview** is everything above. **Activity** has network, disk, GPU and battery readings and the machine's processes, to search and sort. [Activity](#activity) has the details.
 - While a machine's memory is strained or critical, its Memory card names the process using the most memory and how much it uses, when that is at least 5% of the machine's RAM. A machine short of memory can pause reading its processes; the card then gives the last figure it has, for up to 15 minutes, and says how old it is.
@@ -74,8 +74,10 @@ The panel opens on an overview with one card per machine. Click a card for that 
 - A desktop notification tells you when a machine's memory reaches Strained or Critical, and when a machine stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details.
 - Each level is drawn as one to four bars as well as a colour, so you can read it without the colour.
 - A machine that goes offline keeps its last readings and says when it was last seen.
+- Charts glide to each new reading, and figures count up or down to their new values. With your system's reduce motion setting on, everything changes at once.
+- The foot of the overview shows which version of Fleet Monitor this computer runs. A machine's detail lists the version it runs. When one machine runs an older version than another, its card has a red **Outdated Version** tag, and its detail says which version is newer and gives the command that updates it.
 - A status bar item names the machine that most needs attention, such as `Mac Studio strained · 1 offline`, and lists every machine in its tooltip. Clicking it opens the panel.
-- Colours follow your Orca theme, light or dark.
+- Colours follow your Orca theme, light or dark. A reading at an OK level is drawn in Fleet Monitor's own blue, because Orca's theme accent is its text colour.
 
 To add a machine, pair it in Orca under **Settings → Remote Orca servers → Add server**. The panel's **+** button shows the same hint.
 
@@ -151,7 +153,7 @@ If one of a Mac's two memory commands fails, Fleet Monitor keeps what the other 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="media/readme/activity-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="media/readme/activity-light.png">
-  <img src="media/readme/activity-dark.png" align="right" width="320" alt="This computer's Activity tab: network and GPU readings with their last 30 minutes, disk space and battery charge as bars, above its processes sorted by CPU.">
+  <img src="media/readme/activity-dark.png" align="right" width="320" alt="This computer's Activity tab: network and GPU readings with their last 30 minutes, its battery charge, and its two disks by name with how full each is, above its processes sorted by CPU.">
 </picture>
 
 This computer has a second tab in its detail, **Activity**, and so does a paired machine whose Fleet Monitor is new enough: 1.2 or later on a Mac, 1.3 or later on Linux and Windows. Opening a machine always lands on **Overview**, the view described above.
@@ -159,11 +161,11 @@ This computer has a second tab in its detail, **Activity**, and so does a paired
 The top of the tab has a reading for each of these that the machine reports. One it does not report, such as the battery of a desktop, is left out.
 
 - Network: what the main network interface receives and sends, with the last 30 minutes of both.
-- Disk: the space used on the startup disk (the system drive on Windows, `/` on Linux), and what all disks read and write.
+- Disk: how full each local disk is, by name, and what all disks read and write together. On a Mac these are the startup disk and the other volumes Finder shows that can be written to (not a mounted installer or the recovery volume). On Linux they are the filesystems on the machine's own disks, once per disk, without boot partitions, snaps or container storage. On Windows they are the fixed drives, named as Explorer names them. Network shares are never included. With one disk, the tile names it; with several, each has its own row.
 - GPU: how busy the GPU is, with its peak in the last 30 minutes. On Linux only AMD and NVIDIA GPUs report a figure; Intel graphics give none without root. On Windows it needs Windows 10 version 1709 or later.
 - Battery: the charge, whether it is charging, and the time to full or to empty when the system has an estimate.
 
-Network is read every 5 seconds, disk traffic every 20, the GPU every 30, and the battery and disk space every 60.
+Network is read every 5 seconds, disk traffic every 20, the GPU every 30, and the battery, the list of disks and their space every 60.
 
 Below them is the machine's list of processes. It shows the first 25, and **Show all** shows the rest. You can search by name or process ID, and sort by CPU, memory or name, and on a Mac by energy impact. A row opens to show its process ID, its owner and how long it has been running. The list keeps its order while a row is open or the keyboard is in it, so rows do not move under you.
 
@@ -283,7 +285,8 @@ With **Publish this machine's readings** on, which is the default, the worker wr
 - the hostname, platform, architecture, OS release and CPU model;
 - the number of cores, the uptime, total and per-core CPU use, and on Apple silicon which cores are performance cores and which are efficiency cores;
 - the load averages, and the memory figures listed under [Memory](#memory);
-- the network, disk, GPU and battery readings listed under [Activity](#activity), including the name of the network interface in use;
+- the network, disk, GPU and battery readings listed under [Activity](#activity), including the name of the network interface in use and the names of its local disks;
+- the version of Fleet Monitor it runs;
 - a random id for the worker run, a sequence number and the time.
 
 About every 30 seconds it also writes a line starting `FLEETPS1` with its top processes, about 60 by memory and CPU, and the number of processes running. For each one it holds the process ID, the parent's process ID, the name as described under [Activity](#activity) (never arguments or a path, though on Linux another user's process can have set its own short name), the owner's user name, CPU, memory, the start time and, on a Mac, energy impact.
@@ -300,7 +303,7 @@ Fleet Monitor is a full-access (`trusted-worker`) plugin: its worker runs as a N
 - It asks for two capabilities: `settings:own`, and `notifications:show` for the memory notifications. It adds one panel, one status bar item and two commands, **Show Fleet Monitor** and **Fleet Monitor: Send a test alert**.
 - It runs these Orca CLI commands, all read-only: `environment list`, `host list`, `diagnostics memory`, `plugin list` and `plugin logs`. The last three also run against paired servers.
 - It runs `plugin open` on this machine when you click the status bar item.
-- On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. It also runs `ps` and `top` for the process list, `netstat` and `route` for the network, `ioreg` for disk traffic and the GPU, and `pmset` for the battery. On Linux it reads files under `/proc` and `/sys`, among them the name of each process's executable, and `/etc/passwd` for the names of process owners, and runs `nvidia-smi` for the GPU figure when an NVIDIA driver is loaded. On Windows it keeps one Windows PowerShell process running and asks it for the memory, network, disk, GPU, battery and process figures, which come from .NET and the system's performance counters. It runs `qprocess *` for the names of process owners, at most every 2 seconds and usually every 10, and `taskkill` to end a CLI call that timed out.
+- On macOS it runs `vm_stat` and `sysctl` with each 5-second reading, to measure memory, swap and memory pressure, and `sysctl -n hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu` once, to learn which cores are which. It also runs `ps` and `top` for the process list, `netstat` and `route` for the network, `ioreg` for disk traffic and the GPU, `mount` once a minute for the list of disks, and `pmset` for the battery. On Linux it reads files under `/proc` and `/sys`, among them the name of each process's executable, and `/etc/passwd` for the names of process owners, and runs `nvidia-smi` for the GPU figure when an NVIDIA driver is loaded. On Windows it keeps one Windows PowerShell process running and asks it for the memory, network, disk, drive, GPU, battery and process figures, which come from .NET and the system's performance counters. It runs `qprocess *` for the names of process owners, at most every 2 seconds and usually every 10, and `taskkill` to end a CLI call that timed out.
 
 </details>
 
@@ -322,6 +325,7 @@ Fleet Monitor treats a paired server, the CLI's answers about it and the lines i
 - Orca 1.4.248 or later.
 - The Orca desktop app. The panel is not made for Orca's browser client (`orca serve` opened in a web browser).
 - macOS, Linux or Windows, for this computer and for paired servers. Fleet Monitor is built and tested on macOS. On Linux and Windows it has had one user's check so far: a Windows desktop and a Linux machine on 1.2.1, each showing the other at the full level. 1.3 was also checked on a Windows 11 desktop with an NVIDIA GPU: the CPU, GPU, memory and process figures against Windows' own counters (the CPU against the time-busy figure Task Manager shows, since 1.3.1), and the view of it from a paired Mac. Windows needs 1.2.1 or later, because earlier versions could not run the Orca CLI there. The Activity readings 1.3 adds run on Linux, Windows and macOS machines in CI with every change, but those machines have no GPU worth the name and no battery. The GPU reading has been checked on Windows with an NVIDIA GPU; it and the battery are still unchecked on real Linux hardware, and the battery on a Windows laptop.
+- Each paired machine's version, and the names of its disks, need Fleet Monitor 1.4 or later there and on this computer. A paired machine on an older version shows as older than 1.4.0, and its disk tile shows its startup disk without a name.
 - Some readings are a Mac's only: swap and the kernel's pressure level, the split into P-cores and E-cores, and energy impact. Windows has its own memory breakdown (Task Manager's) and no load average.
 - History covers the last 30 minutes. The worker keeps it in memory, so it starts again whenever Orca or the plugin restarts. So does what it has already alerted about: after a restart, a machine that is still short of memory alerts again.
 - When a machine reaches the full level, the readings still in its log, about the last 14 minutes on a machine that also publishes its processes (16 otherwise), fill the gaps in its history. They are added only where there is no reading yet.
@@ -343,7 +347,7 @@ There are no runtime dependencies and no build step. Orca runs the TypeScript as
 
 ### Previewing the panel
 
-`tools/preview/` runs the real panel against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`, and `tools/preview/activity-sample.mjs` for what 1.2 adds). It covers every state in light and dark and with three invented host themes, at 220, 360 and 700 px; `tools/preview/activity.html` has each state of the Activity tab. No real machine names appear, so its images are safe to publish.
+`tools/preview/` runs the real panel against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`, and `tools/preview/activity-sample.mjs` for what 1.2 adds). It covers every state in light and dark and with invented host themes, at 220, 360 and 700 px. Two of the host themes, `orca-dark` and `orca-light`, set the accent to the text colour, as Orca's own themes do, and `version=1.4.0` in the address shows versions, with the Mac mini on an older one; `tools/preview/activity.html` has each state of the Activity tab. No real machine names appear, so its images are safe to publish.
 
 ```sh
 npm run preview                       # then open http://127.0.0.1:4173/tools/preview/
@@ -390,7 +394,7 @@ node tools/preview/shoot-capture.mjs --file .orca/captures/here.json --out /tmp/
 
 Node does not say which `os.cpus()` entry is which kind of core. On an Apple M2 Max (8 performance, 4 efficiency) under macOS 26, background-priority busy loops, which macOS keeps on efficiency cores, drove entries 0 to 3 to 100%, and eight normal-priority loops drove entries 4 to 11. So the efficiency cores come first.
 
-Orca hands panel frames the user's theme as `--orca-*` variables and a `light` or `dark` class. The panel never sets those variables, so the theme always wins, and the design's colours are only fallbacks. The four health colours are the plugin's own, with light and dark variants. The panel measures them against the theme's card and background and switches to a stronger set when a tinted theme would leave them below 4.5:1.
+Orca hands panel frames the user's theme as `--orca-*` variables and a `light` or `dark` class. The panel never sets those variables, so the theme always wins, and the design's colours are only fallbacks. The four health colours and the blue of an OK reading are the plugin's own, with light and dark variants: Orca sets `--orca-primary` to the theme's text colour, so a chart drawn in it would be plain white in a dark theme. The panel measures its colours against the theme's card and background, and the blue against the tracks that bars fill too. It switches to a stronger set when a tinted theme would leave the health colours below 4.5:1 or the blue below 3:1, and where even that fails, draws readings in whichever colour stands out best.
 
 </details>
 
