@@ -32,7 +32,7 @@ import { ROOT, startPreviewServer } from '../preview-server.mjs'
 const STILL_SCENES = ['hero', 'levels', 'memory', 'install', 'activity']
 const THEMES = ['light', 'dark']
 /** The animation: a sidebar-sized panel, at one and a half device pixels a pixel to keep the file small. */
-const DEMO = { width: 380, height: 676, scale: 1.5 }
+const DEMO = { width: 380, height: 676, scale: 1.5, motion: true }
 /** What the README's images should stay under. Larger is reported, not refused. */
 const SIZE_NOTE = { '.png': 500 * 1024, '.gif': 3 * 1024 * 1024 }
 
@@ -78,8 +78,6 @@ async function launchBrowser(chrome, profile) {
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
-      // Charts glide and figures count in the panel; captures are of the settled panel.
-      '--force-prefers-reduced-motion',
       `--user-data-dir=${profile}`,
       '--remote-debugging-port=0',
       'about:blank'
@@ -137,13 +135,16 @@ async function launchBrowser(chrome, profile) {
       setTimeout(() => waiters.delete(waiter) && reject(new Error(`Timed out waiting for ${method}`)), 30_000).unref()
     })
 
-  /** A page `width`×`height` CSS pixels at `scale`, over a transparent background. */
-  async function newPage({ width, height, scale }) {
+  /** A page `width`×`height` CSS pixels at `scale`, over a transparent background. `motion` false
+   *  (the stills) asks for reduced motion, so a capture is of the settled panel; the animation keeps
+   *  its motion and steps it itself (readme-demo.mjs). */
+  async function newPage({ width, height, scale, motion = false }) {
     const { targetId } = await send('Target.createTarget', { url: 'about:blank' })
     const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
     const call = (method, params) => send(method, params, sessionId)
     await call('Page.enable')
     await call('Runtime.enable')
+    await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: motion ? 'no-preference' : 'reduce' }] })
     await call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: scale, mobile: false })
     await call('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } })
     const evaluate = async (expression) => {
