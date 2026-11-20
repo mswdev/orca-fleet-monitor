@@ -118,7 +118,7 @@ function cardAgo(m, now) {
  *  fleet; its detail says which and how to update. The card's label says it too. */
 function outdatedTag(m) {
   if (!m.fleetMonitor?.outdated) return null
-  return h('span', { class: 'fm-tag fm-tag--warn', title: 'Fleet Monitor is out of date on this machine', 'aria-hidden': 'true' }, 'Outdated')
+  return h('span', { class: 'fm-tag fm-tag--warn', title: 'Fleet Monitor is out of date on this machine', 'aria-hidden': 'true' }, 'Outdated Version')
 }
 
 /** A big percentage. Its figure counts to a new reading rather than jump to it (motion.mjs). */
@@ -326,7 +326,17 @@ function card(m, now) {
   return h(
     'button',
     { ...props, class: 'fm-card' },
-    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), outdatedTag(m), cardAgo(m, now), level(m.health, m.healthLabel, m.reasons)),
+    // Tags go before the name, so the ticking time never moves them; the time and the level stay
+    // together on the right, and wrap together to a line of their own when the head is too narrow.
+    h(
+      'span',
+      { class: 'fm-card-head' },
+      dot(m),
+      tag(m.tag),
+      outdatedTag(m),
+      h('span', { class: 'fm-name' }, m.name),
+      h('span', { class: 'fm-card-status' }, cardAgo(m, now), level(m.health, m.healthLabel, m.reasons))
+    ),
     m.lost ? h('span', { class: 'fm-lost-line', data: { health: m.lost.level } }, m.lost.label, ' · ', lostNote('span', 'fm-lost-note', m, now)) : null,
     h(
       'span',
