@@ -364,6 +364,12 @@ body {
   border: 1px solid var(--fm-border);
   border-radius: 4px;
 }
+/* Fleet Monitor out of date on that machine: the tag in the critical colour. */
+.fm-tag--warn {
+  font-weight: 600;
+  color: var(--fm-health-critical);
+  border-color: color-mix(in srgb, var(--fm-health-critical) 55%, var(--fm-border));
+}
 .fm-level {
   flex: none;
   display: inline-flex;

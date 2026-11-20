@@ -106,6 +106,13 @@ function tag(text) {
   return text ? h('span', { class: 'fm-tag' }, text) : null
 }
 
+/** On a card, a small red tag where the machine's Fleet Monitor is behind the newest one in the
+ *  fleet; its detail says which and how to update. The card's label says it too. */
+function outdatedTag(m) {
+  if (!m.fleetMonitor?.outdated) return null
+  return h('span', { class: 'fm-tag fm-tag--warn', title: 'Fleet Monitor is out of date on this machine', 'aria-hidden': 'true' }, 'Outdated')
+}
+
 /** A big percentage. Its figure counts to a new reading rather than jump to it (motion.mjs). */
 function big(value, large = false) {
   const text = pct(value)
@@ -250,7 +257,8 @@ function cardAria(m, now) {
       : `CPU ${pct(m.cpu.pct)}%`
   const mem = memAria(m)
   const why = m.reasons.length > 0 ? ` (${m.reasons.join('; ')})` : ''
-  return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}${why}. ${cpu}, ${mem}. Open details.`
+  const outdated = m.fleetMonitor?.outdated ? ' Fleet Monitor is out of date there.' : ''
+  return `${m.name}${m.tag ? ` (${m.tag})` : ''}, ${m.healthLabel}${why}. ${cpu}, ${mem}.${outdated} Open details.`
 }
 
 /** The card of a machine that stopped answering while its memory was elevated. */
@@ -310,7 +318,7 @@ function card(m, now) {
   return h(
     'button',
     { ...props, class: 'fm-card' },
-    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), level(m.health, m.healthLabel, m.reasons)),
+    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), outdatedTag(m), level(m.health, m.healthLabel, m.reasons)),
     m.lost ? h('span', { class: 'fm-lost-line', data: { health: m.lost.level } }, m.lost.label, ' · ', lostNote('span', 'fm-lost-note', m, now)) : null,
     h(
       'span',
