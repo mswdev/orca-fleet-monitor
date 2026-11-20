@@ -576,6 +576,14 @@ describe('Fleet Monitor out of date on a machine', () => {
     assert.match(text(row), /out of date · 1\.4\.0 is newest/)
   })
 
+  test('its card carries a small red tag, and its label says why', () => {
+    const v = mount(fleetOf('1.3.9'))
+    const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
+    assert.equal(text($(card, '.fm-tag--warn')!), 'Outdated')
+    assert.match(card.getAttribute('aria-label') ?? '', /Fleet Monitor is out of date there\. Open details\.$/)
+    assert.equal($(v.root, '[data-action="open"][data-id="local"] .fm-tag--warn'), null, 'not on the machine that is up to date')
+  })
+
   test('one too old to name its version is out of date too; one up to date shows its version and no warning', () => {
     const old = mount(fleetOf(null))
     old.handle.show('env-a')
