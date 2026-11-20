@@ -77,7 +77,7 @@ The panel opens on an overview with one card per machine. Click a card for that 
 - Charts glide to each new reading, and figures count up or down to their new values. With your system's reduce motion setting on, everything changes at once.
 - The foot of the overview shows which version of Fleet Monitor this computer runs. A machine's detail lists the version it runs. When one machine runs an older version than another, its card has a red **Outdated Version** tag, and its detail says which version is newer and gives the command that updates it.
 - A status bar item names the machine that most needs attention, such as `Mac Studio strained · 1 offline`, and lists every machine in its tooltip. Clicking it opens the panel.
-- Colours follow your Orca theme, light or dark. A reading at an OK level is drawn in Fleet Monitor's own blue, because Orca's theme accent is its text colour.
+- Colours follow your Orca theme, light or dark. A reading at an OK level is drawn in the same green as an OK machine's dot, because Orca's theme accent is its text colour.
 
 To add a machine, pair it in Orca under **Settings → Remote Orca servers → Add server**. The panel's **+** button shows the same hint.
 
@@ -394,7 +394,7 @@ node tools/preview/shoot-capture.mjs --file .orca/captures/here.json --out /tmp/
 
 Node does not say which `os.cpus()` entry is which kind of core. On an Apple M2 Max (8 performance, 4 efficiency) under macOS 26, background-priority busy loops, which macOS keeps on efficiency cores, drove entries 0 to 3 to 100%, and eight normal-priority loops drove entries 4 to 11. So the efficiency cores come first.
 
-Orca hands panel frames the user's theme as `--orca-*` variables and a `light` or `dark` class. The panel never sets those variables, so the theme always wins, and the design's colours are only fallbacks. The four health colours and the blue of an OK reading are the plugin's own, with light and dark variants: Orca sets `--orca-primary` to the theme's text colour, so a chart drawn in it would be plain white in a dark theme. The panel measures its colours against the theme's card and background, and the blue against the tracks that bars fill too. It switches to a stronger set when a tinted theme would leave the health colours below 4.5:1 or the blue below 3:1, and where even that fails, draws readings in whichever colour stands out best.
+Orca hands panel frames the user's theme as `--orca-*` variables and a `light` or `dark` class. The panel never sets those variables, so the theme always wins, and the design's colours are only fallbacks. The four health colours are the plugin's own, with light and dark variants, and an OK reading is drawn in the OK green: Orca sets `--orca-primary` to the theme's text colour, so a chart drawn in it would be plain white in a dark theme. The panel measures its colours against the theme's card and background, and the green of readings against the tracks that bars fill too. It switches to a stronger set when a tinted theme would leave the health colours below 4.5:1 or readings below 3:1, and where even that fails, draws readings in whichever colour stands out best.
 
 </details>
 

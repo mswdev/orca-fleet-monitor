@@ -76,8 +76,8 @@ export function bestOn(candidates, surfaces) {
 
 /**
  * Measures the live theme and sets or clears html[data-fm-contrast] (stronger health and data
- * colours) and, where even the stronger blue misses 3:1 on some surface it is drawn on, an inline
- * --fm-data (html[data-fm-data="theme"]): of the blue and the theme's own text colours, the one
+ * colours) and, where even the stronger OK green misses 3:1 on some surface it is drawn on, an inline
+ * --fm-data (html[data-fm-data="theme"]): of the green and the theme's own text colours, the one
  * that stands out best on all of them, set inline so no theme rule can override it. The data colour
  * is never text, so its marks need 3:1 (WCAG non-text contrast), against the card and page and the
  * muted tracks that bars and meters fill.
@@ -95,7 +95,7 @@ export function applyHealthContrast(doc = document) {
   const dataFails = () => worstContrast(read('--fm-data'), tracks) < MIN_GRAPHIC_CONTRAST
   if (needsStrongerHealth(health, surfaces) || dataFails()) {
     html.setAttribute('data-fm-contrast', 'more')
-    // Checked again on the colour now in force: a theme can defeat the stronger blue too.
+    // Checked again on the colour now in force: a theme can defeat the stronger green too.
     if (dataFails()) {
       const best = bestOn([read('--fm-data'), read('--fm-card-fg'), read('--fm-fg'), read('--fm-muted-fg'), ...GREYS], tracks)
       if (best) {

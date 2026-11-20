@@ -718,12 +718,12 @@ describe('health colour contrast', () => {
     assert.equal(needsStrongerHealth([null, ...design], [null]), false, 'unknown colours are not guessed')
   })
 
-  test('the data blue is measured at 3:1, on the muted tracks too', async () => {
+  test('the data colour (the OK green) is measured at 3:1, on the muted tracks too', async () => {
     const { MIN_GRAPHIC_CONTRAST, needsStrongerHealth } = await import('../panel/contrast.mjs')
     const hex = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
-    assert.equal(needsStrongerHealth([hex('#2a62e0')], [hex('#ffffff'), hex('#fafafa')], MIN_GRAPHIC_CONTRAST), false)
-    assert.equal(needsStrongerHealth([hex('#2a62e0')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), true, 'a dark grey track')
-    assert.equal(needsStrongerHealth([hex('#1d4ed8')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), false, 'the stronger blue there')
+    assert.equal(needsStrongerHealth([hex('#15803d')], [hex('#ffffff'), hex('#fafafa'), hex('#eeeef1')], MIN_GRAPHIC_CONTRAST), false)
+    assert.equal(needsStrongerHealth([hex('#15803d')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), true, 'a dark grey track')
+    assert.equal(needsStrongerHealth([hex('#166534')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), false, 'the stronger green there')
   })
 
   test('where no theme colour stands out on a light card and a dark track, a grey between them does', async () => {
@@ -734,7 +734,7 @@ describe('health colour contrast', () => {
       // Only #8a8a8a to #8d8d8d clear 3:1 on all three.
       [hex('#ffffff'), hex('#f3f3f3'), hex('#414141')]
     ]) {
-      const best = bestOn([hex('#1d4ed8'), hex('#0a0a0a'), hex('#737373'), ...GREYS], surfaces)!
+      const best = bestOn([hex('#166534'), hex('#0a0a0a'), hex('#737373'), ...GREYS], surfaces)!
       assert.ok(worstContrast(best, surfaces) >= MIN_GRAPHIC_CONTRAST, `best ${best} at ${worstContrast(best, surfaces).toFixed(2)}`)
     }
   })

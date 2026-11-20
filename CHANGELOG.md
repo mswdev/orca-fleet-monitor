@@ -13,7 +13,7 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 - A soft band behind the line shows each minute's lowest and highest reading, and the window's peak is marked where it happened.
 - Point at a chart, or tab to it and use the arrow keys, to read any minute: how long ago, its average, its level and its range. Screen readers hear the same.
 - Lines are smoothed without ever rising above a reading, a dot marks the newest reading, and detail charts are taller.
-- A reading at an OK level is drawn in Fleet Monitor's own blue. Orca's theme accent is its text colour, so before this a healthy machine's charts, bars and dots were plain white in a dark theme and black in a light one. On a tinted theme where the blue would be hard to see, the panel picks a colour that stands out.
+- A reading at an OK level is drawn in the same green as an OK machine's dot. Orca's theme accent is its text colour, so before this a healthy machine's charts, bars and dots were plain white in a dark theme and black in a light one. On a tinted theme where the green would be hard to see, the panel picks a colour that stands out.
 
 ### Motion
 
