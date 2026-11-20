@@ -222,9 +222,13 @@ window.demo = {
   pointer(n) {
     return { ...pointerAt(n), down: PRESSES.includes(n) }
   },
-  async frame(n) {
+  /** Sets the clocks to frame n, before its input. */
+  at(n) {
     clock = START + Math.round((n * TICK_MS) / TICK_FRAMES)
     motionClock = n * FRAME_MS
+  },
+  async frame(n) {
+    this.at(n)
     for (const fn of queued.splice(0)) fn()
     if (n % TICK_FRAMES === 0) post(n / TICK_FRAMES)
     everySecond()

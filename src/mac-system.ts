@@ -22,8 +22,7 @@
 import { statfsSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { createRunBounded, type ExecFile } from './mac-memory.ts'
-import { readdirSync, readlinkSync } from 'node:fs'
-import { statfs as statfsAsync } from 'node:fs/promises'
+import { readdir, readlink, statfs as statfsAsync } from 'node:fs/promises'
 import type { BatteryReading, DiskReading, GpuReading, MacSystem, NetReading, VolumeReading } from './model.ts'
 
 export const NETSTAT_PATH = '/usr/sbin/netstat'
@@ -223,8 +222,9 @@ export function volumeOf(name: string, s: { bsize: number; blocks: number; bavai
   return { name: name.slice(0, VOLUME_NAME_MAX), totalBytes: space.total, usedBytes: space.used, ...(main ? { main: true } : {}) }
 }
 
-/** A place to read a disk's space at: where it is mounted, and its name. */
-export type VolumePlace = { path: string; name: string; main?: boolean }
+/** A place to read a disk's space at: where it is mounted, and its name; on Linux, the ZFS pool
+ *  it is (whose space `zfs list` gives). */
+export type VolumePlace = { path: string; name: string; main?: boolean; pool?: string }
 /** statfs that does not hold the worker while a disk answers (fs.promises.statfs). */
 export type StatFsAsync = (path: string) => Promise<{ bsize: number; blocks: number; bavail: number } | null>
 
@@ -239,35 +239,62 @@ export const realStatfsAsync: StatFsAsync = async (path) => {
 
 /** How long one disk may take to say how full it is before this reading goes on without it. */
 export const VOLUME_DEADLINE_MS = 2_000
+/** The most disk reads outstanding at once, a stuck one included. Node runs file-system work on a
+ *  pool of four threads that every other file read in the worker shares: two always stay free. */
+export const VOLUME_READS_MAX = 2
+
+/** `promise`'s outcome when it settles within `ms`, else `{ done: false }`. The work goes on
+ *  either way; only the wait for it ends. */
+export async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<{ done: true; value: T } | { done: false }> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<{ done: false }>((resolve) => {
+    timer = setTimeout(() => resolve({ done: false }), ms)
+    ;(timer as { unref?: () => void }).unref?.()
+  })
+  try {
+    return await Promise.race([promise.then((value) => ({ done: true as const, value })), late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 /**
- * Reads each of `places` (at most MAX_VOLUMES), side by side, off the worker's thread: the volumes
- * that answer within VOLUME_DEADLINE_MS, main first. A disk still answering an earlier read (in
- * `pending`; a drive spinning up, or one that has stopped answering) is not asked again, so one
- * stuck disk never holds more than one of Node's file-system threads.
+ * Reads each of `places` (at most MAX_VOLUMES) off the worker's thread: the volumes that answer
+ * within VOLUME_DEADLINE_MS each, main first. At most VOLUME_READS_MAX reads are outstanding at
+ * once, across readings: a disk still answering an earlier read (in `pending`; a drive spinning
+ * up, or one that has stopped answering) holds its place and is not asked again, and while that
+ * many are stuck, the rest wait for the next reading. A failing disk can never take every one of
+ * Node's file-system threads.
  */
-export async function readVolumes(places: readonly VolumePlace[], statfs: StatFsAsync, pending: Set<string> = new Set(), deadlineMs = VOLUME_DEADLINE_MS): Promise<VolumeReading[]> {
-  const reads = places.slice(0, MAX_VOLUMES).map(async (place) => {
-    if (pending.has(place.path)) return null
-    pending.add(place.path)
-    const read = statfs(place.path)
-      .catch(() => null)
-      .finally(() => pending.delete(place.path))
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const late = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), deadlineMs)
-      ;(timer as { unref?: () => void }).unref?.()
-    })
-    const s = await Promise.race([read, late])
-    clearTimeout(timer)
-    try {
-      return volumeOf(place.name, s, place.main === true)
-    } catch {
-      return null
+export async function readVolumes(
+  places: readonly VolumePlace[],
+  statfs: StatFsAsync,
+  pending: Set<string> = new Set(),
+  deadlineMs = VOLUME_DEADLINE_MS,
+  limit = VOLUME_READS_MAX
+): Promise<VolumeReading[]> {
+  const queue = places.slice(0, MAX_VOLUMES).filter((p) => !pending.has(p.path))
+  const out: VolumeReading[] = []
+  const lane = async (): Promise<void> => {
+    while (queue.length > 0 && pending.size < limit) {
+      const place = queue.shift()!
+      pending.add(place.path)
+      const read = statfs(place.path)
+        .catch(() => null)
+        .finally(() => pending.delete(place.path))
+      const got = await withDeadline(read, deadlineMs)
+      try {
+        const v = got.done ? volumeOf(place.name, got.value, place.main === true) : null
+        if (v) out.push(v)
+      } catch {
+        // Figures out of shape: left out.
+      }
     }
-  })
-  const out = (await Promise.all(reads)).filter((v): v is VolumeReading => v !== null)
-  return out.sort((a, b) => Number(b.main === true) - Number(a.main === true))
+  }
+  await Promise.all(Array.from({ length: Math.max(1, limit) }, lane))
+  // In the order they were asked for, main first.
+  const order = new Map(places.map((p, i) => [p.name, i]))
+  return out.sort((a, b) => Number(b.main === true) - Number(a.main === true) || (order.get(a.name) ?? 0) - (order.get(b.name) ?? 0))
 }
 
 /** `mount`'s lines: `<device> on <path> (<type>, <option>, …)`. A path may hold spaces. */
@@ -317,13 +344,18 @@ export function macVolumePlaces(mounts: readonly { device?: string; path: string
 }
 
 /** The start-up disk's name as Finder shows it: the entry in /Volumes that links to `/`. */
-export function macMainVolumeName(list: () => string[] = () => readdirSync('/Volumes'), link: (path: string) => string = (path) => readlinkSync(path)): string | null {
+export async function macMainVolumeName(
+  list: () => Promise<{ name: string; link: boolean }[]> = async () => (await readdir('/Volumes', { withFileTypes: true })).map((d) => ({ name: d.name, link: d.isSymbolicLink() })),
+  link: (path: string) => Promise<string> = (path) => readlink(path)
+): Promise<string | null> {
   try {
-    for (const name of list().slice(0, 64)) {
+    // Only the links: a mounted volume is never asked about, so a slow one cannot hold this up.
+    for (const entry of (await list()).slice(0, 64)) {
+      if (!entry.link) continue
       try {
-        if (link(`/Volumes/${name}`) === '/') return name
+        if ((await link(`/Volumes/${entry.name}`)) === '/') return entry.name
       } catch {
-        // Not a link: an ordinary mounted volume.
+        // Gone, or not readable: not this one.
       }
     }
   } catch {
@@ -416,9 +448,12 @@ export class MacSystemReader {
   private spaceTriedAt = Number.NEGATIVE_INFINITY
   private volumes: Held<VolumeReading[]> | null = null
   private volumesTriedAt = Number.NEGATIVE_INFINITY
-  private readonly volumeName: () => string | null
+  private readonly volumeName: () => Promise<string | null> | string | null
   private readonly statfsVolume: StatFsAsync
   private readonly volumesPending = new Set<string>()
+  /** The start-up disk's name being looked up, while it is, and the last one found. */
+  private nameLookup: Promise<string | null> | null = null
+  private lastName: string | null = null
   private running: Promise<void> | null = null
 
   constructor(
@@ -429,7 +464,7 @@ export class MacSystemReader {
       statfsAsync?: StatFsAsync
       platform?: string
       heavyAllowed?: () => boolean
-      volumeName?: () => string | null
+      volumeName?: () => Promise<string | null> | string | null
     } = {}
   ) {
     this.exec = options.exec ?? systemRunBounded
@@ -477,16 +512,38 @@ export class MacSystemReader {
   /** The volumes a person thinks of as this Mac's disks (macVolumePlaces), each with its space. */
   private async readVolumes(now: number): Promise<void> {
     this.volumesTriedAt = now
-    let name: string | null = null
-    try {
-      name = this.volumeName()
-    } catch {
-      name = null
-    }
-    const listed = await this.run(MOUNT_PATH, [])
+    const [name, listed] = await Promise.all([this.mainVolumeName(), this.run(MOUNT_PATH, [])])
     // Kept as it was only when the list could not be read: a disk taken out goes at once.
     if (listed === null) return
-    this.volumes = { value: await readVolumes(macVolumePlaces(parseMacMounts(listed), name), this.statfsVolume, this.volumesPending), at: now }
+    const places = macVolumePlaces(parseMacMounts(listed), name)
+    const volumes = await readVolumes(places, this.statfsVolume, this.volumesPending)
+    // Disks listed but none read (all still answering): what was held stands, until it is too old.
+    if (volumes.length === 0 && places.length > 0) return
+    this.volumes = { value: volumes, at: now }
+  }
+
+  /** The start-up disk's name, off the worker's thread and within VOLUME_DEADLINE_MS; the last
+   *  one found while a lookup is slow. One lookup at a time: a slow one is waited on, not repeated. */
+  private async mainVolumeName(): Promise<string | null> {
+    if (!this.nameLookup) {
+      let lookup: Promise<string | null>
+      try {
+        lookup = Promise.resolve(this.volumeName())
+      } catch {
+        lookup = Promise.resolve(null)
+      }
+      this.nameLookup = lookup
+        .catch(() => null)
+        .then((name) => {
+          this.lastName = name
+          return name
+        })
+        .finally(() => {
+          this.nameLookup = null
+        })
+    }
+    const got = await withDeadline(this.nameLookup, VOLUME_DEADLINE_MS)
+    return got.done ? got.value : this.lastName
   }
 
   private async run(file: string, args: readonly string[], maxBuffer = MAX_OUTPUT_BYTES): Promise<string | null> {

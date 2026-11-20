@@ -43,12 +43,13 @@ export function colorsOf(settings, knows = cssKnows) {
 }
 
 /** Sets each chosen colour on <html>, inline so no theme rule can override it, and clears the
- *  others; html[data-fm-colors] lists the levels chosen. Returns them. */
-export function applyColors(colors, doc = document) {
+ *  others; html[data-fm-colors] lists the levels chosen. Each is checked again (colorOf), so
+ *  nothing but a colour is ever set. Returns them. */
+export function applyColors(colors, doc = document, knows = cssKnows) {
   const html = doc.documentElement
   const chosen = []
   for (const level of LEVELS) {
-    const color = colors?.[level] ?? null
+    const color = colorOf(colors?.[level] ?? null, knows)
     if (color) {
       html.style.setProperty(`--fm-health-${level}`, color)
       chosen.push(level)
@@ -76,7 +77,9 @@ export function followColors(orca, after = () => {}, doc = document, knows = css
   const settings = orca?.settings
   if (!settings || typeof settings.get !== 'function') return { ready: Promise.resolve(), dispose() {} }
   let latest = 0
+  let disposed = false
   const read = async () => {
+    if (disposed) return
     const mine = (latest += 1)
     let all
     try {
@@ -84,19 +87,29 @@ export function followColors(orca, after = () => {}, doc = document, knows = css
     } catch {
       return
     }
-    // A slower, older read never undoes a newer one.
-    if (mine !== latest || !all || typeof all !== 'object') return
-    applyColors(colorsOf(all, knows), doc)
+    // A slower, older read never undoes a newer one, and none lands after dispose.
+    if (disposed || mine !== latest || !all || typeof all !== 'object') return
+    applyColors(colorsOf(all, knows), doc, knows)
     after()
   }
   const ready = read()
-  const subscription = settings.onDidChange?.((change) => {
-    if (!change || typeof change.key !== 'string' || SETTING_KEYS.has(change.key)) void read()
-  })
+  let subscription = null
+  try {
+    subscription = settings.onDidChange?.((change) => {
+      if (!change || typeof change.key !== 'string' || SETTING_KEYS.has(change.key)) void read()
+    })
+  } catch {
+    // Changes cannot be heard: the colours read now stand, and the panel still opens.
+  }
   return {
     ready,
     dispose() {
-      subscription?.dispose?.()
+      disposed = true
+      try {
+        subscription?.dispose?.()
+      } catch {
+        // Already gone.
+      }
     }
   }
 }
