@@ -334,6 +334,8 @@ export function historyPointOf(state: MachineState, t: number): HistoryPoint | n
   const ram = used ? memory!.percent : null
   if (state.cpu.percent === null && mem === null && ram === null) return null
   const base: HistoryPoint = ram === null ? { t, cpu: state.cpu.percent, mem } : { t, cpu: state.cpu.percent, mem, ram }
+  // An estimate is marked, so a chart drawn once the machine is measured can leave it out.
+  if (state.cpu.source === 'load' && state.cpu.percent !== null) base.cpuEst = true
   return { ...base, ...systemPointOf(state.system) }
 }
 

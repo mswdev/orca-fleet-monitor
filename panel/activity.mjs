@@ -16,6 +16,7 @@
 //   tiles: {                       // each null when the machine does not report it: no tile is drawn
 //     network: { down: number | null, up: number | null,             // bytes per second, now
 //                downTrend: Trend | null, upTrend: Trend | null,     // fleet-binding.mjs trendOf
+//                downPeak: number | null,                            // the window's highest download reading
 //                now: number } | null                                // the worker's clock
 //     disk: { usedBytes: number, totalBytes: number, readBps: number | null, writeBps: number | null } | null
 //     gpu: { pct: number, peak: number | null, avg: number | null, trend: Trend | null, now: number } | null
@@ -75,7 +76,14 @@ function tilesOf(machine, now) {
   const { net, disk, gpu, battery } = machine
   return {
     network: net
-      ? { down: orNull(net.rxBytesPerSec), up: orNull(net.txBytesPerSec), downTrend: net.rx?.trend ?? null, upTrend: net.tx?.trend ?? null, now }
+      ? {
+          down: orNull(net.rxBytesPerSec),
+          up: orNull(net.txBytesPerSec),
+          downTrend: net.rx?.trend ?? null,
+          upTrend: net.tx?.trend ?? null,
+          downPeak: orNull(net.rx?.stats?.peak),
+          now
+        }
       : null,
     disk:
       disk && finite(disk.totalBytes) && disk.totalBytes > 0 && finite(disk.usedBytes)
@@ -369,7 +377,6 @@ function networkTile(net) {
   // Both series on one scale: the larger one's peak in the window, plus 15 %.
   const values = [...trendValues(net.downTrend), ...trendValues(net.upTrend)]
   const top = values.length > 0 ? Math.max(...values) * 1.15 : 0
-  const peak = trendValues(net.downTrend)
   return tile({
     key: 'network',
     label: 'Network',
@@ -379,7 +386,8 @@ function networkTile(net) {
       'network',
       frameOf(scaleTrend(net.downTrend, top), net.now, WINDOW_MS),
       frameOf(scaleTrend(net.upTrend, top), net.now, WINDOW_MS),
-      peak.length > 0 ? `Network over the last 30 minutes: download peaked at ${rate(Math.max(...peak)).text}` : 'Network over the last 30 minutes: no history yet'
+      // The peak of the readings themselves, not of a minute's mean.
+      net.downPeak !== null ? `Network over the last 30 minutes: download peaked at ${rate(net.downPeak).text}` : 'Network over the last 30 minutes: no history yet'
     ),
     aria: `Network: down ${down.text}, up ${up.text}`
   })

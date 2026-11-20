@@ -211,8 +211,107 @@ describe('reading one minute', () => {
     key(hit, 'Home')
     assert.match(hit.getAttribute('aria-valuetext') ?? '', /^30 min ago/)
     hit.dispatchEvent({ type: 'blur', target: hit })
-    assert.equal(hit.getAttribute('aria-valuetext'), null)
+    assert.equal(hit.getAttribute('aria-valuetext'), 'Now: 90%, strained', 'unfocused, the slider still has a value: the newest reading')
     assert.equal($(v.root, '[data-key="chart:cpu"] .fm-tip')?.hasAttribute('hidden'), true)
+  })
+})
+
+describe('what the review found', () => {
+  test('a count in flight never writes over a reading that became unknown', () => {
+    const v = mount(viewOf([local(), machine()]))
+    const figure = () => $(v.root, '[data-id="env-a"] .fm-num')!
+    v.push(viewOf([local(), machine({ cpu: { percent: 50, source: 'beacon', perCore: [50], groups: null } })], { seq: 2 }), NOW + 5_000)
+    v.step(COUNT_MS / 4)
+    v.push(viewOf([local(), machine({ cpu: { percent: null, source: 'beacon', perCore: null, groups: null } })], { seq: 3 }), NOW + 6_000)
+    v.settle()
+    assert.equal(figure().textContent, '–')
+  })
+
+  test('turning reduced motion on mid-move ends every move at once', () => {
+    let reduced = false
+    const frames: (() => void)[] = []
+    const handle = mountFleetView(dom.root as unknown as HTMLElement, {
+      binding: { current: () => viewOf([local(), machine()]), subscribe: () => () => {}, refresh: () => Promise.resolve(), retry: () => Promise.resolve(true) },
+      now: () => NOW,
+      setInterval: () => 0,
+      clearInterval: () => {},
+      setTimeout: (() => 0) as unknown as typeof setTimeout,
+      frame: (fn) => frames.push(fn),
+      clock: () => 0,
+      reducedMotion: () => reduced
+    })
+    handle.show('env-a')
+    assert.ok(frames.length > 0, 'the detail chart is rising')
+    reduced = true
+    for (const fn of frames.splice(0)) fn()
+    assert.equal(frames.length, 0, 'no further frame')
+    const ys = (d(dom.root, '[data-key="chart:cpu"] .fm-line').match(/-?\d+(\.\d+)?/g) ?? []).map(Number).filter((_, i) => i % 2 === 1)
+    assert.ok(Math.min(...ys) < 20, 'and the chart stands at its readings')
+  })
+
+  test('empty sparklines do not move', () => {
+    const none = { t: [], cpu: [], mem: [] }
+    const fleet = () => viewOf([{ ...local(), history: none }, machine({ history: none })])
+    const v = mount(fleet())
+    v.settle()
+    v.push(fleet(), NOW + 5_000)
+    assert.equal(v.frames.length, 0, 'no frame is asked for to redraw nothing')
+  })
+
+  test('a history rewrite that keeps the count and the newest reading still redraws the chart', () => {
+    const v = mount(viewOf([local(), machine()]), { reduced: true })
+    v.handle.show('env-a')
+    const h = history(NOW)
+    const rewritten = { ...h, cpu: h.cpu.map((x, i) => (i === 10 ? 100 : x)) }
+    v.push(viewOf([local(), machine({ history: rewritten })], { seq: 2 }), NOW + 200)
+    assert.equal($(v.root, '[data-key="chart:cpu"] .fm-peak')?.textContent, 'peak 100')
+  })
+
+  test('the slider says how old a stale newest reading is, and keeps to the window', () => {
+    const stale = history(NOW - 301_000)
+    const v = mount(viewOf([local(), machine({ history: stale })]), { reduced: true })
+    v.handle.show('env-a')
+    const hit = $(v.root, '[data-key="chart:cpu"] .fm-hit')!
+    hit.dispatchEvent({ type: 'focus', target: hit })
+    assert.match(hit.getAttribute('aria-valuetext') ?? '', /^5 min ago: /)
+    key(hit, 'Home')
+    assert.ok(!/^3[1-9] min ago/.test(hit.getAttribute('aria-valuetext') ?? ''), 'never a point kept only to enter from the edge')
+    assert.ok(Number.parseFloat($(v.root, '[data-key="chart:cpu"] .fm-xhair')!.style.getPropertyValue('left')) >= 0)
+  })
+
+  test('with nothing to read, there is no slider to reach', () => {
+    const v = mount(viewOf([local(), machine({ history: { t: [NOW - 1_000], cpu: [40], mem: [25] } })]), { reduced: true })
+    v.handle.show('env-a')
+    assert.equal($(v.root, '[data-key="chart:cpu"] .fm-hit')?.hasAttribute('hidden'), true)
+  })
+
+  test('a reading just under a threshold is not promoted by history\'s rounding', () => {
+    // 94.96 % is strained (critical is 95); history carries it as 95.0.
+    const h = history(NOW, 95)
+    const v = mount(viewOf([local(), machine({ history: h, cpu: { percent: 94.96, source: 'beacon', perCore: [95], groups: null } })]), { reduced: true })
+    v.handle.show('env-a')
+    const hit = $(v.root, '[data-key="chart:cpu"] .fm-hit')!
+    hit.dispatchEvent({ type: 'focus', target: hit })
+    assert.equal(hit.getAttribute('aria-valuetext'), 'Now: 95%, strained')
+  })
+
+  test('a screen change cut short does not clear the next one\'s direction', async () => {
+    const v = mount(viewOf([local(), machine({ cpu: { percent: 90, source: 'beacon', perCore: [90], groups: null }, processes: { state: 'full', reason: null, takenAt: NOW } as never })]))
+    const doc = dom.document as unknown as { startViewTransition?: (update: () => void) => unknown; documentElement: FakeElement }
+    const finishes: (() => void)[] = []
+    doc.startViewTransition = (update) => {
+      const done = Promise.resolve().then(update)
+      return { updateCallbackDone: done, ready: Promise.resolve(), finished: new Promise<void>((resolve) => finishes.push(resolve)) }
+    }
+    $(v.root, '[data-action="open"][data-id="env-a"]')!.click()
+    await new Promise((resolve) => setImmediate(resolve))
+    $(v.root, '[data-action="back"]')!.click()
+    finishes[0]!()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(doc.documentElement.dataset.fmNav, 'back', 'the first one finishing late leaves the second its direction')
+    finishes[1]!()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(doc.documentElement.dataset.fmNav, undefined)
   })
 })
 

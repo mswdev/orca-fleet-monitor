@@ -113,6 +113,7 @@ export function toColumns(points: readonly HistoryPoint[]): HistoryColumns {
     mem: points.map((p) => round(p.mem))
   }
   if (points.some((p) => typeof p.ram === 'number')) columns.ram = points.map((p) => round(p.ram))
+  if (points.some((p) => p.cpuEst === true)) columns.ce = points.map((p) => (p.cpuEst === true ? 1 : null))
   for (const key of EXTRA_HISTORY_KEYS) {
     if (!points.some((p) => typeof p[key] === 'number')) continue
     const fit = WHOLE_KEYS.has(key) ? whole : round
@@ -127,6 +128,7 @@ export function downsample(columns: HistoryColumns, step: number): HistoryColumn
   const keep = (_: unknown, i: number, arr: readonly unknown[]): boolean => (arr.length - 1 - i) % step === 0
   const out: HistoryColumns = { t: columns.t.filter(keep), cpu: columns.cpu.filter(keep), mem: columns.mem.filter(keep) }
   if (columns.ram) out.ram = columns.ram.filter(keep)
+  if (columns.ce) out.ce = columns.ce.filter(keep)
   for (const key of EXTRA_HISTORY_KEYS) {
     const column = columns[key]
     if (column) out[key] = column.filter(keep)
@@ -138,5 +140,6 @@ export function downsample(columns: HistoryColumns, step: number): HistoryColumn
 export function coreColumns(columns: HistoryColumns): HistoryColumns {
   const out: HistoryColumns = { t: columns.t, cpu: columns.cpu, mem: columns.mem }
   if (columns.ram) out.ram = columns.ram
+  if (columns.ce) out.ce = columns.ce
   return out
 }

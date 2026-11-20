@@ -217,7 +217,15 @@ function pairHint(open) {
  *  the metric is judged). A zero line runs under it all: a machine with a few minutes of history
  *  draws only at the right-hand end, and the line says the rest is time not yet seen. */
 function spark(metricModel, now, key) {
-  return chartSlot({ kind: 'spark', frame: frameOf(metricModel.trend, now, WINDOW_MS), rule: metricModel.rule, label: null }, { class: 'fm-spark-box', 'data-key': key })
+  return chartSlot(
+    { kind: 'spark', frame: frameOf(metricModel.trend, now, WINDOW_MS), rule: metricModel.rule, label: null, current: currentOf(metricModel) },
+    { class: 'fm-spark-box', 'data-key': key }
+  )
+}
+
+/** A metric's newest reading unrounded, for the level of the point its line ends on. */
+function currentOf(metricModel) {
+  return metricModel.reliable === false ? null : metricModel.pct
 }
 
 /** "Last reading 2 min ago: memory pressure critical, …", kept current. */
@@ -480,7 +488,10 @@ function chart(metricModel, what, label, now, key) {
   return h(
     'div',
     { class: metricModel.rule ? 'fm-chart fm-chart--ruled' : 'fm-chart' },
-    chartSlot({ kind: 'detail', frame, rule: metricModel.rule, label, peak, range: true, scrub: `${what}, minute by minute` }, { class: 'fm-plot', 'data-key': key }),
+    chartSlot(
+      { kind: 'detail', frame, rule: metricModel.rule, label, peak, range: true, scrub: `${what}, minute by minute`, current: currentOf(metricModel) },
+      { class: 'fm-plot', 'data-key': key }
+    ),
     h('div', { class: 'fm-xaxis', 'aria-hidden': 'true' }, h('span', {}, '-30m'), h('span', {}, '-15m'), h('span', {}, 'now'))
   )
 }
@@ -931,6 +942,8 @@ export function mountFleetView(
   const motion = createMotion({ frame, clock, motion: motionOn, hidden })
   /** The screen last drawn: rows slide only within one screen. */
   let screen = null
+  /** Counts changes of screen, so each knows whether it is still the newest. */
+  let navSeq = 0
   const ui = {
     canOpenExternal: typeof openExternal === 'function',
     /** The binding can ask the worker to star; whether this computer can is the fleet's `canStar`. */
@@ -1075,8 +1088,11 @@ export function mountFleetView(
     }
     const html = doc.documentElement
     html.dataset.fmNav = direction
+    // Only the newest change of screen owns the direction: an earlier one finishing late (it was
+    // cut short by this one) must not clear it.
+    const mine = (navSeq += 1)
     const clean = () => {
-      if (html.dataset.fmNav === direction) delete html.dataset.fmNav
+      if (navSeq === mine) delete html.dataset.fmNav
     }
     try {
       const transition = doc.startViewTransition(update)

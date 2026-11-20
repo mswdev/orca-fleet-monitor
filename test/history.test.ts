@@ -44,6 +44,13 @@ test('columns round to one decimal and keep nulls', () => {
   assert.deepEqual(toColumns([p(1, 12.345, null), p(2, null, 50)]), { t: [1, 2], cpu: [12.3, null], mem: [null, 50] })
 })
 
+test('a CPU estimate is marked in its own column, only when some point is one', () => {
+  const columns = toColumns([{ ...p(1, 80), cpuEst: true }, p(2, 30)])
+  assert.deepEqual(columns.ce, [1, null])
+  assert.equal('ce' in toColumns([p(1), p(2)]), false, 'a measured machine sends what it always did')
+  assert.deepEqual(downsample({ ...columns, t: [1, 2, 3], cpu: [80, 30, 31], mem: [20, 20, 20], ce: [1, null, null] }, 2).ce, [1, null])
+})
+
 test('downsample keeps the newest point', () => {
   const cols = toColumns([p(1), p(2), p(3), p(4), p(5)])
   assert.deepEqual(downsample(cols, 2).t, [1, 3, 5])

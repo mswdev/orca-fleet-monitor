@@ -14,7 +14,7 @@ export const CPU_HEAD_COMPUTER: string
 export type SortKey = 'cpu' | 'memory' | 'energy' | 'name'
 
 /** `now`: the worker's clock, where the sparkline's window ends. */
-export type NetworkTile = { down: number | null; up: number | null; downTrend: Trend | null; upTrend: Trend | null; now: number }
+export type NetworkTile = { down: number | null; up: number | null; downTrend: Trend | null; upTrend: Trend | null; downPeak: number | null; now: number }
 export type DiskTile = { usedBytes: number; totalBytes: number; readBps: number | null; writeBps: number | null }
 export type GpuTile = { pct: number; peak: number | null; avg: number | null; trend: Trend | null; now: number }
 export type BatteryTile = { pct: number; state: 'charging' | 'discharging' | 'charged' | 'not-charging'; minutes: number | null; watts: number | null }

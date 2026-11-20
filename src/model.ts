@@ -348,6 +348,8 @@ export type HistoryPoint = {
   /** A Mac's GPU utilisation %, and its battery charge % (1.2). */
   gpu?: number | null
   bat?: number | null
+  /** `cpu` is an estimate from the load average (a basic-tier machine), never judged. */
+  cpuEst?: boolean
 }
 
 /** The history keys added in 1.2, each present in columns only when some point has it
@@ -361,6 +363,9 @@ export type HistoryColumns = {
   cpu: (number | null)[]
   mem: (number | null)[]
   ram?: (number | null)[]
+  /** 1 where `cpu` is an estimate from the load average, else null; present only when some point
+   *  is one, so a panel can leave estimates out of a measured CPU chart. */
+  ce?: (1 | null)[]
 } & { [K in ExtraHistoryKey]?: (number | null)[] }
 
 export type HealthThresholds = { busy: number; strained: number; critical: number }

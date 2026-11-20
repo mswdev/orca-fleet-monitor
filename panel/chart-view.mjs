@@ -13,6 +13,8 @@
 //   peak?: { t, v } | null          // detail: the window's highest reading, marked where it was
 //   range?: boolean                 // detail: a band from each minute's lowest reading to its highest
 //   scrub?: string | null           // detail: the name of a slider that reads one minute at a time
+//   current?: number | null         // the newest reading unrounded (history carries one decimal):
+//                                   // its level and figure where the line ends on that reading
 // }
 //
 // Text from other machines never reaches a chart: specs hold numbers and the panel's own words.
@@ -64,15 +66,23 @@ function flat(frame) {
   return frame ? { ...frame, points: frame.points.map((p) => ({ ...p, v: 0, lo: 0, hi: 0 })) } : frame
 }
 
-/** What a frame shows, coarsely: the same signature twice means nothing new to draw (a redraw for
- *  a click or a keystroke moves no chart). */
-function signature(target) {
-  const one = (f) => {
-    if (!f) return '-'
-    const last = f.points[f.points.length - 1]
-    return `${Math.round(f.end / 1_000)}|${f.count}|${f.points.length}|${last ? `${last.key}:${last.t}:${last.v}` : ''}`
-  }
-  return `${one(target.main)}/${one(target.second)}`
+/** Everything a chart draws from its spec: the same signature twice means nothing new to draw (a
+ *  redraw for a click or a keystroke moves no chart), and any change to a point, the peak or the
+ *  newest reading does. The window's end counts to the second. */
+function signature(target, spec) {
+  const one = (f) =>
+    f ? `${Math.round(f.end / 1_000)}|${f.count}|${f.points.map((p) => `${p.key}:${p.t}:${p.v}:${p.lo}:${p.hi}`).join(',')}` : '-'
+  const peak = spec.peak ? `${spec.peak.t}:${spec.peak.v}` : '-'
+  return `${one(target.main)}/${one(target.second)}/${peak}/${spec.current ?? '-'}`
+}
+
+/** Whether a target has anything to draw: moving between two empty charts is a waste of frames. */
+const drawable = (target) => Boolean(target?.main && target.main.count >= 2 && target.main.points.length > 0)
+
+/** How long ago a reading was, as the slider says it: "Now" within the last minute. */
+function agoText(end, t) {
+  const age = end - t
+  return age < 60_000 ? 'Now' : `${Math.max(1, Math.round(age / 60_000))} min ago`
 }
 
 const fadeStops = (top, bottom) => Array.from({ length: 8 }, (_, i) => ({ offset: i / 7, level: null, opacity: Math.round((top + (bottom - top) * (i / 7)) * 1000) / 1000 }))
@@ -96,8 +106,21 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
     frame(tick)
   }
 
+  /** Ends every move at once: motion was turned off (reduced motion) or the panel was hidden. */
+  function settleAll() {
+    for (const st of moving) {
+      st.shown = st.target
+      if (st.el.isConnected) paint(st)
+    }
+    moving.clear()
+  }
+
   function tick() {
     scheduled = false
+    if (!canMove()) {
+      settleAll()
+      return
+    }
     const now = clock()
     for (const st of moving) {
       if (!st.el.isConnected) {
@@ -178,7 +201,7 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
       el.append(nodes.bands, svg, label('100', 100), label('50', 50), nodes.peak, nodes.end, nodes.xhair, nodes.dot, nodes.hit, nodes.tip)
     }
     nodes.svg = svg
-    const st = { el, kind: spec.kind, box, id, nodes, fillGrad, fillStops, lineStops, spec, ruleKey: null, sig: null, target: null, shown: null, from: null, t0: 0, duration: MOVE_MS, placed: [], hover: null, focused: false }
+    const st = { el, kind: spec.kind, box, id, nodes, fillGrad, fillStops, lineStops, spec, ruleKey: null, sig: null, target: null, shown: null, from: null, t0: 0, duration: MOVE_MS, placed: [], hover: null, hoverT: 0, focused: false }
     if (nodes.hit) listen(st)
     return st
   }
@@ -230,17 +253,18 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
     const { w, h: height, pad } = st.box
     const { main, second } = st.shown
     const runs = placeFrame(main, w, height, pad)
-    st.placed = runs.flat()
+    // Points the slider can read: those in the window, not one kept only to enter from the edge.
+    st.placed = runs.flat().filter((p) => p.x >= 0)
     const rule = st.spec.rule
     setD(st.nodes.line, linePath(runs))
     setD(st.nodes.area, areaPath(runs, height - pad))
-    if (st.nodes.range) setD(st.nodes.range, st.spec.range ? rangePath(runs) : '')
+    if (st.nodes.range) setD(st.nodes.range, st.spec.range ? rangePath(runs, pad, height - pad) : '')
     if (st.nodes.second) setD(st.nodes.second, second ? linePath(placeFrame(second, w, height, pad)) : '')
     const last = st.placed[st.placed.length - 1]
     show(st.nodes.end, Boolean(last))
     if (last) {
       place(st.nodes.end, last.x, last.y, st.box)
-      if (rule) st.nodes.end.style.setProperty('background', LEVEL_COLOR[levelOf(last.v, rule)])
+      if (rule) st.nodes.end.style.setProperty('background', LEVEL_COLOR[levelOf(exactOf(st, last), rule)])
       else st.nodes.end.style.removeProperty?.('background')
     }
     if (st.nodes.peak) {
@@ -258,27 +282,38 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
     if (st.nodes.hit) paintHover(st)
   }
 
-  /** The minute under the pointer or the keys: a line, a dot and a note, and the slider's value. */
+  /** The minute under the pointer or the keys: a line, a dot and a note, and the slider's value. The
+   *  slider is there only while it has a minute to read; it always has a value (the newest reading
+   *  until one is chosen), and a minute chosen that leaves the window hands over to its neighbour. */
   function paintHover(st) {
     const { hit, xhair, dot, tip } = st.nodes
-    hit.setAttribute('aria-valuemax', String(Math.max(0, st.placed.length - 1)))
-    const index = st.hover === null ? -1 : st.placed.findIndex((p) => p.key === st.hover)
+    const count = st.placed.length
+    show(hit, Boolean(st.spec.scrub) && count > 0)
+    hit.setAttribute('aria-valuemax', String(Math.max(0, count - 1)))
+    let index = st.hover === null ? -1 : st.placed.findIndex((p) => p.key === st.hover)
+    if (index < 0 && st.hover !== null && count > 0 && st.focused) {
+      // The minute chosen has gone (it scrolled out of the window): its nearest neighbour.
+      let best = 0
+      for (let i = 1; i < count; i += 1) if (Math.abs(st.placed[i].t - st.hoverT) < Math.abs(st.placed[best].t - st.hoverT)) best = i
+      index = best
+      st.hover = st.placed[best].key
+    }
     const p = index >= 0 ? st.placed[index] : null
     for (const node of [xhair, dot, tip]) show(node, Boolean(p))
     if (!p) {
       st.hover = null
-      hit.removeAttribute('aria-valuenow')
-      hit.removeAttribute('aria-valuetext')
+      if (count === 0) {
+        hit.removeAttribute('aria-valuenow')
+        hit.removeAttribute('aria-valuetext')
+      } else {
+        const newest = st.placed[count - 1]
+        hit.setAttribute('aria-valuenow', String(count - 1))
+        hit.setAttribute('aria-valuetext', readout(st, newest).spoken)
+      }
       return
     }
-    // The figures of the reading itself, not of a frame in motion.
-    const exact = st.target?.main?.points.find((q) => q.key === p.key) ?? p
-    const rule = st.spec.rule
-    const level = rule ? levelOf(exact.v, rule) : null
-    const end = st.target?.main?.end ?? st.shown.main.end
-    const when = p.key === 'live' ? 'Now' : `${Math.max(1, Math.round((end - exact.t) / 60_000))} min ago`
-    const value = `${Math.round(exact.v)}%`
-    const spread = p.key !== 'live' && exact.hi - exact.lo >= 0.5 ? `${Math.round(exact.lo)}–${Math.round(exact.hi)}% that minute` : ''
+    st.hoverT = p.t
+    const { when, value, level, spread, spoken } = readout(st, p)
     const left = pctOf(p.x, st.box.w)
     xhair.style.setProperty('left', left)
     place(dot, p.x, p.y, st.box)
@@ -298,7 +333,27 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
       tip.setAttribute('data-side', 'right')
     }
     hit.setAttribute('aria-valuenow', String(index))
-    hit.setAttribute('aria-valuetext', `${when}: ${value}${level ? `, ${LEVEL_WORD[level]}` : ''}${spread ? `, ${spread}` : ''}`)
+    hit.setAttribute('aria-valuetext', spoken)
+  }
+
+  /** The newest reading unrounded, where the point is that reading; else the point's own figure. */
+  function exactOf(st, p) {
+    const current = st.spec.current
+    return p.key === 'live' && typeof current === 'number' && Number.isFinite(current) && Math.abs(current - p.v) <= 0.051 ? current : p.v
+  }
+
+  /** What the slider and the note say of a point, from the reading itself, not a frame in motion. */
+  function readout(st, p) {
+    const exact = st.target?.main?.points.find((q) => q.key === p.key) ?? p
+    const v = exactOf(st, exact)
+    const rule = st.spec.rule
+    const level = rule ? levelOf(v, rule) : null
+    const end = st.target?.main?.end ?? st.shown.main.end
+    const when = agoText(end, exact.t)
+    const value = `${Math.round(v)}%`
+    const spread = p.key !== 'live' && exact.hi - exact.lo >= 0.5 ? `${Math.round(exact.lo)}–${Math.round(exact.hi)}% that minute` : ''
+    const spoken = `${when}: ${value}${level ? `, ${LEVEL_WORD[level]}` : ''}${spread ? `, ${spread}` : ''}`
+    return { when, value, level, spread, spoken }
   }
 
   function setHover(st, key) {
@@ -358,21 +413,24 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
       st.nodes.svg.removeAttribute('aria-label')
       st.nodes.svg.setAttribute('aria-hidden', 'true')
     }
-    if (st.nodes.hit) {
-      show(st.nodes.hit, Boolean(spec.scrub))
-      if (spec.scrub) st.nodes.hit.setAttribute('aria-label', spec.scrub)
-    }
+    if (st.nodes.hit && spec.scrub) st.nodes.hit.setAttribute('aria-label', spec.scrub)
     const target = { main: spec.frame, second: spec.second ?? null }
-    const sig = signature(target)
+    const sig = signature(target, spec)
     if (sig === st.sig) {
-      if (restyled && st.shown) paint(st)
+      // Nothing new; but a move must not outlive motion being turned off.
+      if (moving.has(st) && !canMove()) {
+        moving.delete(st)
+        st.shown = st.target
+        paint(st)
+      } else if (restyled && st.shown) paint(st)
       return
     }
     st.sig = sig
     const step = st.target ? target.main.end - st.target.main.end : null
     const first = st.target === null
+    const worthMoving = drawable(target) || drawable(st.shown)
     st.target = target
-    if (!first && step !== null && step > 0 && step <= MAX_GLIDE_MS && canMove()) {
+    if (!first && worthMoving && step !== null && step > 0 && step <= MAX_GLIDE_MS && canMove()) {
       st.from = st.shown
       st.t0 = clock()
       st.duration = MOVE_MS
@@ -380,7 +438,7 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
       schedule()
       return
     }
-    if (first && st.kind === 'detail' && canMove()) {
+    if (first && st.kind === 'detail' && worthMoving && canMove()) {
       st.from = { main: flat(target.main), second: flat(target.second) }
       st.shown = st.from
       st.t0 = clock()

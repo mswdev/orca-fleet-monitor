@@ -177,7 +177,7 @@ test('history points carry memory only when it is trusted', () => {
   const mac = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin' }) }))
   assert.deepEqual(historyPointOf(mac, 5), { t: 5, cpu: 42.5, mem: null })
   const full = mergeMachine(base({ diag }))
-  assert.deepEqual(historyPointOf(full, 6), { t: 6, cpu: 75, mem: 50 })
+  assert.deepEqual(historyPointOf(full, 6), { t: 6, cpu: 75, mem: 50, cpuEst: true }, 'a load estimate is marked as one')
 })
 
 test('backfill moves beacon times onto the local clock and drops macOS os memory', () => {
@@ -247,7 +247,7 @@ describe('memory from a Mac’s own reading (1.1)', () => {
     const point = historyPointOf(mac, 7)!
     assert.deepEqual([point.t, point.cpu, point.mem, Math.round(point.ram! * 10) / 10], [7, 42.5, 88, 94.4])
     const orca = mergeMachine(base({ diag }))
-    assert.deepEqual(historyPointOf(orca, 8), { t: 8, cpu: 75, mem: 50 }, 'no ram key without a Mac reading')
+    assert.deepEqual(historyPointOf(orca, 8), { t: 8, cpu: 75, mem: 50, cpuEst: true }, 'no ram key without a Mac reading')
   })
 
   test('back-fill from a Mac’s beacons carries RAM in use and pressure', () => {
