@@ -35,6 +35,7 @@ import { createRunBounded, type ExecFile } from './mac-memory.ts'
 import {
   diskSpaceOf,
   due,
+  heldVolumes,
   interfaceLabel,
   MAX_VOLUMES,
   readVolumes,
@@ -45,7 +46,9 @@ import {
   type Held,
   type StatFs,
   type StatFsAsync,
-  type VolumePlace
+  type VolumePlace,
+  VOLUME_DEADLINE_MS,
+  VOLUME_READS_MAX
 } from './mac-system.ts'
 import type { BatteryReading, MacSystem, NetReading, VolumeReading } from './model.ts'
 
@@ -54,6 +57,8 @@ export const PROC_NET_IPV6_ROUTE_PATH = '/proc/net/ipv6_route'
 export const PROC_NET_DEV_PATH = '/proc/net/dev'
 export const PROC_DISKSTATS_PATH = '/proc/diskstats'
 export const PROC_MOUNTS_PATH = '/proc/self/mounts'
+/** The same list with each mount's root within its filesystem; /proc/self/mounts where it is missing. */
+export const PROC_MOUNTINFO_PATH = '/proc/self/mountinfo'
 export const SYS_BLOCK_PATH = '/sys/block'
 export const SYS_DRM_PATH = '/sys/class/drm'
 export const SYS_PCI_DEVICES_PATH = '/sys/bus/pci/devices'
@@ -64,8 +69,8 @@ export const NVIDIA_SMI_PATH = '/usr/bin/nvidia-smi'
 /** Where OpenZFS installs `zfs`, for each pool's size and use (`zfs list`). */
 export const ZFS_PATHS = ['/usr/sbin/zfs', '/sbin/zfs', '/usr/local/sbin/zfs'] as const
 const ZFS_MAX_BYTES = 16 * 1024
-/** A ZFS pool's name: a letter, then letters, digits and _ - . : (never an option to zfs). */
-const ZFS_POOL = /^[A-Za-z][A-Za-z0-9_.:-]{0,254}$/
+/** A ZFS pool's name: a letter, then letters, digits, spaces and _ - . : (never an option to zfs). */
+const ZFS_POOL = /^[A-Za-z][A-Za-z0-9_.: -]{0,254}$/
 export const NVIDIA_SMI_ARGS = ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'] as const
 /** The main volume: `/`, except where `/` is a small read-only image (Fedora Atomic and CoreOS
  *  mount a composefs of a few MB there, always full) and the real disk is under `/sysroot` and
@@ -455,14 +460,38 @@ function spaceRank(path: string): number {
   return i < 0 ? LINUX_SPACE_PATHS.length : i
 }
 
-/** Which of two mounts of one disk names it better: one of LINUX_SPACE_PATHS, else the one
- *  nearer the root (a disk's own mount, not a folder or file bound in from it, such as a
- *  container's /app/config.json), else the one listed first. */
-function namesBetter(path: string, than: string): boolean {
-  const rank = spaceRank(path) - spaceRank(than)
-  if (rank !== 0) return rank < 0
+/** One mount: its source, where it is mounted, its filesystem type, and (from mountinfo) the
+ *  folder or file of that filesystem it shows, `/` for the whole of it. */
+type MountEntry = { source: string; path: string; type: string; root: string }
+
+/** /proc/self/mountinfo's lines, or /proc/self/mounts' (`<source> <path> <type> <options> 0 0`),
+ *  with their octal escapes undone; at most 4,096. */
+export function mountEntries(text: unknown): MountEntry[] {
+  if (typeof text !== 'string') return []
+  const out: MountEntry[] = []
+  for (const line of text.split('\n').slice(0, 4096)) {
+    const f = line.split(' ')
+    if (/^\d+$/.test(f[0] ?? '') && /^\d+:\d+$/.test(f[2] ?? '')) {
+      // mountinfo: <id> <parent> <major:minor> <root> <path> <options> [<optional>…] - <type> <source> <super options>
+      const sep = f.indexOf('-', 6)
+      if (sep < 0 || !f[3] || !f[4] || !f[sep + 1] || !f[sep + 2]) continue
+      out.push({ source: unescapeMount(f[sep + 2]!), path: unescapeMount(f[4]), type: f[sep + 1]!, root: unescapeMount(f[3]) })
+    } else if (f[0] && f[1] && f[2]) {
+      out.push({ source: unescapeMount(f[0]), path: unescapeMount(f[1]), type: f[2], root: '/' })
+    }
+  }
+  return out
+}
+
+/** Which of two mounts of one disk names it better: one of LINUX_SPACE_PATHS; else the one that
+ *  shows more of the filesystem (its own root, not a folder or a file bound in from it, such as a
+ *  container's /config.yaml); else the one nearer the root; else the one listed first. */
+function namesBetter(a: MountEntry, than: MountEntry): boolean {
   const depth = (p: string) => p.split('/').filter(Boolean).length
-  return depth(path) < depth(than)
+  const rank = spaceRank(a.path) - spaceRank(than.path)
+  if (rank !== 0) return rank < 0
+  if (depth(a.root) !== depth(than.root)) return depth(a.root) < depth(than.root)
+  return depth(a.path) < depth(than.path)
 }
 
 /** A mount's name as a person knows it: a desktop's removable disk by its label (the last part of
@@ -480,29 +509,27 @@ function mountName(path: string): string {
  * filesystem on a block device (not a loop device), and each ZFS pool, once per disk (a btrfs disk
  * mounted at several subvolumes, a pool's datasets: one space), at the mount that names it best
  * (namesBetter). A pool is marked with its name: its space is the pool's (`zfs list`), never one
- * dataset's. The main one is the first of LINUX_SPACE_PATHS among them; with none of those (a
- * container's root is an overlay), none is, and the machine's own disk figures stand for it.
+ * dataset's. The main one is the disk mounted at `mainPath`, the path the machine's own disk
+ * figures were read at (LINUX_SPACE_PATHS); when no disk is mounted there (a container's root is
+ * an overlay), none is, and the machine's own figures stand for it. Takes /proc/self/mountinfo or
+ * /proc/self/mounts.
  */
-export function linuxVolumePlaces(text: unknown): VolumePlace[] {
-  if (typeof text !== 'string') return []
-  const disks = new Map<string, { path: string; pool?: string }>()
-  let lines = 0
-  for (const line of text.split('\n')) {
-    if ((lines += 1) > 4096) break
-    const [device, rawPath, type] = line.split(' ')
-    if (!device || !rawPath || !type || !DISK_FS.has(type)) continue
+export function linuxVolumePlaces(text: unknown, mainPath: string | null = null): VolumePlace[] {
+  const disks = new Map<string, MountEntry & { pool?: string }>()
+  for (const entry of mountEntries(text)) {
+    const { source, path, type } = entry
+    if (!DISK_FS.has(type)) continue
     const zfs = type === 'zfs'
-    if (!zfs && (!device.startsWith('/dev/') || /^\/dev\/(loop|zram|ram)\d/.test(device))) continue
-    const path = unescapeMount(rawPath)
+    if (!zfs && (!source.startsWith('/dev/') || /^\/dev\/(loop|zram|ram)\d/.test(source))) continue
     if (!path.startsWith('/') || skippedMount(path)) continue
-    const pool = zfs ? device.split('/')[0]! : undefined
+    const pool = zfs ? source.split('/')[0]! : undefined
     if (pool !== undefined && !ZFS_POOL.test(pool)) continue
-    const key = pool !== undefined ? `zfs:${pool}` : device
+    const key = pool !== undefined ? `zfs:${pool}` : source
     const held = disks.get(key)
-    if (held === undefined || namesBetter(path, held.path)) disks.set(key, { path, ...(pool !== undefined ? { pool } : {}) })
+    if (held === undefined || namesBetter(entry, held)) disks.set(key, { ...entry, ...(pool !== undefined ? { pool } : {}) })
   }
   const places: VolumePlace[] = [...disks.values()].map(({ path, pool }) => ({ path, name: mountName(path), ...(pool !== undefined ? { pool } : {}) }))
-  const main = LINUX_SPACE_PATHS.map((p) => places.find((v) => v.path === p)).find(Boolean)
+  const main = mainPath === null ? undefined : places.find((v) => v.path === mainPath)
   if (main) main.main = true
   return [...(main ? [main] : []), ...places.filter((v) => v !== main)]
 }
@@ -569,6 +596,9 @@ export class LinuxSystemReader {
   private volumesTriedAt = Number.NEGATIVE_INFINITY
   private readonly statfsVolume: StatFsAsync
   private readonly volumesPending = new Set<string>()
+  private readonly volumesSlow = new Set<string>()
+  /** Where the machine's own disk figures were last read (readSpace), the main disk's mount. */
+  private spacePath: string | null = null
   private running: Promise<void> | null = null
   private runningSince = 0
   /** Parts whose last read has not returned. */
@@ -637,10 +667,10 @@ export class LinuxSystemReader {
   /** Every local volume (linuxVolumePlaces), each with its space. */
   private async readVolumes(now: number): Promise<void> {
     this.volumesTriedAt = now
-    const mounts = await this.file(PROC_MOUNTS_PATH)
+    const mounts = (await this.file(PROC_MOUNTINFO_PATH)) ?? (await this.file(PROC_MOUNTS_PATH))
     // Kept as it was only when the list could not be read: a disk taken out goes at once.
     if (mounts === null) return
-    const places = linuxVolumePlaces(mounts)
+    const places = linuxVolumePlaces(mounts, this.spacePath)
     const pools = [...new Set(places.flatMap((p) => (p.pool ? [p.pool] : [])))]
     const sizes = pools.length > 0 ? await this.zfsPools(pools) : new Map<string, { used: number; available: number }>()
     // A pool's space is the pool's, from zfs; with no answer from it, the pool is left out.
@@ -650,10 +680,8 @@ export class LinuxSystemReader {
       const size = sizes.get(place.pool)
       return Promise.resolve(size ? { bsize: 1, blocks: size.used + size.available, bavail: size.available } : null)
     }
-    const volumes = await readVolumes(places, statfs, this.volumesPending)
-    // Disks listed but none read (all still answering): what was held stands, until it is too old.
-    if (volumes.length === 0 && places.length > 0) return
-    this.volumes = { value: volumes, at: now }
+    const volumes = await readVolumes(places, statfs, this.volumesPending, VOLUME_DEADLINE_MS, VOLUME_READS_MAX, this.volumesSlow)
+    this.volumes = heldVolumes(places, volumes, this.volumes, now)
   }
 
   /** Each of `pools`' use, from the first `zfs` that answers; empty when none does. */
@@ -827,6 +855,7 @@ export class LinuxSystemReader {
   private readSpace(now: number): void {
     this.spaceTriedAt = now
     let first: { total: number; used: number } | null = null
+    let firstPath: string | null = null
     for (const path of LINUX_SPACE_PATHS) {
       let space: { total: number; used: number } | null = null
       try {
@@ -835,13 +864,20 @@ export class LinuxSystemReader {
         space = null
       }
       if (!space) continue
-      first ??= space
+      if (!first) {
+        first = space
+        firstPath = path
+      }
       if (space.total >= SPACE_MIN_BYTES) {
         this.space = { value: space, at: now }
+        this.spacePath = path
         return
       }
     }
-    if (first) this.space = { value: first, at: now }
+    if (first) {
+      this.space = { value: first, at: now }
+      this.spacePath = firstPath
+    }
   }
 }
 

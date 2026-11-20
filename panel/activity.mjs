@@ -55,7 +55,7 @@
 import { chartSlot } from './chart-view.mjs'
 import { frameOf } from './charts.mjs'
 import { h, s } from './dom.mjs'
-import { HISTORY_SLOTS, SLOT_MS, toProcessList } from './fleet-binding.mjs'
+import { HISTORY_SLOTS, MAX_VOLUMES, SLOT_MS, toProcessList } from './fleet-binding.mjs'
 import { duration, size } from './format.mjs'
 
 /** Rows drawn before "Show all N", and again after "Show fewer". */
@@ -117,6 +117,8 @@ function diskOf(disk) {
   const ownUsed = finite(disk.usedBytes) && disk.usedBytes >= 0 && ownTotal !== null && disk.usedBytes <= ownTotal ? disk.usedBytes : null
   if (volumes.length > 0 && !volumes.some((v) => v.main) && ownTotal !== null && ownUsed !== null) {
     volumes.unshift({ name: STARTUP_DISK, usedBytes: ownUsed, totalBytes: ownTotal, pct: (ownUsed / ownTotal) * 100, main: true })
+    // Eight rows at most, as a machine sends: the last named one gives way to it.
+    volumes.splice(MAX_VOLUMES)
   }
   const shown = volumes.find((v) => v.main) ?? (volumes.length === 1 ? volumes[0] : null)
   const traffic = { readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec) }

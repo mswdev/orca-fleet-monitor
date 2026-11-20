@@ -260,7 +260,7 @@ export async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<
 
 /**
  * Reads each of `places` (at most MAX_VOLUMES) off the worker's thread: the volumes that answer
- * within VOLUME_DEADLINE_MS each, main first. At most VOLUME_READS_MAX reads are outstanding at
+ * within VOLUME_DEADLINE_MS each, main first. Those that miss it are noted in `slow`. At most VOLUME_READS_MAX reads are outstanding at
  * once, across readings: a disk still answering an earlier read (in `pending`; a drive spinning
  * up, or one that has stopped answering) holds its place and is not asked again, and while that
  * many are stuck, the rest wait for the next reading. A failing disk can never take every one of
@@ -271,9 +271,13 @@ export async function readVolumes(
   statfs: StatFsAsync,
   pending: Set<string> = new Set(),
   deadlineMs = VOLUME_DEADLINE_MS,
-  limit = VOLUME_READS_MAX
+  limit = VOLUME_READS_MAX,
+  slow: Set<string> = new Set()
 ): Promise<VolumeReading[]> {
-  const queue = places.slice(0, MAX_VOLUMES).filter((p) => !pending.has(p.path))
+  // A disk that missed its deadline last time is asked after the others, so two slow ones cannot
+  // keep a healthy one from ever being read.
+  const listed = places.slice(0, MAX_VOLUMES).filter((p) => !pending.has(p.path))
+  const queue = [...listed.filter((p) => !slow.has(p.path)), ...listed.filter((p) => slow.has(p.path))]
   const out: VolumeReading[] = []
   const lane = async (): Promise<void> => {
     while (queue.length > 0 && pending.size < limit) {
@@ -283,6 +287,8 @@ export async function readVolumes(
         .catch(() => null)
         .finally(() => pending.delete(place.path))
       const got = await withDeadline(read, deadlineMs)
+      if (got.done) slow.delete(place.path)
+      else slow.add(place.path)
       try {
         const v = got.done ? volumeOf(place.name, got.value, place.main === true) : null
         if (v) out.push(v)
@@ -348,24 +354,32 @@ export async function macMainVolumeName(
   list: () => Promise<{ name: string; link: boolean }[]> = async () => (await readdir('/Volumes', { withFileTypes: true })).map((d) => ({ name: d.name, link: d.isSymbolicLink() })),
   link: (path: string) => Promise<string> = (path) => readlink(path)
 ): Promise<string | null> {
-  try {
-    // Only the links: a mounted volume is never asked about, so a slow one cannot hold this up.
-    for (const entry of (await list()).slice(0, 64)) {
-      if (!entry.link) continue
-      try {
-        if ((await link(`/Volumes/${entry.name}`)) === '/') return entry.name
-      } catch {
-        // Gone, or not readable: not this one.
-      }
+  // Only the links: a mounted volume is never asked about, so a slow one cannot hold this up. A
+  // /Volumes that cannot be listed rejects, so the last name found can stand.
+  for (const entry of (await list()).slice(0, 64)) {
+    if (!entry.link) continue
+    try {
+      if ((await link(`/Volumes/${entry.name}`)) === '/') return entry.name
+    } catch {
+      // Gone, or not readable: not this one.
     }
-  } catch {
-    // No /Volumes to list.
   }
   return null
 }
 
 /** A value and when it was read, on the reader's monotonic clock. */
 export type Held<T> = { value: T; at: number }
+
+/** The disks to hold after a reading of `places` that read `volumes`: those read; or, when it
+ *  listed disks but could read none of them (all still answering), what was held of the disks
+ *  still listed, so a disk taken out goes at once. Null: keep what is held as it is. */
+export function heldVolumes(places: readonly VolumePlace[], volumes: VolumeReading[], held: Held<VolumeReading[]> | null, now: number): Held<VolumeReading[]> | null {
+  if (volumes.length > 0 || places.length === 0) return { value: volumes, at: now }
+  if (!held) return null
+  const names = new Set(places.map((p) => p.name.slice(0, VOLUME_NAME_MAX)))
+  const still = held.value.filter((v) => names.has(v.name))
+  return still.length === held.value.length ? held : { value: still, at: held.at }
+}
 
 /** What a system reader holds between reads, on any platform. Disk traffic may know only one of
  *  read and write (a counter that went back gives none for that reading). */
@@ -451,6 +465,7 @@ export class MacSystemReader {
   private readonly volumeName: () => Promise<string | null> | string | null
   private readonly statfsVolume: StatFsAsync
   private readonly volumesPending = new Set<string>()
+  private readonly volumesSlow = new Set<string>()
   /** The start-up disk's name being looked up, while it is, and the last one found. */
   private nameLookup: Promise<string | null> | null = null
   private lastName: string | null = null
@@ -516,10 +531,8 @@ export class MacSystemReader {
     // Kept as it was only when the list could not be read: a disk taken out goes at once.
     if (listed === null) return
     const places = macVolumePlaces(parseMacMounts(listed), name)
-    const volumes = await readVolumes(places, this.statfsVolume, this.volumesPending)
-    // Disks listed but none read (all still answering): what was held stands, until it is too old.
-    if (volumes.length === 0 && places.length > 0) return
-    this.volumes = { value: volumes, at: now }
+    const volumes = await readVolumes(places, this.statfsVolume, this.volumesPending, VOLUME_DEADLINE_MS, VOLUME_READS_MAX, this.volumesSlow)
+    this.volumes = heldVolumes(places, volumes, this.volumes, now)
   }
 
   /** The start-up disk's name, off the worker's thread and within VOLUME_DEADLINE_MS; the last
@@ -532,12 +545,15 @@ export class MacSystemReader {
       } catch {
         lookup = Promise.resolve(null)
       }
+      // A lookup that fails keeps the last name found; one that finds no link says there is none.
       this.nameLookup = lookup
-        .catch(() => null)
-        .then((name) => {
-          this.lastName = name
-          return name
-        })
+        .then(
+          (name) => {
+            this.lastName = name
+            return name
+          },
+          () => this.lastName
+        )
         .finally(() => {
           this.nameLookup = null
         })

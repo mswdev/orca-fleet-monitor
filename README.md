@@ -75,7 +75,7 @@ The panel opens on an overview with one card per machine. Click a card for that 
 - Each level is drawn as one to four bars as well as a colour, so you can read it without the colour.
 - A machine that goes offline keeps its last readings and says when it was last seen.
 - Charts glide to each new reading, and figures count up or down to their new values. With your system's reduce motion setting on, everything changes at once.
-- The foot of the overview shows which version of Fleet Monitor this computer runs. A machine's detail lists the version it runs. When one machine runs an older version than another, its card has a red **Outdated Version** tag, and its detail says which version is newer and gives the command that updates it.
+- The foot of the overview shows which version of Fleet Monitor this computer runs. A machine's detail lists the version it runs. When one machine runs an older version than another, its card has a red **Outdated Version** tag, and its detail says which version is newer and how to update it there: the exact command, when the panel can tell how it was installed, or where to find it in settings.
 - A status bar item names the machine that most needs attention, such as `Mac Studio strained · 1 offline`, and lists every machine in its tooltip. Clicking it opens the panel.
 - Colours follow your Orca theme, light or dark. A reading at an OK level is drawn in the same green as an OK machine's dot, because Orca's theme accent is its text colour. You can pick your own colour for each level in [Settings](#settings).
 

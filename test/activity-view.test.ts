@@ -407,6 +407,12 @@ describe('which disk is which', () => {
     await activity(v, 'local')
     const rows = $(v.root, '[data-key="tile:disk"]')!.querySelectorAll('.fm-vol').map((r) => [text($(r, '.fm-vol-label')!), text($(r, '.fm-vol-pct')!)])
     assert.deepEqual(rows, [['Startup disk', '10%'], ['Archive', '95%']])
+    // Eight named and the start-up disk's own figures: still eight rows, the start-up disk first.
+    const eight = Array.from({ length: 8 }, (_, i) => ({ name: `Disk ${i}`, totalBytes: 1e12, usedBytes: 1e11 }))
+    const full = mount(viewOf([local({ system: { ...SYSTEM, disk: { ...SYSTEM.disk!, totalBytes: 100e9, usedBytes: 10e9, volumes: eight } } })]))
+    await activity(full, 'local')
+    const names = $(full.root, '[data-key="tile:disk"]')!.querySelectorAll('.fm-vol-label').map(text)
+    assert.deepEqual([names.length, names[0], names[7]], [8, 'Startup disk', 'Disk 6'])
     // No figures of its own either: the one disk it named, with its own space.
     const w = mount(viewOf([local({ system: { ...SYSTEM, disk: { ...SYSTEM.disk!, totalBytes: null, usedBytes: null, volumes: [archive] } } })]))
     await activity(w, 'local')
