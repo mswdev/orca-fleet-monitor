@@ -326,9 +326,12 @@ export function trendOf(
 ): Trend
 export function chartRule(
   metric: 'cpu' | 'memory',
-  model: { estimated?: boolean; kind?: string; reliable?: boolean },
+  model: { estimated?: boolean; kind?: string; reliable?: boolean; stale?: boolean },
   thresholds: FleetThresholds
 ): ChartRule | null
+/** The CPU column without readings marked as load-average estimates (`ce`). */
+export function measuredCpu<T extends HistoryColumns | null | undefined>(columns: T): T
+export const MAC_FIGURES_MAX_AGE_MS: number
 export function windowStats(
   columns: HistoryColumns | null | undefined,
   key: 'cpu' | 'mem' | 'ram' | 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat',

@@ -30,7 +30,7 @@ export const REWRITE_REFRESH_MS = 15_000
 export function mergeColumns(base, extra, windowMs) {
   const byTime = new Map()
   // Optional columns: `ram`, then the 1.2 ones (network, disk, GPU, battery).
-  const optional = ['ram', ...EXTRA_HISTORY_KEYS]
+  const optional = ['ram', 'ce', ...EXTRA_HISTORY_KEYS]
   const present = new Set()
   for (const cols of [base, extra]) {
     if (!cols || !Array.isArray(cols.t)) continue
@@ -457,7 +457,8 @@ export function trendOf(columns, key, end, windowMs = HISTORY_SLOTS * SLOT_MS, s
   for (let i = 0; i < times.length; i += 1) {
     const t = times[i]
     const v = values[i]
-    if (!finite(t) || !finite(v) || t <= from) continue
+    // A reading after `end` (this frame's clock stepped back) waits until its time comes.
+    if (!finite(t) || !finite(v) || t <= from || t > end) continue
     if (t > end - windowMs) count += 1
     if (live === null || t >= live.t) live = { t, v }
     const minute = Math.floor(t / slotMs)
@@ -493,7 +494,7 @@ export function windowStats(columns, key, end, windowMs = HISTORY_SLOTS * SLOT_M
   let peakAt = null
   for (let i = 0; i < times.length; i += 1) {
     const value = values[i]
-    if (!finite(times[i]) || !finite(value) || times[i] <= end - windowMs) continue
+    if (!finite(times[i]) || !finite(value) || times[i] <= end - windowMs || times[i] > end) continue
     sum += value
     count += 1
     if (value > peak) {
@@ -759,6 +760,23 @@ function seriesOf(history, key, now) {
   return { trend: trendOf(history, key, now), stats: windowStats(history, key, now) }
 }
 
+/**
+ * The CPU column without the readings that were estimates (`ce`: 1 marks a reading estimated from
+ * the load average, on a machine in the basic tier). A machine measured now draws and judges only
+ * measured readings: an estimate was never judged, so its height must not be coloured as a level.
+ * Without `ce` (an older worker), every reading is kept.
+ */
+export function measuredCpu(columns) {
+  const ce = Array.isArray(columns?.ce) ? columns.ce : null
+  if (!ce || !Array.isArray(columns?.t)) return columns
+  const keep = columns.t.map((_, i) => ce[i] !== 1)
+  return { t: columns.t.filter((_, i) => keep[i]), cpu: (columns.cpu ?? []).filter((_, i) => keep[i]), mem: [] }
+}
+
+/** How long a Mac's own figures carried over failed reads are still judged (src/health.ts
+ *  MAC_FIGURES_MAX_AGE_MS); older, its RAM in use is shown but not judged. */
+export const MAC_FIGURES_MAX_AGE_MS = 12_000
+
 const ruleOf = (t) => [
   { level: 'busy', at: t.busy },
   { level: 'strained', at: t.strained },
@@ -770,12 +788,13 @@ const ruleOf = (t) => [
  * figure by, lowest first, or null where the figure is not judged (a CPU estimate, memory that is
  * unavailable or unreliable). RAM in use (a Mac's own reading) has one level of its own, busy at
  * the person's "RAM used" setting: its strained and critical come from memory pressure, which is
- * not what that chart plots. Pressure and Orca's figure are judged on the memory thresholds.
+ * not what that chart plots; and none while the Mac's figures are carried too long to be judged
+ * (`stale`). Pressure and Orca's figure are judged on the memory thresholds.
  */
 export function chartRule(metric, model, thresholds) {
   if (metric === 'cpu') return model.estimated ? null : ruleOf(thresholds.cpu)
   if (!model.reliable || model.kind === 'unavailable') return null
-  if (model.kind === 'used') return [{ level: 'busy', at: thresholds.ramUsedBusy ?? DEFAULT_THRESHOLDS.ramUsedBusy }]
+  if (model.kind === 'used') return model.stale ? null : [{ level: 'busy', at: thresholds.ramUsedBusy ?? DEFAULT_THRESHOLDS.ramUsedBusy }]
   return ruleOf(thresholds.memory)
 }
 
@@ -927,8 +946,8 @@ function toMachine(m, thresholds, now, context) {
       pct: cpuPct,
       estimated,
       tone: estimated ? 'ok' : (levelOrNull(m.health?.cpu) ?? (cpuPct === null ? 'ok' : levelFor(cpuPct, thresholds.cpu))),
-      trend: trendOf(history, 'cpu', now),
-      stats: windowStats(history, 'cpu', now),
+      trend: trendOf(estimated ? history : measuredCpu(history), 'cpu', now),
+      stats: windowStats(estimated ? history : measuredCpu(history), 'cpu', now),
       rule: chartRule('cpu', { estimated }, thresholds),
       groups: online ? coreGroupsOf(m.cpu, thresholds) : null,
       // Too many to draw one by one: the view says so rather than leave the section out unsaid.
@@ -949,7 +968,11 @@ function toMachine(m, thresholds, now, context) {
       tone: levelOrNull(m.health?.memory) ?? (memReliable && memPct !== null ? levelFor(memPct, thresholds.memory) : 'ok'),
       trend: trendOf(history, memKey, now),
       stats: windowStats(history, memKey, now),
-      rule: chartRule('memory', { kind: memKind, reliable: memReliable }, thresholds),
+      rule: chartRule(
+        'memory',
+        { kind: memKind, reliable: memReliable, stale: memKind === 'used' && finite(m.memory.mac.ageMs) && m.memory.mac.ageMs > MAC_FIGURES_MAX_AGE_MS },
+        thresholds
+      ),
       mac,
       win: memKind === 'used' || memKind === 'pressure' || memKind === 'unavailable' ? null : winDetailOf(m, m.memory && finite(m.memory.total) ? m.memory.total : null),
       /** Memory pressure (100 − available) beside RAM in use, for a Mac's own reading. */

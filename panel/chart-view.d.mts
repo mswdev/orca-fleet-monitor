@@ -16,6 +16,9 @@ export type ChartSpec = {
   range?: boolean
   /** Detail: the name of a slider that reads one minute at a time. */
   scrub?: string | null
+  /** The newest reading unrounded (history carries one decimal), for the level of the point the
+   *  line ends on. */
+  current?: number | null
 }
 
 export const MOVE_MS: number

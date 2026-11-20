@@ -31,11 +31,23 @@ export function createMotion({ frame = null, clock = () => Date.now(), motion = 
     frame(tick)
   }
 
+  /** A count still owns its figure only while the figure is connected and still heading for the
+   *  value the count is heading for: an unknown reading (no data-num, "–") or a new one ends it. */
+  const owns = (el, c) => el.isConnected && el.getAttribute('data-num') === String(c.to)
+
   function tick() {
     scheduled = false
+    const on = canMove()
     const now = clock()
     for (const [el, c] of counting) {
-      if (!el.isConnected) {
+      if (!owns(el, c)) {
+        counting.delete(el)
+        continue
+      }
+      if (!on) {
+        // Motion was turned off mid-count: the figure is the reading, at once.
+        shown.set(el, c.to)
+        el.textContent = String(c.to)
         counting.delete(el)
         continue
       }
@@ -68,6 +80,13 @@ export function createMotion({ frame = null, clock = () => Date.now(), motion = 
     settle(root, { moved = true } = {}) {
       const on = canMove()
       const now = clock()
+      // A figure whose reading became unknown (or that left the page) is no longer counted.
+      for (const el of counting.keys()) {
+        if (!el.isConnected || el.getAttribute('data-num') === null) {
+          counting.delete(el)
+          shown.delete(el)
+        }
+      }
       for (const el of root.querySelectorAll('[data-num]')) {
         const to = Number(el.getAttribute('data-num'))
         const going = counting.get(el)

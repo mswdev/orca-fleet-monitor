@@ -7,29 +7,41 @@
 // number or 'live' for the newest reading (fleet-binding.mjs trendOf). x is time, so as time passes
 // the whole line glides left and a minute already drawn keeps its shape. Values are 0..100.
 //
-// Gaps: two points further apart than GAP_MS had a minute with no reading between them, so the line
-// stops and starts again around it; a lone point between gaps is a dot (a zero-length segment with
-// round caps). A frame with fewer than two readings in all draws nothing: one dot alone reads as a
-// glitch, and the big figure beside the chart already shows that reading.
+// Gaps: where a whole minute had no reading, the line stops and starts again around it; a lone
+// point between gaps is a dot (a zero-length segment with round caps). A frame with fewer than two
+// readings in all draws nothing: one dot alone reads as a glitch, and the big figure beside the
+// chart already shows that reading.
 
-/** Points further apart than this (normally a minute) have a minute with no reading between them. */
+/** For points that do not say which minute they are in: further apart than this, a gap. */
 export const GAP_MS = 100_000
+const MINUTE_MS = 60_000
 
 const clamp = (value) => Math.min(100, Math.max(0, value))
 const fmt = (n) => (Math.round(n * 10) / 10).toString()
 const finite = (value) => typeof value === 'number' && Number.isFinite(value)
 const lerp = (a, b, k) => a + (b - a) * k
 
-/** A trend (trendOf) as a frame over the window that ends at `end`. */
-export function frameOf(trend, end, windowMs) {
+/** A trend (trendOf) as a frame over the window that ends at `end`. Each point keeps the number of
+ *  its minute (`slotMs` long), so a gap is a minute with no reading, however far apart the readings
+ *  either side of it fall. */
+export function frameOf(trend, end, windowMs, slotMs = MINUTE_MS) {
   const points = []
   for (const p of trend?.points ?? []) {
     if (!finite(p?.t) || !finite(p?.v)) continue
-    points.push({ key: p.key, t: p.t, v: clamp(p.v), lo: clamp(finite(p.lo) ? p.lo : p.v), hi: clamp(finite(p.hi) ? p.hi : p.v) })
+    const minute = finite(p.key) ? p.key : Math.floor(p.t / slotMs)
+    points.push({ key: p.key, minute, t: p.t, v: clamp(p.v), lo: clamp(finite(p.lo) ? p.lo : p.v), hi: clamp(finite(p.hi) ? p.hi : p.v) })
   }
   const live = trend?.live
-  if (live && finite(live.t) && finite(live.v)) points.push({ key: 'live', t: live.t, v: clamp(live.v), lo: clamp(live.v), hi: clamp(live.v) })
+  if (live && finite(live.t) && finite(live.v)) {
+    points.push({ key: 'live', minute: Math.floor(live.t / slotMs), t: live.t, v: clamp(live.v), lo: clamp(live.v), hi: clamp(live.v) })
+  }
   return { start: end - windowMs, end, count: finite(trend?.count) ? trend.count : points.length, points }
+}
+
+/** Whether a whole minute with no reading lies between two neighbouring points. */
+function gapBetween(a, b) {
+  if (finite(a.minute) && finite(b.minute)) return b.minute - a.minute > 1
+  return b.t - a.t > GAP_MS
 }
 
 /** y of a value in a box `h` tall with `pad` above and below. */
@@ -51,8 +63,8 @@ export function placeFrame(frame, w, h, pad = 0) {
   for (const p of frame.points) {
     const x = Math.min(w, ((p.t - frame.start) / span) * w)
     // Two points at one place (a frame in motion) would make a vertical step: the later one wins.
-    if (prev && x - prev.x < 0.05 && p.t - prev.t < GAP_MS) run.pop()
-    else if (prev && p.t - prev.t > GAP_MS) {
+    if (prev && x - prev.x < 0.05 && !gapBetween(prev, p)) run.pop()
+    else if (prev && gapBetween(prev, p)) {
       runs.push(run)
       run = []
     }
@@ -74,8 +86,18 @@ function linear(points, yKey = 'y') {
  * never leaves 0..100. Between two readings it can only run from one to the other.
  */
 export function monotone(points, yKey = 'y') {
+  if (points.length < 3) return linear(points, yKey)
+  return pathOf(points, segments(points, yKey))
+}
+
+/**
+ * The cubic segments of the monotone curve through `points`: for each, the y of its two ends and
+ * of its two control points (x runs evenly along a segment: its ends and the thirds between).
+ * Each tangent is at most three times the smaller neighbouring slope, which keeps every segment
+ * between the readings at its ends.
+ */
+function segments(points, yKey) {
   const n = points.length
-  if (n < 3) return linear(points, yKey)
   const dx = []
   const m = []
   for (let i = 0; i < n - 1; i += 1) {
@@ -92,13 +114,28 @@ export function monotone(points, yKey = 'y') {
     }
   }
   tangent.push(m[n - 2])
-  let d = `M${fmt(points[0].x)} ${fmt(points[0][yKey])}`
+  const out = []
   for (let i = 0; i < n - 1; i += 1) {
     const third = dx[i] / 3
-    const a = points[i]
-    const b = points[i + 1]
-    d += ` C${fmt(a.x + third)} ${fmt(a[yKey] + tangent[i] * third)} ${fmt(b.x - third)} ${fmt(b[yKey] - tangent[i + 1] * third)} ${fmt(b.x)} ${fmt(b[yKey])}`
+    const a = points[i][yKey]
+    const b = points[i + 1][yKey]
+    out.push([a, a + tangent[i] * third, b - tangent[i + 1] * third, b])
   }
+  return out
+}
+
+/** A path through `points` along `ys` (segments()), forwards or, with `back`, from the last point. */
+function pathOf(points, ys, back = false, lead = 'M') {
+  const n = points.length
+  const x = (i) => fmt(points[i].x)
+  const third = (i, k) => fmt(points[i].x + ((points[i + 1].x - points[i].x) * k) / 3)
+  if (!back) {
+    let d = `${lead}${x(0)} ${fmt(ys[0][0])}`
+    for (let i = 0; i < n - 1; i += 1) d += ` C${third(i, 1)} ${fmt(ys[i][1])} ${third(i, 2)} ${fmt(ys[i][2])} ${x(i + 1)} ${fmt(ys[i][3])}`
+    return d
+  }
+  let d = `${lead}${x(n - 1)} ${fmt(ys[n - 2][3])}`
+  for (let i = n - 2; i >= 0; i -= 1) d += ` C${third(i, 2)} ${fmt(ys[i][2])} ${third(i, 1)} ${fmt(ys[i][1])} ${x(i)} ${fmt(ys[i][0])}`
   return d
 }
 
@@ -117,13 +154,29 @@ export function areaPath(runs, base) {
     .join(' ')
 }
 
-/** The band from each minute's lowest reading to its highest. */
-export function rangePath(runs) {
+/**
+ * The band from each minute's lowest reading to its highest. Its edges follow the line's own curve,
+ * offset by the distance to each minute's highest and lowest reading (varying evenly between
+ * minutes), so the band never crosses itself or the line: lowest <= mean <= highest everywhere.
+ * Edges are kept inside the box `top`..`bottom`.
+ */
+export function rangePath(runs, top = Number.NEGATIVE_INFINITY, bottom = Number.POSITIVE_INFINITY) {
+  const keep = (y) => Math.min(bottom, Math.max(top, y))
   return runs
     .filter((run) => run.length > 1)
     .map((run) => {
-      const back = [...run].reverse()
-      return `${monotone(run, 'yHi')} ${monotone(back, 'yLo').replace(/^M/, 'L')} Z`
+      if (run.length === 2) {
+        const [a, b] = run
+        return `M${fmt(a.x)} ${fmt(a.yHi)} L${fmt(b.x)} ${fmt(b.yHi)} L${fmt(b.x)} ${fmt(b.yLo)} L${fmt(a.x)} ${fmt(a.yLo)} Z`
+      }
+      const mean = segments(run, 'y')
+      const edge = (key) =>
+        mean.map((ys, i) => {
+          const from = run[i][key] - run[i].y
+          const to = run[i + 1][key] - run[i + 1].y
+          return ys.map((y, k) => keep(y + from + ((to - from) * k) / 3))
+        })
+      return `${pathOf(run, edge('yHi'))} ${pathOf(run, edge('yLo'), true, 'L')} Z`
     })
     .join(' ')
 }

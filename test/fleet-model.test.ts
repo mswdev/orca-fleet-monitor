@@ -5,6 +5,7 @@ import { GAP_MS, frameOf, levelOf, levelStops, linePath, monotone, placeFrame, r
 import {
   chartRule,
   installCommand,
+  measuredCpu,
   INSTALL_SOURCE,
   levelFor,
   toFleet,
@@ -105,6 +106,23 @@ describe('history as per-minute trends', () => {
     assert.equal(trend.count, 0, 'the reading just before the window is not counted in it')
   })
 
+  test('a reading after the window\'s end (the clock stepped back) is left for later', () => {
+    const columns = { t: [NOW - 5_000, NOW + 5_000], cpu: [1, 100], mem: [] }
+    const trend = trendOf(columns, 'cpu', NOW)
+    assert.deepEqual([trend.count, trend.live], [1, null])
+    assert.deepEqual(windowStats(columns, 'cpu', NOW), { avg: 1, peak: 1, peakAt: NOW - 5_000 })
+  })
+
+  test('a machine measured now leaves its earlier load estimates out of the CPU chart', () => {
+    const columns = { t: [NOW - 90_000, NOW - 30_000, NOW - 1_000], cpu: [98, 10, 12], mem: [40, 40, 40], ce: [1, null, null] as (1 | null)[] }
+    assert.deepEqual(measuredCpu(columns), { t: [NOW - 30_000, NOW - 1_000], cpu: [10, 12], mem: [] })
+    const m = toFleet(view([machine({ history: columns, cpu: { percent: 12, source: 'beacon', perCore: [12], groups: null } })]), NOW).machines[0]!
+    assert.equal(m.cpu.stats?.peak, 12, 'the 98 % estimate is not its peak')
+    assert.deepEqual(m.cpu.trend.points.map((pt) => pt.v), [11], 'nor drawn: one minute of 10 and 12')
+    const basic = toFleet(view([machine({ tier: 'basic', history: columns, cpu: { percent: 97, source: 'load', perCore: null, groups: null } })]), NOW).machines[0]!
+    assert.equal(basic.cpu.stats?.peak, 98, 'a machine still estimated draws its estimates')
+  })
+
   test('average and peak come from the raw readings in the window, with when the peak was', () => {
     const times = [NOW - 40 * MIN, NOW - 20 * MIN, NOW - 10 * MIN, NOW - 1_000]
     assert.deepEqual(windowStats({ t: times, cpu: [100, 20, 60, 40], mem: [] }, 'cpu', NOW), { avg: 40, peak: 60, peakAt: NOW - 10 * MIN })
@@ -127,6 +145,7 @@ describe('chart rules: what each chart is coloured and banded by', () => {
     assert.deepEqual(chartRule('memory', { kind: 'pressure', reliable: true }, thresholds)?.map((r) => r.at), [70, 85, 92])
     assert.deepEqual(chartRule('memory', { kind: 'orca', reliable: true }, thresholds)?.map((r) => r.at), [70, 85, 92])
     assert.equal(chartRule('memory', { kind: 'unavailable', reliable: false }, thresholds), null)
+    assert.equal(chartRule('memory', { kind: 'used', reliable: true, stale: true }, thresholds), null, 'carried too long to be judged: one colour')
     assert.equal(chartRule('memory', { kind: 'orca', reliable: false }, thresholds), null)
   })
   test("a snapshot's thresholds reach the model, RAM in use's own included", () => {
@@ -481,6 +500,13 @@ describe('chart geometry', () => {
     assert.equal(linePath(runs), 'M0 5 L0 5 M50 5 L50 5 M100 5 L100 5')
   })
 
+  test('a whole minute with no reading breaks the line, however close the readings either side', () => {
+    // 00:59 and 02:01: 62 s apart, but minute 01 had no reading.
+    const trend = trendOf({ t: [NOW + 59_000, NOW + 121_000, NOW + 150_000], cpu: [40, 50, 55], mem: [] }, 'cpu', NOW + 180_000)
+    const runs = placeFrame(frameOf(trend, NOW + 180_000, 30 * MIN), 300, 96, 2)
+    assert.equal(runs.length, 2)
+  })
+
   test('fewer than two readings in all draws nothing', () => {
     assert.deepEqual(placeFrame(frame([[90, 42]], 1), 100, 28, 2), [])
     assert.deepEqual(placeFrame(frameOf({ points: [], live: null, count: 0 }, 100, 100), 100, 28, 2), [])
@@ -502,6 +528,27 @@ describe('chart geometry', () => {
       ;[x0, y0] = [x3, y3]
     }
     assert.ok(x0 > 0)
+  })
+
+  test('the range band never crosses itself or the line', () => {
+    const runs = placeFrame({ start: 0, end: 200, count: 3, points: [
+      { key: 1, t: 0, v: 50, lo: 0, hi: 100 },
+      { key: 2, t: 100, v: 50, lo: 50, hi: 50 },
+      { key: 3, t: 200, v: 70, lo: 70, hi: 70 }
+    ] } as Frame, 200, 100, 0)
+    const d = rangePath(runs, 0, 100)
+    // Forward along the highest readings, back along the lowest: sample both at the same x.
+    const [forward, back] = d.split(' L')
+    const curve = (path: string, reverse: boolean) => {
+      const n = path.replace(/[MCLZ]/g, ' ').trim().split(/\s+/).map(Number)
+      const segs: number[][] = []
+      for (let i = 2; i + 5 < n.length; i += 6) segs.push([n[i - 1]!, n[i + 1]!, n[i + 3]!, n[i + 5]!])
+      const ys = segs.map(([a, b, c, e]) => (k: number) => (1 - k) ** 3 * a + 3 * (1 - k) ** 2 * k * b + 3 * (1 - k) * k ** 2 * c + k ** 3 * e)
+      return reverse ? ys.reverse().map((f) => (k: number) => f(1 - k)) : ys
+    }
+    const hi = curve(forward!, false)
+    const lo = curve(`M${back}`, true)
+    for (let s = 0; s < hi.length; s += 1) for (let k = 0; k <= 1; k += 0.1) assert.ok(hi[s]!(k) <= lo[s]!(k) + 0.11, `highest above lowest (segment ${s}, ${k.toFixed(1)})`)
   })
 
   test("the range band runs along each minute's highest reading and back along its lowest", () => {
