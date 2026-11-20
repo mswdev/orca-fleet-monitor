@@ -587,7 +587,9 @@ describe('Fleet Monitor out of date on a machine', () => {
   test('its card carries a small red tag, and its label says why', () => {
     const v = mount(fleetOf('1.3.9'))
     const card = $(v.root, '[data-action="open"][data-id="env-a"]')!
-    assert.equal(text($(card, '.fm-tag--warn')!), 'Outdated')
+    assert.equal(text($(card, '.fm-tag--warn')!), 'Outdated Version')
+    const head = ($(card, '.fm-card-head')!.childNodes as FakeElement[]).map((n) => n.getAttribute('class'))
+    assert.ok(head.indexOf('fm-tag fm-tag--warn') < head.indexOf('fm-name'), 'left of the name, where the ticking time cannot move it')
     assert.match(card.getAttribute('aria-label') ?? '', /Fleet Monitor is out of date there\. Open details\.$/)
     assert.equal($(v.root, '[data-action="open"][data-id="local"] .fm-tag--warn'), null, 'not on the machine that is up to date')
   })

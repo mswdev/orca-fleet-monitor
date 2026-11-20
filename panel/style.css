@@ -364,18 +364,28 @@ body {
   border: 1px solid var(--fm-border);
   border-radius: 4px;
 }
-/* How long ago a card's newest reading came, beside its level: it ticks every second. */
+/* The right of a card's head: how long ago its newest reading came, then its level. */
+.fm-card-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.fm-card-status .fm-level {
+  margin-left: 0;
+}
+/* The time ticks every second, so it keeps one width ("just now", "3s ago", "12m ago" alike) and
+ * nothing beside it moves as it changes. */
 .fm-card-ago {
   flex: none;
-  margin-left: auto;
+  min-width: 8ch;
+  text-align: right;
   font-family: var(--fm-mono);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   color: var(--fm-muted-fg);
-}
-.fm-card-ago + .fm-level {
-  margin-left: 0;
 }
 /* Fleet Monitor out of date on that machine: the tag in the critical colour. */
 .fm-tag--warn {
