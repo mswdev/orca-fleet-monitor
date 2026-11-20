@@ -354,6 +354,18 @@ describe('Overview | Activity', () => {
   })
 })
 
+describe('Fleet Monitor out of date here, on the Activity tab', () => {
+  test('the warning and its command stay on Activity too', async () => {
+    const newer = { ...local(), id: 'env-new', kind: 'remote', name: 'Newer Box', beacon: { state: 'fresh', ageMs: 1_000, seq: 9, pluginKey: 'local.fleet-monitor', remotePlugin: 'running', version: '1.5.0' } } as MachineView
+    const v = mount(viewOf([local(), newer], { cli: { path: '/x/orca', source: 'bundled', error: null, version: '1.4.0', pluginKey: 'mswdev.fleet-monitor' } as never }))
+    await activity(v, 'local')
+    const warn = $(v.root, '[data-key="version-warn"]')!
+    assert.ok(warn, 'shown on Activity')
+    assert.match(text(warn), /This computer runs Fleet Monitor 1\.4\.0; Newer Box runs 1\.5\.0\./)
+    assert.equal($(warn, '[data-command]')!.textContent, 'orca plugin update mswdev.fleet-monitor --environment local')
+  })
+})
+
 describe('tiles', () => {
   test('network, disk, GPU and battery, each with its figure, its line and its slot', async () => {
     const v = mount(viewOf([local()]))

@@ -46,6 +46,25 @@ export function duration(seconds) {
 }
 
 /** "just now", "2s ago", "4m ago", "2h 14m ago", "3d 5h ago". */
+/** "just now", "12s ago", "5m ago", "3h ago", "2d ago": never longer than eight characters, for a
+ *  place that must keep one width as it ticks (a card's head). */
+export function agoShort(at, now = Date.now()) {
+  if (!finite(at)) return ''
+  const seconds = Math.max(0, Math.floor((now - at) / 1000))
+  if (seconds < 1) return 'just now'
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.min(999, Math.floor(hours / 24))}d ago`
+}
+
+/** A "since" template filled in: `{ago}` as ago() writes it, `{ago:short}` as agoShort() does. */
+export function fillAgo(template, at, now = Date.now()) {
+  return template.replace('{ago:short}', agoShort(at, now)).replace('{ago}', ago(at, now))
+}
+
 export function ago(at, now = Date.now()) {
   if (!finite(at)) return ''
   const seconds = Math.max(0, Math.floor((now - at) / 1000))

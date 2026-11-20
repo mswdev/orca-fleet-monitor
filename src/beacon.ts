@@ -55,7 +55,8 @@ type Wire = {
    *  cannot run the reader); an older reader takes that for "does not publish them", which is so. */
   pl?: 1 | 2
   /** The writer's Fleet Monitor version (1.4 and later), so a paired desktop can tell when the
-   *  machines run different ones. */
+   *  machines run different ones; empty when the writer could not read its own. Absent from a
+   *  writer older than 1.4. */
   fv?: string
 }
 
@@ -409,7 +410,9 @@ export function encodeBeacon(
     ...(sample.macMemory ? { mm: encodeMac(sample.macMemory) } : {}),
     ...encodeSystem(sample.system),
     ...(meta.processes === 'unavailable' ? { pl: 2 as const } : meta.processes ? { pl: 1 as const } : {}),
-    ...(isPluginVersion(meta.version) ? { fv: meta.version } : {})
+    // A writer that says nothing is older than 1.4; one that could not read its version says so
+    // with an empty string, so it is not taken for an older one.
+    ...('version' in meta ? { fv: isPluginVersion(meta.version) ? meta.version : '' } : {})
   }
   // Degrade in steps: per-core values (and the groups over them) first, then the network, disk,
   // GPU, battery and Windows memory figures, then long free-text fields. The Mac memory figures (about 200
@@ -506,7 +509,7 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
     // Only where a 1.2 beacon has them, so an older one decodes exactly as it always did.
     ...(system ? { system } : {}),
     ...(w.pl === 1 ? { publishesProcesses: true } : w.pl === 2 ? { cannotListProcesses: true } : {}),
-    ...(isPluginVersion(w.fv) ? { version: w.fv } : {}),
+    ...(isPluginVersion(w.fv) ? { version: w.fv } : typeof w.fv === 'string' ? { versionUnknown: true as const } : {}),
     loggedAt: loggedAt ?? t
   }
 }

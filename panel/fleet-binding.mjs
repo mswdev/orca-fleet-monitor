@@ -401,11 +401,17 @@ export function versionOf(value) {
 export function compareVersions(a, b) {
   const parse = (v) => {
     const [, major, minor, patch, pre] = SEMVER.exec(v)
-    return { core: [Number(major), Number(minor), Number(patch)], pre: pre ? pre.split('.') : [] }
+    return { core: [major, minor, patch], pre: pre ? pre.split('.') : [] }
   }
+  // Numbers as their digits, which have no leading zeros: longer is larger, else compare as text.
+  // Exact at any length, where Number() would round past 2^53.
+  const digits = (p, q) => (p.length !== q.length ? p.length - q.length : p < q ? -1 : p > q ? 1 : 0)
   const x = parse(a)
   const y = parse(b)
-  for (let i = 0; i < 3; i += 1) if (x.core[i] !== y.core[i]) return x.core[i] - y.core[i]
+  for (let i = 0; i < 3; i += 1) {
+    const d = digits(x.core[i], y.core[i])
+    if (d !== 0) return d
+  }
   // A release ranks above any of its prereleases.
   if (x.pre.length === 0 || y.pre.length === 0) return y.pre.length - x.pre.length
   for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i += 1) {
@@ -414,7 +420,7 @@ export function compareVersions(a, b) {
     if (p === q) continue
     const pn = /^\d+$/.test(p)
     const qn = /^\d+$/.test(q)
-    if (pn && qn) return Number(p) - Number(q)
+    if (pn && qn) return digits(p, q)
     if (pn !== qn) return pn ? -1 : 1
     return p < q ? -1 : 1
   }
@@ -425,20 +431,24 @@ export function compareVersions(a, b) {
 export const FIRST_VERSIONED = '1.4.0'
 
 /**
- * Which Fleet Monitor each machine runs, against the newest any of them runs: `version` (null for
- * one too old to say, which runs something before FIRST_VERSIONED), `outdated` when it is behind
- * the newest, `newest` and `newestOn` (the machine that runs it; this computer first). Machines not
- * running Fleet Monitor (basic tier, offline) have none.
+ * Which Fleet Monitor each machine runs, against the newest any of them runs: `version` (null when
+ * not known), `legacy` (one too old to say, which runs something before FIRST_VERSIONED),
+ * `outdated` when it is behind the newest, `newest` (as the machine running it gives it) and
+ * `newestOn` (that machine; this computer first). A machine whose version is not known (its
+ * beacon could not give one, or this computer's worker does not relay them) is never called out
+ * of date. Machines not running Fleet Monitor (basic tier, offline) have none.
  */
 function withParity(machines) {
   const running = machines.filter((m) => m.fleetMonitor)
   const known = running.filter((m) => m.fleetMonitor.version !== null)
-  let newest = null
-  for (const m of known) if (newest === null || compareVersions(m.fleetMonitor.version, newest) > 0) newest = m.fleetMonitor.version
-  const holder = newest === null ? null : (known.find((m) => m.local && compareVersions(m.fleetMonitor.version, newest) === 0) ?? known.find((m) => compareVersions(m.fleetMonitor.version, newest) === 0))
+  let top = null
+  for (const m of known) if (top === null || compareVersions(m.fleetMonitor.version, top) > 0) top = m.fleetMonitor.version
+  const ranksTop = (m) => compareVersions(m.fleetMonitor.version, top) === 0
+  const holder = top === null ? null : (known.find((m) => m.local && ranksTop(m)) ?? known.find(ranksTop))
+  const newest = holder ? holder.fleetMonitor.version : null
   for (const m of running) {
-    const v = m.fleetMonitor.version
-    const behind = newest !== null && (v === null ? compareVersions(FIRST_VERSIONED, newest) <= 0 : compareVersions(v, newest) < 0)
+    const { version, legacy } = m.fleetMonitor
+    const behind = newest !== null && (version !== null ? compareVersions(version, newest) < 0 : legacy && compareVersions(FIRST_VERSIONED, newest) <= 0)
     m.fleetMonitor = { ...m.fleetMonitor, outdated: behind, newest, newestOn: behind && holder ? holder.name : null }
   }
   return machines
@@ -616,23 +626,49 @@ const LOCAL_SELECTOR = 'local'
  * (`ambiguous`, worked out by toFleet); otherwise the environment id, which Orca also accepts, in
  * the `--environment=<id>` form. With neither, there is no command, only words.
  */
-/** The command that updates Fleet Monitor on a machine, typed on this computer: no --environment
- *  for this computer itself, else as installCommand names it; null where it cannot be named safely. */
+/** A paired machine's version as the worker relays it: a version; `legacy` for a beacon from
+ *  before 1.4 (it names none, which the worker says with null); unknown when the field is absent. */
+function remoteVersion(beacon) {
+  if (!beacon || !Object.hasOwn(beacon, 'version')) return { version: null, legacy: false }
+  if (beacon.version === null) return { version: null, legacy: true }
+  return { version: versionOf(beacon.version), legacy: false }
+}
+
+/** An installed key of Fleet Monitor (`<publisher>.fleet-monitor`), as Orca names installs. */
+const PLUGIN_KEY = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.fleet-monitor$/
+
+/**
+ * The command, typed on this computer, that updates Fleet Monitor on a machine: the key it is
+ * installed under there (from Git it is `<owner>.fleet-monitor`, from a folder `local.…`), and
+ * the machine named as installCommand names it, or `--environment local` for this computer, so a
+ * terminal set up for a paired server still updates this one. Null where either cannot be told
+ * safely: then the warning says what to do without a command.
+ */
 function updateCommand(machine, context) {
   const launcher = LAUNCHERS.includes(context.launcher) ? context.launcher : 'orca'
-  if (machine.kind === 'local') return `${launcher} plugin update ${INSTALL_SOURCE}`
-  const install = installCommand(machine, { launcher, ambiguous: context.ambiguous?.has(machine.id) })
-  return install ? install.replace(` plugin install ${INSTALL_SOURCE}`, ` plugin update ${INSTALL_SOURCE}`) : null
+  if (machine.kind === 'local') {
+    const key = typeof context.pluginKey === 'string' && PLUGIN_KEY.test(context.pluginKey) ? context.pluginKey : null
+    return key ? `${launcher} plugin update ${key} --environment local` : null
+  }
+  const key = typeof machine.beacon?.pluginKey === 'string' && PLUGIN_KEY.test(machine.beacon.pluginKey) ? machine.beacon.pluginKey : null
+  const target = environmentArg(machine, { ambiguous: context.ambiguous?.has(machine.id) })
+  return key && target ? `${launcher} plugin update ${key} ${target}` : null
+}
+
+/** `--environment "<name>"`, or `--environment=<id>` where the name is not safe or not unique;
+ *  null where neither can go into a command. */
+function environmentArg(machine, options = {}) {
+  const name = typeof machine?.name === 'string' ? machine.name : ''
+  const id = typeof machine?.id === 'string' ? machine.id : ''
+  if (safeMachineName(name) && !options.ambiguous && typedName(name) !== LOCAL_SELECTOR) return `--environment "${name}"`
+  if (SAFE_ID.test(id)) return `--environment=${id}`
+  return null
 }
 
 export function installCommand(machine, options = {}) {
-  const name = typeof machine?.name === 'string' ? machine.name : ''
-  const id = typeof machine?.id === 'string' ? machine.id : ''
   const launcher = LAUNCHERS.includes(options.launcher) ? options.launcher : 'orca'
-  const head = `${launcher} plugin install ${INSTALL_SOURCE}`
-  if (safeMachineName(name) && !options.ambiguous && typedName(name) !== LOCAL_SELECTOR) return `${head} --environment "${name}"`
-  if (SAFE_ID.test(id)) return `${head} --environment=${id}`
-  return null
+  const target = environmentArg(machine, options)
+  return target ? `${launcher} plugin install ${INSTALL_SOURCE} ${target}` : null
 }
 
 /** Ids of the paired machines whose name does not pick out only them in `--environment <name>`:
@@ -1006,6 +1042,8 @@ function toMachine(m, thresholds, now, context) {
     reasons: (online || lost) && Array.isArray(m.health?.reasons) ? m.health.reasons.filter((r) => typeof r === 'string' && r !== 'offline').map(plainText).slice(0, 4) : [],
     lost,
     updatedAt: seen.length > 0 ? Math.max(...seen) : null,
+    // The newest actual reading (CPU or memory) in its history; null before the first one.
+    readingAt: newestCpu || newestMem ? Math.max(newestCpu?.t ?? Number.NEGATIVE_INFINITY, newestMem?.t ?? Number.NEGATIVE_INFINITY) : null,
     lastSeenAt: finite(m.lastSeenAt) ? m.lastSeenAt : null,
     error: typeof m.error === 'string' && m.error ? plainText(m.error) : null,
     platform,
@@ -1057,10 +1095,10 @@ function toMachine(m, thresholds, now, context) {
     // beacon (one that names none is older than FIRST_VERSIONED). withParity() adds the rest.
     fleetMonitor: local
       ? context.version
-        ? { version: context.version, outdated: false, newest: null, newestOn: null, update: updateCommand(m, context) }
+        ? { version: context.version, legacy: false, outdated: false, newest: null, newestOn: null, update: updateCommand(m, context) }
         : null
       : online && !basic
-        ? { version: versionOf(m.beacon?.version), outdated: false, newest: null, newestOn: null, update: updateCommand(m, context) }
+        ? { ...remoteVersion(m.beacon), outdated: false, newest: null, newestOn: null, update: updateCommand(m, context) }
         : null,
     lastKnown: { cpuPct: newestCpu?.value ?? cpuPct, memPct: newestMem?.value ?? (memReliable ? memPct : null) },
     ...systemOf(m, history, now),
@@ -1096,7 +1134,8 @@ export function toFleet(view, now = Date.now()) {
   const launcher = LAUNCHERS.includes(view.cli?.launcher) ? view.cli.launcher : localPlatform === 'linux' ? 'orca-ide' : 'orca'
   const ambiguous = ambiguousNames(raw.filter((m) => m.kind !== 'local'))
   const version = versionOf(view.cli?.version)
-  const machines = withParity(raw.map((m) => toMachine(m, thresholds, now, { launcher, ambiguous, version })))
+  const pluginKey = typeof view.cli?.pluginKey === 'string' ? view.cli.pluginKey : null
+  const machines = withParity(raw.map((m) => toMachine(m, thresholds, now, { launcher, ambiguous, version, pluginKey })))
   const cliError = [view.cli?.error, view.cli?.runError].map((e) => (typeof e === 'string' && e ? plainText(e) : null)).find(Boolean) ?? null
   return {
     state: 'live',

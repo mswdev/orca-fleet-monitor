@@ -198,6 +198,8 @@ export type BeaconRecord = {
   cannotListProcesses?: boolean
   /** Its writer's Fleet Monitor version (1.4 and later); absent from older ones. */
   version?: string
+  /** Its writer is 1.4 or later but did not give a usable version: not to be taken for older. */
+  versionUnknown?: true
   /** When the remote Orca appended the log line (remote clock). */
   loggedAt: number
 }
@@ -388,8 +390,10 @@ export type BeaconState = {
   pluginKey: string | null
   /** What `orca plugin list` said about Fleet Monitor on that machine. */
   remotePlugin: 'running' | 'installed' | 'absent' | 'unknown'
-  /** The Fleet Monitor version its newest beacon names (1.4 and later); null when it names none
-   *  (an older one, or no beacon). This computer's is the panel's own (CliInfo.version). */
+  /** The Fleet Monitor version its newest beacon names (1.4 and later); null when that beacon
+   *  names none, so it was written by a Fleet Monitor older than 1.4. Absent when it is not known:
+   *  no beacon, one that could not give its version, or a worker older than 1.4 relaying it. This
+   *  computer's is the panel's own (CliInfo.version). */
   version?: string | null
 }
 
@@ -500,6 +504,9 @@ export type CliInfo = {
   canStar?: boolean
   /** This copy of Fleet Monitor's version (its manifest's), shown at the foot of the panel. */
   version?: string
+  /** This copy's installed plugin key (`<publisher>.fleet-monitor`), from where it is installed,
+   *  for the command that updates it; absent for a development folder or when it cannot be told. */
+  pluginKey?: string
 }
 
 /** The person's thresholds, so a panel can colour each metric and core the way health is judged.

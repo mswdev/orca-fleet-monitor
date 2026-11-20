@@ -614,6 +614,15 @@ describe('chart geometry', () => {
   })
 })
 
+describe('a card\'s age', () => {
+  test('stays within eight characters, so it keeps its width as it ticks', async () => {
+    const { agoShort, fillAgo } = await import('../panel/format.mjs')
+    const at = (ms: number) => agoShort(NOW - ms, NOW)
+    assert.deepEqual([at(0), at(12_000), at(59 * MIN), at(60 * MIN), at(25 * 3_600_000), at(5_000 * 86_400_000)], ['just now', '12s ago', '59m ago', '1h ago', '1d ago', '999d ago'])
+    assert.equal(fillAgo('Updated {ago} · {ago:short}', NOW - 61 * MIN, NOW), 'Updated 1h 1m ago · 1h ago')
+  })
+})
+
 describe('text', () => {
   test('numbers and sizes as the design writes them', () => {
     assert.deepEqual([pct(17.6), pct(null), gb(34.6 * GIB), gb(64 * GIB), size(6.4 * GIB), size(512 * 2 ** 20)], ['18', '–', '34.6', '64', '6.4 GB', '512 MB'])
@@ -638,20 +647,54 @@ describe('Fleet Monitor versions across the fleet', () => {
     const order = ['1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta', '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0', '1.3.1', '1.4.0', '1.10.0']
     for (let i = 1; i < order.length; i += 1) assert.ok(compareVersions(order[i - 1]!, order[i]!) < 0, `${order[i - 1]} < ${order[i]}`)
     assert.equal(compareVersions('1.4.0+a', '1.4.0+b'), 0, 'build metadata does not rank')
+    assert.ok(compareVersions('9007199254740992.0.0', '9007199254740993.0.0') < 0, 'exact past 2^53')
+    assert.ok(compareVersions('1.4.0-rc.9007199254740992', '1.4.0-rc.9007199254740993') < 0)
   })
 
-  const versioned = (version: string | null, extra: Partial<MachineView> = {}) =>
-    machine({ id: `env-${version ?? 'old'}`, name: `Box ${version ?? 'old'}`, beacon: { state: 'fresh', ageMs: 1_000, seq: 1, pluginKey: 'local.fleet-monitor', remotePlugin: 'running', version }, ...extra })
+  const versioned = (version: string | null | undefined, extra: Partial<MachineView> = {}) =>
+    machine({
+      id: `env-${version ?? String(version)}`,
+      name: `Box ${version ?? String(version)}`,
+      beacon: { state: 'fresh', ageMs: 1_000, seq: 1, pluginKey: 'local.fleet-monitor', remotePlugin: 'running', ...(version === undefined ? {} : { version }) },
+      ...extra
+    })
   const fleetWith = (local: string | null, ...remotes: MachineView[]) =>
-    toFleet({ ...view([machine({ id: 'local', kind: 'local', name: 'This desk' }), ...remotes]), cli: { path: '/x/orca', source: 'bundled', error: null, ...(local ? { version: local } : {}) } }, NOW).machines
+    toFleet(
+      { ...view([machine({ id: 'local', kind: 'local', name: 'This desk' }), ...remotes]), cli: { path: '/x/orca', source: 'bundled', error: null, pluginKey: 'mswdev.fleet-monitor', ...(local ? { version: local } : {}) } },
+      NOW
+    ).machines
 
   test('a machine behind the newest one is out of date, and says where the newest runs', () => {
-    const [here, same, old, tooOld] = fleetWith('1.4.0', versioned('1.4.0'), versioned('1.3.9'), versioned(null))
-    assert.deepEqual(here!.fleetMonitor, { version: '1.4.0', outdated: false, newest: '1.4.0', newestOn: null, update: 'orca plugin update mswdev.fleet-monitor' })
+    const [here, same, old, tooOld, unknown] = fleetWith('1.4.0', versioned('1.4.0'), versioned('1.3.9'), versioned(null), versioned(undefined))
+    assert.deepEqual(here!.fleetMonitor, {
+      version: '1.4.0',
+      legacy: false,
+      outdated: false,
+      newest: '1.4.0',
+      newestOn: null,
+      update: 'orca plugin update mswdev.fleet-monitor --environment local'
+    })
     assert.equal(same!.fleetMonitor?.outdated, false)
     assert.deepEqual([old!.fleetMonitor?.outdated, old!.fleetMonitor?.newestOn], [true, 'This desk'])
-    assert.equal(old!.fleetMonitor?.update, 'orca plugin update mswdev.fleet-monitor --environment "Box 1.3.9"')
-    assert.deepEqual([tooOld!.fleetMonitor?.version, tooOld!.fleetMonitor?.outdated], [null, true], 'one too old to say is older than 1.4.0')
+    assert.equal(old!.fleetMonitor?.update, 'orca plugin update local.fleet-monitor --environment "Box 1.3.9"', 'the key it is installed under there')
+    assert.deepEqual([tooOld!.fleetMonitor?.version, tooOld!.fleetMonitor?.legacy, tooOld!.fleetMonitor?.outdated], [null, true, true], 'one too old to say is older than 1.4.0')
+    assert.deepEqual([unknown!.fleetMonitor?.legacy, unknown!.fleetMonitor?.outdated], [false, false], 'not known (an older worker relaying) is never called out of date')
+  })
+
+  test('no command where the installed key or the machine cannot be named safely', () => {
+    const [, odd] = fleetWith('1.4.0', versioned('1.3.9', { beacon: { state: 'fresh', ageMs: 1_000, seq: 1, pluginKey: '--evil.fleet-monitor', remotePlugin: 'running', version: '1.3.9' } }))
+    assert.equal(odd!.fleetMonitor?.update, null)
+    const here = toFleet({ ...view([machine({ id: 'local', kind: 'local', name: 'This desk' })]), cli: { path: '/x/orca', source: 'bundled', error: null, version: '1.4.0' } }, NOW).machines[0]!
+    assert.equal(here.fleetMonitor?.update, null, 'a development folder: no installed key')
+  })
+
+  test('the newest is named as the machine running it gives it', () => {
+    const machines = toFleet(
+      { ...view([machine({ id: 'env-r', name: 'Remote', beacon: { state: 'fresh', ageMs: 1, seq: 1, pluginKey: 'local.fleet-monitor', remotePlugin: 'running', version: '1.5.0+linux' } }), machine({ id: 'local', kind: 'local', name: 'This desk' }), versioned('1.4.0')]), cli: { path: '/x/orca', source: 'bundled', error: null, version: '1.5.0+mac' } },
+      NOW
+    ).machines
+    const behind = machines.find((m) => m.id === 'env-1.4.0')!
+    assert.deepEqual([behind.fleetMonitor?.newest, behind.fleetMonitor?.newestOn], ['1.5.0+mac', 'This desk'])
   })
 
   test('this computer can be the one behind; machines not running it have no version', () => {

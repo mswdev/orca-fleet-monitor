@@ -11,7 +11,8 @@ import type { StarSource } from './star.ts'
 import type { TopProcess } from './model.ts'
 import { cliLauncherName, type CliResolution, type CommandRunner } from './cli.ts'
 import type { CliInfo, LocalSample } from './model.ts'
-import { openOwnPanel, SHOW_COMMAND_ID } from './open-panel.ts'
+import { openOwnPanel, pluginKeyFromPath, SHOW_COMMAND_ID } from './open-panel.ts'
+import { isPluginKey } from './bounds.ts'
 import { FleetPoller, LOCAL_ID } from './poller.ts'
 import { readSettings, type FleetSettings } from './settings.ts'
 import { STATUS_BAR_ID, statusBarView, type StatusBarView } from './status-bar.ts'
@@ -123,6 +124,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
   const platform = deps.platform ?? process.platform
   const launcher = cliLauncherName(platform)
   let poller: FleetPoller | null = null
+  const ownKey = deps.workerFile ? pluginKeyFromPath(deps.workerFile, PLUGIN_ID) : null
+  const pluginKey = isPluginKey(ownKey, PLUGIN_ID) ? ownKey : null
   const cliInfo = (): CliInfo => ({
     path: cli.path,
     source: cli.source,
@@ -130,7 +133,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     runError: poller?.environmentError() ?? null,
     launcher,
     ...(safely(() => deps.star?.available() === true) ? { canStar: true } : {}),
-    ...(deps.version ? { version: deps.version } : {})
+    ...(deps.version ? { version: deps.version } : {}),
+    ...(pluginKey ? { pluginKey } : {})
   })
   const runner = deps.createRunner(() => cli.path)
 

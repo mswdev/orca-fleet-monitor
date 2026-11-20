@@ -132,6 +132,8 @@ export type MachineModel = {
   } | null
   /** Local clock: the newest reading of any kind. */
   updatedAt: number | null
+  /** The newest CPU or memory reading in its history (worker clock); null before the first. */
+  readingAt: number | null
   lastSeenAt: number | null
   error: string | null
   platform: string | null
@@ -190,7 +192,15 @@ export type MachineModel = {
    *  tier, offline). `version` is null for one older than FIRST_VERSIONED, which does not say;
    *  `newestOn` names a machine running `newest` when this one is behind; `update` is the command,
    *  typed on this computer, that updates it (null where it cannot be named safely). */
-  fleetMonitor: { version: string | null; outdated: boolean; newest: string | null; newestOn: string | null; update: string | null } | null
+  fleetMonitor: {
+    version: string | null
+    /** Too old to say: a Fleet Monitor before FIRST_VERSIONED. */
+    legacy: boolean
+    outdated: boolean
+    newest: string | null
+    newestOn: string | null
+    update: string | null
+  } | null
   lastKnown: { cpuPct: number | null; memPct: number | null }
   /** Network, disk, GPU and battery (1.2): each null unless the machine is online and is this Mac
    *  or a Mac running Fleet Monitor 1.2. Rates are bytes per second. */

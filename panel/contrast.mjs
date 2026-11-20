@@ -50,27 +50,55 @@ function makeResolver(doc) {
   }
 }
 
+/** The lowest contrast of `colour` against any of `surfaces` (unknown ones left out). */
+export function worstContrast(colour, surfaces) {
+  const known = surfaces.filter(Boolean)
+  return colour && known.length > 0 ? Math.min(...known.map((surface) => contrastRatio(colour, surface))) : 0
+}
+
+/** Of `candidates`, the one whose worst contrast against `surfaces` is highest. */
+export function bestOn(candidates, surfaces) {
+  let best = null
+  let score = -1
+  for (const colour of candidates.filter(Boolean)) {
+    const worst = worstContrast(colour, surfaces)
+    if (worst > score) {
+      best = colour
+      score = worst
+    }
+  }
+  return best
+}
+
 /**
  * Measures the live theme and sets or clears html[data-fm-contrast] (stronger health and data
- * colours) and html[data-fm-data] (`text`: data drawn in the text colour, where even the stronger
- * blue misses 3:1 on some surface it is drawn on). The data colour is never text, so its marks need
- * 3:1 (WCAG non-text contrast), against the card and page and against the muted tracks that bars
- * and meters fill.
+ * colours) and, where even the stronger blue misses 3:1 on some surface it is drawn on, an inline
+ * --fm-data (html[data-fm-data="theme"]): of the blue and the theme's own text colours, the one
+ * that stands out best on all of them, set inline so no theme rule can override it. The data colour
+ * is never text, so its marks need 3:1 (WCAG non-text contrast), against the card and page and the
+ * muted tracks that bars and meters fill.
  */
 export function applyHealthContrast(doc = document) {
   const html = doc.documentElement
   html.removeAttribute('data-fm-contrast')
   html.removeAttribute('data-fm-data')
+  html.style.removeProperty('--fm-data')
   const resolve = makeResolver(doc)
   const read = (name) => resolve(getComputedStyle(html).getPropertyValue(name).trim())
   const surfaces = [read('--fm-card'), read('--fm-bg')]
   const tracks = [...surfaces, read('--fm-muted')]
   const health = LEVELS.map((level) => read(`--fm-health-${level}`))
-  const dataFails = () => needsStrongerHealth([read('--fm-data')], tracks, MIN_GRAPHIC_CONTRAST)
+  const dataFails = () => worstContrast(read('--fm-data'), tracks) < MIN_GRAPHIC_CONTRAST
   if (needsStrongerHealth(health, surfaces) || dataFails()) {
     html.setAttribute('data-fm-contrast', 'more')
     // Checked again on the colour now in force: a theme can defeat the stronger blue too.
-    if (dataFails()) html.setAttribute('data-fm-data', 'text')
+    if (dataFails()) {
+      const best = bestOn([read('--fm-data'), read('--fm-card-fg'), read('--fm-fg'), read('--fm-muted-fg')], tracks)
+      if (best) {
+        html.style.setProperty('--fm-data', `rgb(${best.join(', ')})`)
+        html.setAttribute('data-fm-data', 'theme')
+      }
+    }
   }
   return html.getAttribute('data-fm-contrast') === 'more'
 }
