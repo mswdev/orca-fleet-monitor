@@ -15,7 +15,8 @@ export type SortKey = 'cpu' | 'memory' | 'energy' | 'name'
 
 /** `now`: the worker's clock, where the sparkline's window ends. */
 export type NetworkTile = { down: number | null; up: number | null; downTrend: Trend | null; upTrend: Trend | null; downPeak: number | null; upPeak: number | null; now: number }
-export type DiskTile = { usedBytes: number; totalBytes: number; readBps: number | null; writeBps: number | null }
+export type DiskVolume = { name: string; usedBytes: number; totalBytes: number; pct: number; main: boolean }
+export type DiskTile = { usedBytes: number | null; totalBytes: number | null; readBps: number | null; writeBps: number | null; volumes: DiskVolume[] }
 export type GpuTile = { pct: number; peak: number | null; avg: number | null; trend: Trend | null; now: number }
 export type BatteryTile = { pct: number; state: 'charging' | 'discharging' | 'charged' | 'not-charging'; minutes: number | null; watts: number | null }
 export type Tiles = { network: NetworkTile | null; disk: DiskTile | null; gpu: GpuTile | null; battery: BatteryTile | null }

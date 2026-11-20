@@ -21,10 +21,10 @@
 // to 50 ms, on a desktop with an RTX 4090 too, where `gpu` reads about 1,300 engine counters. The
 // GPU figure matched Windows' own counters and nvidia-smi under load there (50% against 50%).
 import { performance } from 'node:perf_hooks'
-import { diskSpaceOf, due, interfaceLabel, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
+import { diskSpaceOf, due, interfaceLabel, MAX_VOLUMES, realStatfs, SYSTEM_CADENCE, systemSnapshot, VOLUME_NAME_MAX, type Held, type StatFs } from './mac-system.ts'
 
 export { interfaceLabel }
-import type { BatteryReading, MacSystem, NetReading, WinMemory } from './model.ts'
+import type { BatteryReading, MacSystem, NetReading, WinMemory, VolumeReading } from './model.ts'
 import { PowerShellHost } from './win-host.ts'
 
 /** How long PowerShell has to answer one request. Long, because a slow answer costs nothing
@@ -123,6 +123,28 @@ export function parseBatteryAnswer(answer: unknown): BatteryReading | null {
   }
 }
 
+/**
+ * `vol`'s answer, [{ n, l, s, f }]: each fixed drive's root (`C:\`), label, size and the space
+ * available to this user, as volumes named as Explorer names them ("Data (D:)", or "C:" with no
+ * label), the system drive (`systemRoot`) first and marked main. Labels are a person's text:
+ * bounded, one line.
+ */
+export function parseVolAnswer(answer: unknown, systemRoot: string): VolumeReading[] {
+  if (!Array.isArray(answer)) return []
+  const out: VolumeReading[] = []
+  for (const row of answer.slice(0, MAX_VOLUMES)) {
+    if (!row || typeof row !== 'object') continue
+    const { n, l, s, f } = row as Record<string, unknown>
+    if (typeof n !== 'string' || !/^[A-Za-z]:\\$/.test(n)) continue
+    if (typeof s !== 'number' || !Number.isSafeInteger(s) || s <= 0 || typeof f !== 'number' || !Number.isSafeInteger(f) || f < 0 || f > s) continue
+    const letter = n.slice(0, 2).toUpperCase()
+    const label = typeof l === 'string' ? l.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, VOLUME_NAME_MAX - 5) : ''
+    const main = n.toUpperCase() === systemRoot.toUpperCase()
+    out.push({ name: label ? `${label} (${letter})` : letter, totalBytes: s, usedBytes: s - f, ...(main ? { main: true } : {}) })
+  }
+  return out.sort((a, b) => Number(b.main === true) - Number(a.main === true))
+}
+
 /** The root of the drive Windows is on (`SystemDrive`), `C:\` when the variable is not a drive. */
 export function systemDriveRoot(env: NodeJS.ProcessEnv): string {
   const key = Object.keys(env).find((k) => k.toUpperCase() === 'SYSTEMDRIVE')
@@ -159,6 +181,8 @@ export class WindowsSystemReader {
   private battery: Held<BatteryReading> | null = null
   private batteryTriedAt = Number.NEGATIVE_INFINITY
   private space: Held<{ total: number; used: number }> | null = null
+  private volumes: Held<VolumeReading[]> | null = null
+  private volumesTriedAt = Number.NEGATIVE_INFINITY
   private memory: Held<WinMemory> | null = null
   private spaceTriedAt = Number.NEGATIVE_INFINITY
   private running: Promise<void> | null = null
@@ -196,7 +220,7 @@ export class WindowsSystemReader {
   snapshot(): MacSystem | null {
     if (this.platform !== 'win32') return null
     const now = this.mono()
-    const system = systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, gpu: this.gpu, battery: this.battery }, now)
+    const system = systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery }, now)
     const memory = this.memory
     const age = memory ? Math.max(0, Math.round(now - memory.at)) : null
     if (!memory || age === null || age > WIN_MEMORY_MAX_AGE_MS) return system
@@ -215,7 +239,15 @@ export class WindowsSystemReader {
     if (heavy && due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs)) jobs.push(this.readGpu(now))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.readBattery(now))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
+    if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.readVolumes(now))
     await Promise.all(jobs)
+  }
+
+  /** Every fixed drive (parseVolAnswer), the system drive first. */
+  private async readVolumes(now: number): Promise<void> {
+    this.volumesTriedAt = now
+    const volumes = parseVolAnswer(await this.ask('vol'), this.spacePath)
+    if (volumes.length > 0) this.volumes = { value: volumes, at: now }
   }
 
   private async ask(command: string): Promise<unknown> {

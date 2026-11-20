@@ -33,7 +33,16 @@ function systemOf(id, scene) {
   if (id === 'mbp') {
     return {
       net: { iface: 'en0', rxBytesPerSec: s.down.at(-1) * MB, txBytesPerSec: s.up.at(-1) * MB },
-      disk: { totalBytes: 994e9, usedBytes: 412e9, readBytesPerSec: 2.1 * MB, writeBytesPerSec: 0.64 * MB },
+      disk: {
+        totalBytes: 994e9,
+        usedBytes: 412e9,
+        readBytesPerSec: 2.1 * MB,
+        writeBytesPerSec: 0.64 * MB,
+        volumes: [
+          { name: 'Macintosh HD', totalBytes: 994e9, usedBytes: 412e9, main: true },
+          { name: 'Backup', totalBytes: 2e12, usedBytes: 1.21e12 }
+        ]
+      },
       gpu: { percent: s.gpu.at(-1) },
       battery:
         scene === 'on-battery'
@@ -44,7 +53,17 @@ function systemOf(id, scene) {
   if (id === 'studio') {
     return {
       net: { iface: 'en0', rxBytesPerSec: s.down.at(-1) * MB, txBytesPerSec: s.up.at(-1) * MB },
-      disk: { totalBytes: 2e12, usedBytes: 1.42e12, readBytesPerSec: 184 * MB, writeBytesPerSec: 96 * MB },
+      disk: {
+        totalBytes: 2e12,
+        usedBytes: 1.42e12,
+        readBytesPerSec: 184 * MB,
+        writeBytesPerSec: 96 * MB,
+        volumes: [
+          { name: 'Macintosh HD', totalBytes: 2e12, usedBytes: 1.42e12, main: true },
+          { name: 'Media', totalBytes: 4e12, usedBytes: 3.1e12 },
+          { name: 'Scratch', totalBytes: 1e12, usedBytes: 0.93e12 }
+        ]
+      },
       gpu: { percent: s.gpu.at(-1) },
       battery: { present: false, percent: null, state: null, source: 'ac', minutesRemaining: null }
     }
@@ -52,7 +71,13 @@ function systemOf(id, scene) {
   if (id === 'mini') {
     return {
       net: { iface: 'en0', rxBytesPerSec: s.down.at(-1) * MB, txBytesPerSec: s.up.at(-1) * MB },
-      disk: { totalBytes: 916e9, usedBytes: 572e9, readBytesPerSec: 84 * MB, writeBytesPerSec: 212 * MB },
+      disk: {
+        totalBytes: 916e9,
+        usedBytes: 572e9,
+        readBytesPerSec: 84 * MB,
+        writeBytesPerSec: 212 * MB,
+        volumes: [{ name: 'Macintosh HD', totalBytes: 916e9, usedBytes: 572e9, main: true }]
+      },
       gpu: null,
       battery: { present: false, percent: null, state: null, source: 'ac', minutesRemaining: null }
     }

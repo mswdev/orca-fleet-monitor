@@ -21,6 +21,9 @@
 //          (System.Net.NetworkInformation)
 //   disk   cumulative bytes read and written over every physical disk: the raw values of the
 //          PhysicalDisk counters "Disk Read Bytes/sec" and "Disk Write Bytes/sec", instance _Total
+//   vol    each fixed drive that is ready (System.IO.DriveInfo, at most eight): its root, label,
+//          size and the space available to this user; never a network or removable drive, so
+//          a mapped share that has gone away cannot hold the answer up
 //   gpu    the busiest GPU's utilisation between this request and the one before, from the
 //          "GPU Engine" counters (Windows 10 1709 and later); null on the first request. A GPU
 //          has several engines (3D, copy, video decode, ...), each with one counter per process
@@ -60,7 +63,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { Timers } from './processes.ts'
 
 /** What the script answers to; anything else is answered `null`. */
-export const HOST_COMMANDS = ['mem', 'net', 'disk', 'gpu', 'bat', 'proc'] as const
+export const HOST_COMMANDS = ['mem', 'net', 'disk', 'vol', 'gpu', 'bat', 'proc'] as const
 
 /**
  * The script, as powershell.exe is given it after `-Command`. Three things it must never hold:
@@ -129,6 +132,19 @@ function FmDisk {
     $global:fmDisk = $null
     throw
   }
+}
+
+function FmVol {
+  $rows = New-Object System.Collections.ArrayList
+  foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+    if ($rows.Count -ge 8) { break }
+    if ($d.DriveType -ne [System.IO.DriveType]::Fixed) { continue }
+    try {
+      if (-not $d.IsReady) { continue }
+      [void]$rows.Add(@{ n = $d.Name; l = $d.VolumeLabel; s = $d.TotalSize; f = $d.AvailableFreeSpace })
+    } catch { }
+  }
+  FmJson @($rows)
 }
 
 function FmGpu {
@@ -228,6 +244,7 @@ while ($true) {
     switch ($line.Substring($at + 1)) {
       'net' { $r = FmNet }
       'disk' { $r = FmDisk }
+      'vol' { $r = FmVol }
       'mem' { $r = FmMem }
       'gpu' { $r = FmGpu }
       'bat' { $r = FmBat }

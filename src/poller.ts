@@ -186,6 +186,9 @@ type Slot = {
   logReadAt: number | null
   logPlannedAt: number | null
   latest: BeaconRecord | null
+  /** The plugin key `latest` was read from: the copy that wrote it, which the key being read
+   *  now need not be (the plugin list changed and the next copy's log is not read yet). */
+  latestKey: string | null
   tracker: BeaconTracker
   beaconFresh: boolean
   beaconAge: number | null
@@ -748,6 +751,7 @@ export class FleetPoller {
     }
     if (info.keys.length === 0) {
       slot.latest = null
+      slot.latestKey = null
       slot.beaconFresh = false
       slot.beaconAge = null
       slot.processes = null
@@ -800,6 +804,7 @@ export class FleetPoller {
     const wasFresh = slot.beaconFresh
     slot.tracker = assessed.tracker
     slot.latest = latest
+    slot.latestKey = latest ? key : null
     slot.beaconFresh = assessed.fresh
     slot.beaconAge = assessed.ageMs
     if (assessed.fresh) {
@@ -1095,6 +1100,7 @@ export class FleetPoller {
       logReadAt: null,
       logPlannedAt: null,
       latest: null,
+      latestKey: null,
       tracker: emptyTracker(),
       beaconFresh: false,
       beaconAge: null,
@@ -1154,7 +1160,9 @@ export class FleetPoller {
               latest: slot.latest,
               fresh: slot.beaconFresh,
               ageMs: slot.beaconAge,
-              pluginKey: slot.plugin?.keys[slot.keyIndex % Math.max(1, slot.plugin.keys.length)] ?? null,
+              // The copy whose beacon this is (its version, the key an update must name); the one
+              // being read now until a beacon has been read at all.
+              pluginKey: slot.latest ? slot.latestKey : (slot.plugin?.keys[slot.keyIndex % Math.max(1, slot.plugin.keys.length)] ?? null),
               remotePlugin: slot.plugin?.state ?? 'unknown',
               logRead: slot.logReadAt !== null,
               carriedMac: slot.carriedMac

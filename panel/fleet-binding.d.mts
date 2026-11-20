@@ -228,7 +228,12 @@ export type DiskModel = {
   ioAgeSec: number | null
   read: Series
   write: Series
+  /** Every local volume (1.4), the main one first; empty where they are not reported. */
+  volumes: VolumeModel[]
 }
+/** One local volume: its name as the machine shows it ("Macintosh HD", "/home", "Data (D:)"). */
+export type VolumeModel = { name: string; totalBytes: number; usedBytes: number; usedPct: number; main: boolean }
+export const MAX_VOLUMES: number
 export type GpuModel = { pct: number; ageSec: number | null } & Series
 export type BatteryModel = {
   /** False on a Mac without a battery: then only `source` means anything. */

@@ -366,6 +366,46 @@ describe('Fleet Monitor out of date here, on the Activity tab', () => {
   })
 })
 
+describe('which disk is which', () => {
+  const volumes = [
+    { name: 'Macintosh HD', totalBytes: 994e9, usedBytes: 412e9, main: true },
+    { name: 'Backup', totalBytes: 2e12, usedBytes: 1.9e12 }
+  ]
+  const withVolumes = (vols: typeof volumes) => local({ system: { ...SYSTEM, disk: { ...SYSTEM.disk!, volumes: vols } } })
+
+  test('one volume: the Disk tile is named after it', async () => {
+    const v = mount(viewOf([withVolumes([volumes[0]!])]))
+    await activity(v, 'local')
+    const disk = $(v.root, '[data-key="tile:disk"]')!
+    assert.equal(text($(disk, '.fm-metric-label')!), 'Disk· Macintosh HD')
+    assert.match(disk.getAttribute('aria-label') ?? '', /^Disk Macintosh HD: 41% used, 412 \/ 994 GB/)
+  })
+
+  test('several: one wide Disks tile after the others, a row per volume, each in its own tone', async () => {
+    const v = mount(viewOf([withVolumes(volumes)]))
+    await activity(v, 'local')
+    const tiles = ($(v.root, '.fm-tiles')!.childNodes as FakeElement[]).map((t) => t.getAttribute('data-key'))
+    assert.equal(tiles[tiles.length - 1], 'tile:disk', 'last, so the small tiles pair up')
+    const disks = $(v.root, '[data-key="tile:disk"]')!
+    assert.ok(disks.getAttribute('class')?.includes('fm-tile--wide'))
+    const rows = disks.querySelectorAll('.fm-vol').map((r) => [text($(r, '.fm-vol-label')!), text($(r, '.fm-vol-pct')!), text($(r, '.fm-vol-space')!), r.getAttribute('data-tone')])
+    assert.deepEqual(rows, [
+      ['Macintosh HD', '41%', '412 / 994 GB', 'ok'],
+      ['Backup', '95%', '1.9 / 2 TB', 'strained']
+    ])
+    assert.match(disks.getAttribute('aria-label') ?? '', /^Disks: Macintosh HD 41% used, 412 \/ 994 GB; Backup 95% used, 1\.9 \/ 2 TB/)
+    assert.match($(v.root, '.fm-tiles')!.getAttribute('aria-label') ?? '', /, disks$/)
+  })
+
+  test('volume names from another machine are text, never markup', async () => {
+    const hostile = '<img src=x onerror="globalThis.__xss=1">'
+    const v = mount(viewOf([withVolumes([volumes[0]!, { name: hostile, totalBytes: 1e12, usedBytes: 1e11 }])]))
+    await activity(v, 'local')
+    assert.equal(text($(v.root, '[data-key="vol:1"] .fm-vol-label')!), hostile)
+    assert.equal(v.root.querySelectorAll('img').length, 0)
+  })
+})
+
 describe('tiles', () => {
   test('network, disk, GPU and battery, each with its figure, its line and its slot', async () => {
     const v = mount(viewOf([local()]))

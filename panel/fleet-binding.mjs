@@ -940,7 +940,8 @@ function systemOf(m, history, now) {
           writeBytesPerSec: nonNegative(disk.writeBytesPerSec),
           ioAgeSec: ageSecOf(disk.ioAgeMs),
           read: seriesOf(history, 'dr', now),
-          write: seriesOf(history, 'dw', now)
+          write: seriesOf(history, 'dw', now),
+          volumes: volumesOf(disk.volumes)
         }
       : null,
     gpu: gpu ? { pct: Math.min(100, Math.max(0, gpu.percent)), ageSec: ageSecOf(gpu.ageMs), ...seriesOf(history, 'gpu', now) } : null,
@@ -956,6 +957,27 @@ function systemOf(m, history, now) {
         }
       : null
   }
+}
+
+/** The most volumes shown for a machine, and the longest name kept for one (src/mac-system.ts). */
+export const MAX_VOLUMES = 8
+const VOLUME_NAME_MAX = 40
+
+/** A machine's local volumes as the panel shows them: named as plain text on one line, sizes that
+ *  make sense, the main one first; at most MAX_VOLUMES. Empty where none are reported. */
+function volumesOf(raw) {
+  if (!Array.isArray(raw)) return []
+  const out = []
+  for (const v of raw.slice(0, MAX_VOLUMES)) {
+    if (!v || typeof v !== 'object') continue
+    const name = typeof v.name === 'string' ? cleanName(v.name).slice(0, VOLUME_NAME_MAX) : ''
+    const total = nonNegative(v.totalBytes)
+    const used = nonNegative(v.usedBytes)
+    if (!name || !total || used === null) continue
+    const usedBytes = Math.min(used, total)
+    out.push({ name, totalBytes: total, usedBytes, usedPct: (usedBytes / total) * 100, main: v.main === true })
+  }
+  return out.sort((a, b) => Number(b.main) - Number(a.main))
 }
 
 const PROCESS_STATES = ['full', 'top', 'waiting', 'unavailable']

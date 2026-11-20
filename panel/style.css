@@ -1729,6 +1729,73 @@ body {
   margin-right: 4px;
   color: var(--fm-tone);
 }
+/* The volume a Disk tile is about, after its label. */
+.fm-vol-name {
+  min-width: 0;
+  margin-left: 0.35em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fm-tile .fm-metric-label {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+/* Several volumes: one tile across the card, a row per volume. */
+.fm-tile--wide {
+  grid-column: 1 / -1;
+}
+.fm-disks {
+  gap: 8px;
+}
+.fm-disks-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.fm-vols {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fm-vol {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.fm-vol-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  column-gap: 10px;
+}
+.fm-vol-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.fm-vol-pct {
+  font-family: var(--fm-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fm-tone-text);
+}
+.fm-vol-space {
+  font-family: var(--fm-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--fm-muted-fg);
+}
+.fm-vol .fm-ws-bar > span {
+  background: var(--fm-tone);
+}
 /* A sparkline, or a bar with one line under it: 28 px either way. */
 .fm-tile-slot {
   display: flex;

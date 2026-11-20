@@ -70,6 +70,11 @@ export type NetReading = {
 /** The main volume's space (`statfs`) and every disk's traffic: on a Mac `ioreg`'s block storage
  *  statistics, as Activity Monitor's Disk tab sums them; on Linux `/proc/diskstats` over physical
  *  disks; on Windows the PhysicalDisk counters' total. */
+/** One of a machine's local volumes: a mounted filesystem (a Mac's volumes, Linux's mounts) or a
+ *  fixed drive (Windows), named as the machine shows it, with its size and what is used of it as
+ *  `df` counts. `main` marks the one the machine runs from (DiskReading's own figures). */
+export type VolumeReading = { name: string; totalBytes: number; usedBytes: number; main?: boolean }
+
 export type DiskReading = {
   /** The volume's size, and what is used of it: size minus what is available to this user, as
    *  `df` counts available. On a Mac that is the APFS container (space macOS could purge is not
@@ -84,6 +89,9 @@ export type DiskReading = {
   writeBytesPerSec: number | null
   /** How old the traffic figures are, in ms; they are read about every 20 s. */
   ioAgeMs?: number
+  /** Every local volume (1.4), the main one first; absent where they are not read. Traffic above
+   *  is over every disk together. */
+  volumes?: VolumeReading[]
 }
 
 /** The busiest GPU's utilisation. A Mac: `ioreg`'s "Device Utilization %" (Apple silicon and most
