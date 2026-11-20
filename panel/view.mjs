@@ -329,15 +329,14 @@ function card(m, now) {
   return h(
     'button',
     { ...props, class: 'fm-card' },
-    // Tags go before the name, so the ticking time never moves them; the time and the level stay
-    // together on the right, and wrap together to a line of their own when the head is too narrow.
+    // Tags follow the name, which gives way (an ellipsis) before they do. The time and the level
+    // stay together on the right at one width, so the ticking time never moves the name or tags,
+    // and wrap together to a line of their own when the head is too narrow.
     h(
       'span',
       { class: 'fm-card-head' },
       dot(m),
-      tag(m.tag),
-      outdatedTag(m),
-      h('span', { class: 'fm-name' }, m.name),
+      h('span', { class: 'fm-card-title' }, h('span', { class: 'fm-name' }, m.name), tag(m.tag), outdatedTag(m)),
       h('span', { class: 'fm-card-status' }, cardAgo(m, now), level(m.health, m.healthLabel, m.reasons))
     ),
     m.lost ? h('span', { class: 'fm-lost-line', data: { health: m.lost.level } }, m.lost.label, ' · ', lostNote('span', 'fm-lost-note', m, now)) : null,

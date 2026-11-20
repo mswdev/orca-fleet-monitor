@@ -42,7 +42,7 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 ### The overview
 
 - Each card shows how long ago its newest reading came, counting up every second, so you can see machines updating without opening them.
-- Tags such as **This Mac** sit before the machine's name, so the ticking time never moves them.
+- The ticking time keeps one width, so it never moves the machine's name or tags such as **This Mac** beside it.
 - The memory pressure word wraps in a narrow panel instead of pushing it sideways.
 
 ### Updating
