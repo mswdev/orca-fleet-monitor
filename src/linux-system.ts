@@ -32,7 +32,21 @@
 import { open, readdir, type FileHandle } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import { createRunBounded, type ExecFile } from './mac-memory.ts'
-import { diskSpaceOf, due, interfaceLabel, MAX_VOLUMES, readVolumes, realStatfs, SYSTEM_CADENCE, systemSnapshot, type Held, type StatFs } from './mac-system.ts'
+import {
+  diskSpaceOf,
+  due,
+  interfaceLabel,
+  MAX_VOLUMES,
+  readVolumes,
+  realStatfs,
+  realStatfsAsync,
+  SYSTEM_CADENCE,
+  systemSnapshot,
+  type Held,
+  type StatFs,
+  type StatFsAsync,
+  type VolumePlace
+} from './mac-system.ts'
 import type { BatteryReading, MacSystem, NetReading, VolumeReading } from './model.ts'
 
 export const PROC_NET_ROUTE_PATH = '/proc/net/route'
@@ -414,33 +428,62 @@ function isEntryName(name: string): boolean {
  *  (proc, tmpfs, overlay, squashfs of a snap) and FUSE ones are left out: statfs of a stale network
  *  mount can block. */
 const DISK_FS = new Set(['ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'zfs', 'f2fs', 'jfs', 'reiserfs', 'bcachefs', 'vfat', 'exfat', 'ntfs', 'ntfs3', 'hfsplus', 'apfs'])
-/** Mounts no one counts as a disk of theirs: the system's own, boot partitions, snaps, containers. */
-const SKIPPED_MOUNTS = ['/proc', '/sys', '/dev', '/run', '/boot', '/snap', '/var/snap', '/var/lib/docker', '/var/lib/containers', '/var/lib/kubelet']
+/** Mounts no one counts as a disk of theirs: the system's own, boot partitions, snaps, containers,
+ *  and the files a container is given by bind mounts (/etc/hostname, /etc/hosts). Disks a desktop
+ *  mounts for a person under /run/media are theirs, though the rest of /run is not. */
+const SKIPPED_MOUNTS = ['/proc', '/sys', '/dev', '/run', '/etc', '/boot', '/snap', '/var/snap', '/var/lib/docker', '/var/lib/containers', '/var/lib/kubelet']
+const PERSONAL_MOUNTS = ['/run/media/', '/media/', '/mnt/']
+
+function skippedMount(path: string): boolean {
+  if (PERSONAL_MOUNTS.some((p) => path.startsWith(p))) return false
+  return SKIPPED_MOUNTS.some((p) => path === p || path.startsWith(`${p}/`))
+}
 
 /** A path from /proc/self/mounts, where a space, tab, newline and backslash are octal escapes. */
 function unescapeMount(path: string): string {
   return path.replace(/\\([0-7]{3})/g, (_, code: string) => String.fromCharCode(parseInt(code, 8)))
 }
 
+/** Where `path` comes in LINUX_SPACE_PATHS: after them all when it is not one. */
+function spaceRank(path: string): number {
+  const i = (LINUX_SPACE_PATHS as readonly string[]).indexOf(path)
+  return i < 0 ? LINUX_SPACE_PATHS.length : i
+}
+
+/** A mount's name as a person knows it: a desktop's removable disk by its label (the last part of
+ *  /run/media/<user>/<label>, /media/<label>), anything else by where it is mounted. */
+function mountName(path: string): string {
+  if (PERSONAL_MOUNTS.slice(0, 2).some((p) => path.startsWith(p))) {
+    const last = path.split('/').filter(Boolean).pop()
+    if (last) return last
+  }
+  return path
+}
+
 /**
  * The volumes a person thinks of as this machine's disks, from /proc/self/mounts: each local
- * filesystem on a block device (not a loop device), once per device (a btrfs disk mounted at
- * several subvolumes is one disk), named by where it is mounted. The main one is the first of
+ * filesystem on a block device (not a loop device), and each ZFS pool, once per disk (a btrfs disk
+ * mounted at several subvolumes, a pool's datasets: one space), at the mount that names it best
+ * (one of LINUX_SPACE_PATHS, else the first listed). The main one is the first of
  * LINUX_SPACE_PATHS among them, else the first.
  */
-export function linuxVolumePlaces(text: unknown): { path: string; name: string; main?: boolean }[] {
+export function linuxVolumePlaces(text: unknown): VolumePlace[] {
   if (typeof text !== 'string') return []
-  const seen = new Set<string>()
-  const places: { path: string; name: string; main?: boolean }[] = []
+  const disks = new Map<string, string>()
+  let lines = 0
   for (const line of text.split('\n')) {
+    if ((lines += 1) > 4096) break
     const [device, rawPath, type] = line.split(' ')
-    if (!device || !rawPath || !type || !device.startsWith('/dev/') || /^\/dev\/(loop|zram|ram)\d/.test(device) || !DISK_FS.has(type)) continue
+    if (!device || !rawPath || !type || !DISK_FS.has(type)) continue
+    const zfs = type === 'zfs'
+    if (!zfs && (!device.startsWith('/dev/') || /^\/dev\/(loop|zram|ram)\d/.test(device))) continue
     const path = unescapeMount(rawPath)
-    if (!path.startsWith('/') || SKIPPED_MOUNTS.some((p) => path === p || path.startsWith(`${p}/`)) || seen.has(device)) continue
-    seen.add(device)
-    places.push({ path, name: path })
-    if (places.length >= MAX_VOLUMES * 4) break
+    if (!path.startsWith('/') || skippedMount(path)) continue
+    const key = zfs ? `zfs:${device.split('/')[0]}` : device
+    const held = disks.get(key)
+    if (held === undefined || spaceRank(path) < spaceRank(held)) disks.set(key, path)
   }
+  const places: VolumePlace[] = [...disks.values()].map((path) => ({ path, name: mountName(path) }))
   const main = LINUX_SPACE_PATHS.map((p) => places.find((v) => v.path === p)).find(Boolean) ?? places[0]
   if (main) main.main = true
   return [...(main ? [main] : []), ...places.filter((v) => v !== main)]
@@ -455,6 +498,8 @@ export type LinuxSystemOptions = {
   exec?: ExecFile
   mono?: () => number
   statfs?: StatFs
+  /** For the list of disks: statfs off the worker's thread. */
+  statfsAsync?: StatFsAsync
   platform?: string
   heavyAllowed?: () => boolean
 }
@@ -489,6 +534,8 @@ export class LinuxSystemReader {
   private spaceTriedAt = Number.NEGATIVE_INFINITY
   private volumes: Held<VolumeReading[]> | null = null
   private volumesTriedAt = Number.NEGATIVE_INFINITY
+  private readonly statfsVolume: StatFsAsync
+  private readonly volumesPending = new Set<string>()
   private running: Promise<void> | null = null
   private runningSince = 0
   /** Parts whose last read has not returned. */
@@ -500,6 +547,8 @@ export class LinuxSystemReader {
     this.exec = options.exec ?? linuxSystemRunBounded
     this.mono = options.mono ?? (() => performance.now())
     this.statfs = options.statfs ?? realStatfs
+    const sync = options.statfs
+    this.statfsVolume = options.statfsAsync ?? (sync ? async (path) => sync(path) : realStatfsAsync)
     this.platform = options.platform ?? process.platform
     this.heavyAllowed = options.heavyAllowed ?? (() => true)
   }
@@ -555,8 +604,10 @@ export class LinuxSystemReader {
   /** Every local volume (linuxVolumePlaces), each with its space. */
   private async readVolumes(now: number): Promise<void> {
     this.volumesTriedAt = now
-    const volumes = readVolumes(linuxVolumePlaces(await this.file(PROC_MOUNTS_PATH)), this.statfs)
-    if (volumes.length > 0) this.volumes = { value: volumes, at: now }
+    const mounts = await this.file(PROC_MOUNTS_PATH)
+    // Kept as it was only when the list could not be read: a disk taken out goes at once.
+    if (mounts === null) return
+    this.volumes = { value: await readVolumes(linuxVolumePlaces(mounts), this.statfsVolume, this.volumesPending), at: now }
   }
 
   private heavy(): boolean {

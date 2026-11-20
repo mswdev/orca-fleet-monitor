@@ -21,9 +21,10 @@
 //          (System.Net.NetworkInformation)
 //   disk   cumulative bytes read and written over every physical disk: the raw values of the
 //          PhysicalDisk counters "Disk Read Bytes/sec" and "Disk Write Bytes/sec", instance _Total
-//   vol    each fixed drive that is ready (System.IO.DriveInfo, at most eight): its root, label,
-//          size and the space available to this user; never a network or removable drive, so
-//          a mapped share that has gone away cannot hold the answer up
+//   vol    each local fixed volume that is mounted, at a drive letter or in a folder (CIM's
+//          Win32_Volume, DriveType 3; System.IO.DriveInfo's fixed drives where CIM cannot answer),
+//          at most 32: where it is mounted, its label, its size and the space free on it; never a
+//          network or removable drive, so a mapped share that has gone away cannot hold it up
 //   gpu    the busiest GPU's utilisation between this request and the one before, from the
 //          "GPU Engine" counters (Windows 10 1709 and later); null on the first request. A GPU
 //          has several engines (3D, copy, video decode, ...), each with one counter per process
@@ -136,13 +137,26 @@ function FmDisk {
 
 function FmVol {
   $rows = New-Object System.Collections.ArrayList
-  foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
-    if ($rows.Count -ge 8) { break }
-    if ($d.DriveType -ne [System.IO.DriveType]::Fixed) { continue }
-    try {
-      if (-not $d.IsReady) { continue }
-      [void]$rows.Add(@{ n = $d.Name; l = $d.VolumeLabel; s = $d.TotalSize; f = $d.AvailableFreeSpace })
-    } catch { }
+  $vols = $null
+  try {
+    $vols = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType=3' -Property Name, Label, Capacity, FreeSpace -OperationTimeoutSec 5)
+  } catch { $vols = $null }
+  if ($null -ne $vols -and $vols.Count -gt 0) {
+    foreach ($v in $vols) {
+      if ($rows.Count -ge 32) { break }
+      if (-not $v.Name -or $v.Name.StartsWith('\\?\')) { continue }
+      if ($null -eq $v.Capacity -or $null -eq $v.FreeSpace) { continue }
+      [void]$rows.Add(@{ n = $v.Name; l = $v.Label; s = [long]$v.Capacity; f = [long]$v.FreeSpace })
+    }
+  } else {
+    foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+      if ($rows.Count -ge 32) { break }
+      if ($d.DriveType -ne [System.IO.DriveType]::Fixed) { continue }
+      try {
+        if (-not $d.IsReady) { continue }
+        [void]$rows.Add(@{ n = $d.Name; l = $d.VolumeLabel; s = $d.TotalSize; f = $d.AvailableFreeSpace })
+      } catch { }
+    }
   }
   FmJson @($rows)
 }

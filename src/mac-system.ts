@@ -23,6 +23,7 @@ import { statfsSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { createRunBounded, type ExecFile } from './mac-memory.ts'
 import { readdirSync, readlinkSync } from 'node:fs'
+import { statfs as statfsAsync } from 'node:fs/promises'
 import type { BatteryReading, DiskReading, GpuReading, MacSystem, NetReading, VolumeReading } from './model.ts'
 
 export const NETSTAT_PATH = '/usr/sbin/netstat'
@@ -222,52 +223,97 @@ export function volumeOf(name: string, s: { bsize: number; blocks: number; bavai
   return { name: name.slice(0, VOLUME_NAME_MAX), totalBytes: space.total, usedBytes: space.used, ...(main ? { main: true } : {}) }
 }
 
-/** Reads each of `places` (at most MAX_VOLUMES) with `statfs`: the volumes that answer, main first. */
-export function readVolumes(places: readonly { path: string; name: string; main?: boolean }[], statfs: StatFs): VolumeReading[] {
-  const out: VolumeReading[] = []
-  for (const place of places.slice(0, MAX_VOLUMES)) {
-    let v: VolumeReading | null = null
-    try {
-      v = volumeOf(place.name, statfs(place.path), place.main === true)
-    } catch {
-      v = null
-    }
-    if (v) out.push(v)
+/** A place to read a disk's space at: where it is mounted, and its name. */
+export type VolumePlace = { path: string; name: string; main?: boolean }
+/** statfs that does not hold the worker while a disk answers (fs.promises.statfs). */
+export type StatFsAsync = (path: string) => Promise<{ bsize: number; blocks: number; bavail: number } | null>
+
+export const realStatfsAsync: StatFsAsync = async (path) => {
+  try {
+    const s = await statfsAsync(path)
+    return { bsize: Number(s.bsize), blocks: Number(s.blocks), bavail: Number(s.bavail) }
+  } catch {
+    return null
   }
+}
+
+/** How long one disk may take to say how full it is before this reading goes on without it. */
+export const VOLUME_DEADLINE_MS = 2_000
+
+/**
+ * Reads each of `places` (at most MAX_VOLUMES), side by side, off the worker's thread: the volumes
+ * that answer within VOLUME_DEADLINE_MS, main first. A disk still answering an earlier read (in
+ * `pending`; a drive spinning up, or one that has stopped answering) is not asked again, so one
+ * stuck disk never holds more than one of Node's file-system threads.
+ */
+export async function readVolumes(places: readonly VolumePlace[], statfs: StatFsAsync, pending: Set<string> = new Set(), deadlineMs = VOLUME_DEADLINE_MS): Promise<VolumeReading[]> {
+  const reads = places.slice(0, MAX_VOLUMES).map(async (place) => {
+    if (pending.has(place.path)) return null
+    pending.add(place.path)
+    const read = statfs(place.path)
+      .catch(() => null)
+      .finally(() => pending.delete(place.path))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), deadlineMs)
+      ;(timer as { unref?: () => void }).unref?.()
+    })
+    const s = await Promise.race([read, late])
+    clearTimeout(timer)
+    try {
+      return volumeOf(place.name, s, place.main === true)
+    } catch {
+      return null
+    }
+  })
+  const out = (await Promise.all(reads)).filter((v): v is VolumeReading => v !== null)
   return out.sort((a, b) => Number(b.main === true) - Number(a.main === true))
 }
 
 /** `mount`'s lines: `<device> on <path> (<type>, <option>, …)`. A path may hold spaces. */
-export function parseMacMounts(text: unknown): { path: string; options: string[] }[] {
+export function parseMacMounts(text: unknown): { device: string; path: string; options: string[] }[] {
   if (typeof text !== 'string') return []
-  const out: { path: string; options: string[] }[] = []
+  const out: { device: string; path: string; options: string[] }[] = []
   for (const line of text.split('\n')) {
-    const m = /^\S.*? on (\/.*) \(([^()]*)\)$/.exec(line.trim())
+    const m = /^(\S.*?) on (\/.*) \(([^()]*)\)$/.exec(line.trim())
     if (!m) continue
-    out.push({ path: m[1]!, options: m[2]!.split(',').map((o) => o.trim()) })
+    out.push({ device: m[1]!, path: m[2]!, options: m[3]!.split(',').map((o) => o.trim()) })
     if (out.length >= 256) break
   }
   return out
 }
 
+/** The disk an APFS volume lives on: its container (`/dev/disk5s2` → disk5), whose space every
+ *  volume in it shares; any other volume is a disk of its own. */
+function macDiskOf(mount: { device: string; options: string[] }): string {
+  const apfs = mount.options[0] === 'apfs' ? /^\/dev\/(disk\d+)s\d+(?:s\d+)?$/.exec(mount.device) : null
+  return apfs ? apfs[1]! : mount.device
+}
+
 /**
- * Which of a Mac's mounts are volumes a person thinks of as its disks: the Data volume (the start-up
- * disk, named `mainName`, "Macintosh HD"), then each local volume under /Volumes that Finder shows
- * (not `nobrowse`) and can be written to (not `read-only`: a mounted installer image, a recovery
- * volume). Network shares are not `local`, so a stale one is never asked about.
+ * Which of a Mac's mounts are disks a person thinks of as its own: the start-up disk (its Data
+ * volume, named `mainName`, "Macintosh HD"), then each local volume under /Volumes that Finder
+ * shows (not `nobrowse`) and can be written to (not `read-only`: a mounted installer image, a
+ * recovery volume). APFS volumes in one container share its space, so they are one disk, named
+ * after them all ("Media · Scratch") and read once; one in the start-up disk's container joins it.
+ * Network shares are not `local`, so a stale one is never asked about.
  */
-export function macVolumePlaces(mounts: readonly { path: string; options: string[] }[], mainName: string | null): { path: string; name: string; main?: boolean }[] {
-  const places: { path: string; name: string; main?: boolean }[] = []
+export function macVolumePlaces(mounts: readonly { device?: string; path: string; options: string[] }[], mainName: string | null): VolumePlace[] {
+  const groups = new Map<string, { path: string; names: string[]; main: boolean }>()
+  const disk = (m: { device?: string; path: string; options: string[] }) => macDiskOf({ device: m.device ?? m.path, options: m.options })
   const data = mounts.find((m) => m.path === SPACE_PATHS[0]) ?? mounts.find((m) => m.path === '/')
-  if (data) places.push({ path: data.path, name: mainName || 'Macintosh HD', main: true })
+  if (data) groups.set(disk(data), { path: data.path, names: [mainName || 'Macintosh HD'], main: true })
   for (const m of mounts) {
     if (!m.path.startsWith('/Volumes/')) continue
     if (!m.options.includes('local') || m.options.includes('nobrowse') || m.options.includes('read-only')) continue
     const name = m.path.slice('/Volumes/'.length)
     if (!name || name.includes('/') || name === mainName) continue
-    places.push({ path: m.path, name })
+    const key = disk(m)
+    const group = groups.get(key)
+    if (group) group.names.push(name)
+    else groups.set(key, { path: m.path, names: [name], main: false })
   }
-  return places
+  return [...groups.values()].map((g) => ({ path: g.path, name: g.names.join(' · '), ...(g.main ? { main: true } : {}) }))
 }
 
 /** The start-up disk's name as Finder shows it: the entry in /Volumes that links to `/`. */
@@ -371,14 +417,26 @@ export class MacSystemReader {
   private volumes: Held<VolumeReading[]> | null = null
   private volumesTriedAt = Number.NEGATIVE_INFINITY
   private readonly volumeName: () => string | null
+  private readonly statfsVolume: StatFsAsync
+  private readonly volumesPending = new Set<string>()
   private running: Promise<void> | null = null
 
   constructor(
-    options: { exec?: ExecFile; mono?: () => number; statfs?: StatFs; platform?: string; heavyAllowed?: () => boolean; volumeName?: () => string | null } = {}
+    options: {
+      exec?: ExecFile
+      mono?: () => number
+      statfs?: StatFs
+      statfsAsync?: StatFsAsync
+      platform?: string
+      heavyAllowed?: () => boolean
+      volumeName?: () => string | null
+    } = {}
   ) {
     this.exec = options.exec ?? systemRunBounded
     this.mono = options.mono ?? (() => performance.now())
     this.statfs = options.statfs ?? realStatfs
+    const sync = options.statfs
+    this.statfsVolume = options.statfsAsync ?? (sync ? async (path) => sync(path) : realStatfsAsync)
     this.platform = options.platform ?? process.platform
     this.heavyAllowed = options.heavyAllowed ?? (() => true)
     this.volumeName = options.volumeName ?? (() => macMainVolumeName())
@@ -425,8 +483,10 @@ export class MacSystemReader {
     } catch {
       name = null
     }
-    const volumes = readVolumes(macVolumePlaces(parseMacMounts(await this.run(MOUNT_PATH, [])), name), this.statfs)
-    if (volumes.length > 0) this.volumes = { value: volumes, at: now }
+    const listed = await this.run(MOUNT_PATH, [])
+    // Kept as it was only when the list could not be read: a disk taken out goes at once.
+    if (listed === null) return
+    this.volumes = { value: await readVolumes(macVolumePlaces(parseMacMounts(listed), name), this.statfsVolume, this.volumesPending), at: now }
   }
 
   private async run(file: string, args: readonly string[], maxBuffer = MAX_OUTPUT_BYTES): Promise<string | null> {

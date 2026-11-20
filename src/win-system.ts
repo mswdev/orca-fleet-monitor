@@ -123,26 +123,34 @@ export function parseBatteryAnswer(answer: unknown): BatteryReading | null {
   }
 }
 
+/** How many rows of `vol`'s answer are looked at: the host sends at most this many. */
+const VOL_ROWS_MAX = 32
+
 /**
- * `vol`'s answer, [{ n, l, s, f }]: each fixed drive's root (`C:\`), label, size and the space
- * available to this user, as volumes named as Explorer names them ("Data (D:)", or "C:" with no
- * label), the system drive (`systemRoot`) first and marked main. Labels are a person's text:
- * bounded, one line.
+ * `vol`'s answer, [{ n, l, s, f }]: each local fixed volume, where it is mounted (a drive root,
+ * `D:\`, or a folder, `C:\Mounts\Data\`), its label, size and free space, as volumes named as
+ * Explorer names them ("Data (D:)", "C:" with no label; a volume in a folder by its label, else
+ * its folder), the system drive (`systemRoot`) first and marked main, then at most MAX_VOLUMES.
+ * Labels and folders are a person's text: bounded, one line.
  */
 export function parseVolAnswer(answer: unknown, systemRoot: string): VolumeReading[] {
   if (!Array.isArray(answer)) return []
   const out: VolumeReading[] = []
-  for (const row of answer.slice(0, MAX_VOLUMES)) {
+  const oneLine = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim()
+  for (const row of answer.slice(0, VOL_ROWS_MAX)) {
     if (!row || typeof row !== 'object') continue
     const { n, l, s, f } = row as Record<string, unknown>
-    if (typeof n !== 'string' || !/^[A-Za-z]:\\$/.test(n)) continue
+    if (typeof n !== 'string' || n.length > 260 || !/^[A-Za-z]:\\(?:[^\\\u0000-\u001f][^\u0000-\u001f]*\\)?$/.test(n)) continue
     if (typeof s !== 'number' || !Number.isSafeInteger(s) || s <= 0 || typeof f !== 'number' || !Number.isSafeInteger(f) || f < 0 || f > s) continue
-    const letter = n.slice(0, 2).toUpperCase()
-    const label = typeof l === 'string' ? l.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, VOLUME_NAME_MAX - 5) : ''
+    const root = n.length === 3
+    const label = typeof l === 'string' ? oneLine(l) : ''
+    const where = root ? n.slice(0, 2).toUpperCase() : oneLine(n.slice(0, -1))
+    const name = root ? (label ? `${label.slice(0, VOLUME_NAME_MAX - 5)} (${where})` : where) : label || where
+    if (!name) continue
     const main = n.toUpperCase() === systemRoot.toUpperCase()
-    out.push({ name: label ? `${label} (${letter})` : letter, totalBytes: s, usedBytes: s - f, ...(main ? { main: true } : {}) })
+    out.push({ name: name.slice(0, VOLUME_NAME_MAX), totalBytes: s, usedBytes: s - f, ...(main ? { main: true } : {}) })
   }
-  return out.sort((a, b) => Number(b.main === true) - Number(a.main === true))
+  return out.sort((a, b) => Number(b.main === true) - Number(a.main === true)).slice(0, MAX_VOLUMES)
 }
 
 /** The root of the drive Windows is on (`SystemDrive`), `C:\` when the variable is not a drive. */
@@ -243,11 +251,13 @@ export class WindowsSystemReader {
     await Promise.all(jobs)
   }
 
-  /** Every fixed drive (parseVolAnswer), the system drive first. */
+  /** Every fixed volume (parseVolAnswer), the system drive first. Kept as it was only when the
+   *  host gave no list: a drive taken out goes at once. */
   private async readVolumes(now: number): Promise<void> {
     this.volumesTriedAt = now
-    const volumes = parseVolAnswer(await this.ask('vol'), this.spacePath)
-    if (volumes.length > 0) this.volumes = { value: volumes, at: now }
+    const answer = await this.ask('vol')
+    if (!Array.isArray(answer)) return
+    this.volumes = { value: parseVolAnswer(answer, this.spacePath), at: now }
   }
 
   private async ask(command: string): Promise<unknown> {

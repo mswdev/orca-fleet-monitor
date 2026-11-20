@@ -25,7 +25,7 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 
 ### Disks
 
-- The Activity tab shows how full each local disk is, by name. On a Mac these are the startup disk and the other volumes Finder shows that can be written to. On Linux they are the filesystems on the machine's own disks, once per disk, without boot partitions, snaps or container storage. On Windows they are the fixed drives, named as Explorer names them, such as `Data (D:)`. Network shares are never included.
+- The Activity tab shows how full each local disk is, by name. On a Mac these are the startup disk and the other volumes Finder shows that can be written to; APFS volumes that share one disk's space are one row. On Linux they are the filesystems on the machine's own disks and its ZFS pools, without boot partitions, snaps or container storage. On Windows they are the fixed drives, named as Explorer names them, such as `Data (D:)`, and fixed volumes mounted in a folder. Network shares are never included.
 - With one disk, the tile names it. With several, a wide **Disks** tile has a row for each, coloured busy from 90% full and strained from 95%. Read and write speed stays the total over every disk.
 
 ### Versions
@@ -45,4 +45,4 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 
 Run `orca plugin update mswdev.fleet-monitor` on each machine (`orca-ide` instead of `orca` on Linux) and approve when it asks. Disk names and versions need 1.4.0 both on the machine and on the computer showing it.
 
-801 tests.
+810 tests.

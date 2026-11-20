@@ -393,8 +393,26 @@ describe('which disk is which', () => {
       ['Macintosh HD', '41%', '412 / 994 GB', 'ok'],
       ['Backup', '95%', '1.9 / 2 TB', 'strained']
     ])
-    assert.match(disks.getAttribute('aria-label') ?? '', /^Disks: Macintosh HD 41% used, 412 \/ 994 GB; Backup 95% used, 1\.9 \/ 2 TB/)
+    // Each disk is a list item of its own to a screen reader, in a sentence.
+    assert.equal($(disks, 'ul')!.getAttribute('aria-hidden'), null)
+    assert.deepEqual(disks.querySelectorAll('.fm-vol .fm-sr').map(text), ['Macintosh HD: 41% used, 412 / 994 GB', 'Backup: 95% used, 1.9 / 2 TB'])
+    assert.match(disks.getAttribute('aria-label') ?? '', /^Disks(: |$)/)
     assert.match($(v.root, '.fm-tiles')!.getAttribute('aria-label') ?? '', /, disks$/)
+  })
+
+  test("a list without the start-up disk never labels another disk with the start-up disk's space", async () => {
+    const archive = { name: 'Archive', totalBytes: 2e12, usedBytes: 1.9e12 }
+    // The start-up disk did not answer this minute; the machine's own figures for it did.
+    const v = mount(viewOf([local({ system: { ...SYSTEM, disk: { ...SYSTEM.disk!, totalBytes: 100e9, usedBytes: 10e9, volumes: [archive] } } })]))
+    await activity(v, 'local')
+    const rows = $(v.root, '[data-key="tile:disk"]')!.querySelectorAll('.fm-vol').map((r) => [text($(r, '.fm-vol-label')!), text($(r, '.fm-vol-pct')!)])
+    assert.deepEqual(rows, [['Startup disk', '10%'], ['Archive', '95%']])
+    // No figures of its own either: the one disk it named, with its own space.
+    const w = mount(viewOf([local({ system: { ...SYSTEM, disk: { ...SYSTEM.disk!, totalBytes: null, usedBytes: null, volumes: [archive] } } })]))
+    await activity(w, 'local')
+    const tile = $(w.root, '[data-key="tile:disk"]')!
+    assert.equal(text($(tile, '.fm-metric-label')!), 'Disk· Archive')
+    assert.match(tile.getAttribute('aria-label') ?? '', /^Disk Archive: 95% used, 1\.9 \/ 2 TB/)
   })
 
   test('volume names from another machine are text, never markup', async () => {

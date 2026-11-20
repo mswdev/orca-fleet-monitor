@@ -7,5 +7,7 @@ export function luminance(rgb: Rgb): number
 export function contrastRatio(a: Rgb, b: Rgb): number
 export function needsStrongerHealth(health: (Rgb | null)[], surfaces: (Rgb | null)[], min?: number): boolean
 export function worstContrast(colour: Rgb | null, surfaces: (Rgb | null)[]): number
+/** Every grey, 0 to 255: candidates for bestOn. */
+export const GREYS: readonly (readonly [number, number, number])[]
 export function bestOn(candidates: (Rgb | null)[], surfaces: (Rgb | null)[]): Rgb | null
 export function applyHealthContrast(doc?: Document): boolean

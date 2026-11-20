@@ -40,8 +40,13 @@ describe('the script', () => {
     }
     assert.ok(HOST_SCRIPT.includes('[Console]::In.ReadLine()'))
     assert.equal(/Get-Process|Get-WmiObject|Win32_Process|CommandLine|MainWindowTitle|\.Path\b/i.test(HOST_SCRIPT), false, 'nothing that reads a path, a command line or a title')
-    // WMI is asked one thing, once: the names of the display adapters.
-    assert.deepEqual(HOST_SCRIPT.match(/Get-CimInstance[^|\n]*/g), ['Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID, InfFilename, Name -OperationTimeoutSec 5 '])
+    // WMI is asked two things, each with a time limit: the names of the display adapters, once, and
+    // the local fixed volumes (Win32_Volume, DriveType 3: never a network or removable one), once a
+    // minute, for the ones mounted in a folder that System.IO.DriveInfo cannot see.
+    assert.deepEqual(HOST_SCRIPT.match(/Get-CimInstance[^|\n]*/g), [
+      "Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType=3' -Property Name, Label, Capacity, FreeSpace -OperationTimeoutSec 5)",
+      'Get-CimInstance -ClassName Win32_VideoController -Property PNPDeviceID, InfFilename, Name -OperationTimeoutSec 5 '
+    ])
   })
 
   test('the flags: the script as plain text, never encoded', () => {

@@ -57,6 +57,10 @@ export function worstContrast(colour, surfaces) {
 }
 
 /** Of `candidates`, the one whose worst contrast against `surfaces` is highest. */
+/** Every grey, for bestOn: a grey between a light card and a dark track can stand out on both
+ *  where neither text colour does, and only a narrow band of them may. */
+export const GREYS = Object.freeze(Array.from({ length: 256 }, (_, v) => Object.freeze([v, v, v])))
+
 export function bestOn(candidates, surfaces) {
   let best = null
   let score = -1
@@ -93,10 +97,7 @@ export function applyHealthContrast(doc = document) {
     html.setAttribute('data-fm-contrast', 'more')
     // Checked again on the colour now in force: a theme can defeat the stronger blue too.
     if (dataFails()) {
-      // The theme's text colours, and a ladder of greys: a grey between a light card and a dark
-      // track can stand out on both where neither text colour does.
-      const greys = Array.from({ length: 33 }, (_, i) => Math.min(255, i * 8)).map((v) => [v, v, v])
-      const best = bestOn([read('--fm-data'), read('--fm-card-fg'), read('--fm-fg'), read('--fm-muted-fg'), ...greys], tracks)
+      const best = bestOn([read('--fm-data'), read('--fm-card-fg'), read('--fm-fg'), read('--fm-muted-fg'), ...GREYS], tracks)
       if (best) {
         html.style.setProperty('--fm-data', `rgb(${best.join(', ')})`)
         html.setAttribute('data-fm-data', 'theme')
