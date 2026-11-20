@@ -15,6 +15,10 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 - Lines are smoothed without ever rising above a reading, a dot marks the newest reading, and detail charts are taller.
 - A reading at an OK level is drawn in the same green as an OK machine's dot. Orca's theme accent is its text colour, so before this a healthy machine's charts, bars and dots were plain white in a dark theme and black in a light one. On a tinted theme where the green would be hard to see, the panel picks a colour that stands out.
 
+### Colours
+
+- Four new settings, **OK colour**, **Busy colour**, **Strained colour** and **Critical colour**, let you pick your own colour for each level, for example if you are colour-blind and cannot tell the green from the orange or red. Type a hex code such as `#0072b2` or a colour name such as `blue`. The panel changes as soon as you do, in light and dark themes alike, and leave one empty to keep Fleet Monitor's own.
+
 ### Motion
 
 - Charts glide to each new reading, and a detail chart rises from its baseline when it opens. Minutes are counted on the clock, so a minute already drawn never changes and the chart scrolls rather than redrawing.
@@ -45,4 +49,4 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 
 Run `orca plugin update mswdev.fleet-monitor` on each machine (`orca-ide` instead of `orca` on Linux) and approve when it asks. Disk names and versions need 1.4.0 both on the machine and on the computer showing it.
 
-810 tests.
+818 tests.

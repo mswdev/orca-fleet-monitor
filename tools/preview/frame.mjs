@@ -5,7 +5,9 @@
 // Query: state=live|empty|connecting|loading|error  theme=light|dark  machine=<id> (opens its
 // detail)  host=<token set> (pretend a user theme)  live=1 (moving data)  install=open (expands
 // the basic machine's install row)  pair=open (opens the pairing hint)  version=<x.y.z> (the
-// worker's version, at the foot)
+// worker's version, at the foot)  ok=, busy=, strained=, critical=<colour> (the colour settings,
+// such as ok=%230072b2 or critical=purple)
+import { applyColors, colorsOf, COLOR_SETTINGS } from '../../panel/colors.mjs'
 import { applyHealthContrast } from '../../panel/contrast.mjs'
 import { createFleetBinding, externalOpener } from '../../panel/fleet-binding.mjs'
 import { mountFleetView } from '../../panel/view.mjs'
@@ -60,6 +62,7 @@ if (host) {
   style.textContent = `:root{${Object.entries(host.tokens).map(([k, v]) => `--orca-${k}:${v}`).join(';')}}`
 }
 
+applyColors(colorsOf(Object.fromEntries(Object.entries(COLOR_SETTINGS).map(([level, key]) => [key, params.get(level)]))))
 applyHealthContrast()
 const { orca } = createFakeOrca({
   state: params.get('state') ?? 'live',
