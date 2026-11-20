@@ -427,34 +427,55 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* --- charts (chart-view.mjs) --------------------------------------------------------------------
+ * Each chart is an island: chart-view.mjs draws its inside. A chart without a rule is drawn in its
+ * metric's tone (currentColor); with one, each part of the line takes its level's colour from a
+ * gradient, so the stroke and fill come from attributes, never from here. */
+.fm-spark-box {
+  position: relative;
+  display: block;
+  height: 28px;
+}
 .fm-spark {
   display: block;
   width: 100%;
   height: 28px;
-  overflow: visible;
+  overflow: hidden;
   color: var(--fm-tone);
+  transition: color 400ms ease;
 }
-/* The zero line under a sparkline, across its whole width (see SPARK_RAIL in view.mjs). */
+/* The zero line under a sparkline, across its whole width: the time not yet seen. */
 .fm-spark-rail {
   fill: none;
   stroke: var(--fm-border);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
-.fm-area {
-  fill: currentColor;
-  fill-opacity: 0.12;
-}
-.fm-plot .fm-area {
-  fill-opacity: 0.14;
-}
 .fm-line {
   fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
+  stroke-width: 2;
   stroke-linejoin: round;
   stroke-linecap: round;
   vector-effect: non-scaling-stroke;
+}
+.fm-spark .fm-line {
+  stroke-width: 1.75;
+}
+/* The newest reading: a dot on the end of the line, ringed in the card's colour. */
+.fm-end {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: var(--fm-tone);
+  box-shadow: 0 0 0 2px var(--fm-card);
+  pointer-events: none;
+}
+.fm-end--sm {
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
 }
 
 /* Skeletons: loading, and a machine read for the first time. */
@@ -635,39 +656,182 @@ body {
   color: var(--fm-muted-fg);
 }
 .fm-chart {
-  display: flex;
-  gap: 6px;
-}
-.fm-yaxis {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  height: 72px;
-  font-family: var(--fm-mono);
-  font-size: 10px;
-  line-height: 1;
-  text-align: right;
-  color: var(--fm-muted-fg);
-}
-.fm-plot {
-  flex: 1 1 auto;
   min-width: 0;
 }
+/* With bands, their threshold figures sit in a gutter on the right. */
+.fm-chart--ruled {
+  padding-right: 20px;
+}
+.fm-plot {
+  position: relative;
+  height: 96px;
+}
 .fm-plot svg {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  height: 72px;
-  overflow: visible;
+  height: 100%;
+  overflow: hidden;
   color: var(--fm-tone);
+  transition: color 400ms ease;
 }
 .fm-gridline {
   stroke: var(--fm-border);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
-.fm-gridline--mid {
-  stroke-dasharray: 2 3;
+.fm-gridline--soft {
+  opacity: 0.55;
+}
+/* 100 and 50, inside the plot's left edge, haloed so a line passing through leaves them legible. */
+.fm-ylab {
+  position: absolute;
+  left: 2px;
+  margin-top: 2px;
+  font-family: var(--fm-mono);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fm-muted-fg);
+  text-shadow:
+    0 0 2px var(--fm-card),
+    0 0 2px var(--fm-card),
+    0 0 1px var(--fm-card);
+  pointer-events: none;
+}
+.fm-ylab + .fm-ylab {
+  margin-top: -11px;
+}
+/* A band per level above its threshold, the threshold a fine line in the level's colour. */
+.fm-bands {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.fm-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--fm-band) 45%, transparent);
+  background: color-mix(in srgb, var(--fm-band) 8%, transparent);
+}
+.fm-band[data-level='busy'] {
+  --fm-band: var(--fm-health-busy);
+}
+.fm-band[data-level='strained'] {
+  --fm-band: var(--fm-health-strained);
+}
+.fm-band[data-level='critical'] {
+  --fm-band: var(--fm-health-critical);
+}
+.fm-band-label {
+  position: absolute;
+  left: 100%;
+  bottom: 0;
+  margin-left: 5px;
+  transform: translateY(50%);
+  font-family: var(--fm-mono);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fm-muted-fg);
+}
+/* Each minute's lowest to highest reading, behind the line. */
+.fm-range {
+  fill-opacity: 0.18;
+}
+/* The window's peak: a ring where it was, its figure just above. */
+.fm-peak {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border: 1.5px solid var(--fm-tone);
+  border-radius: 50%;
+  background: var(--fm-card);
+  pointer-events: none;
+}
+.fm-peak-label {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  margin-bottom: 3px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-family: var(--fm-mono);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fm-muted-fg);
+}
+/* Reading one minute: the pointer or the arrow keys on the plot (a slider). */
+.fm-hit {
+  position: absolute;
+  inset: -4px 0;
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: pan-y;
+}
+.fm-hit:focus {
+  outline: none;
+}
+.fm-hit:focus-visible {
+  box-shadow: 0 0 0 2px var(--fm-ring);
+}
+.fm-xhair {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--fm-muted-fg);
+  opacity: 0.55;
+  pointer-events: none;
+}
+.fm-hdot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--fm-card);
+  pointer-events: none;
+}
+.fm-tip {
+  position: absolute;
+  top: -8px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 10px;
+  padding: 5px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: var(--fm-card-fg);
+  background: var(--fm-card);
+  border: 1px solid var(--fm-border);
+  border-radius: calc(var(--fm-radius) - 2px);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.18);
+  pointer-events: none;
+}
+.fm-tip-when,
+.fm-tip-range {
+  font-family: var(--fm-mono);
+  font-size: 10px;
+  color: var(--fm-muted-fg);
+}
+.fm-tip-val {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--fm-mono);
+  font-weight: 600;
+}
+.fm-tip-key {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
 }
 .fm-xaxis {
   display: flex;
@@ -727,6 +891,11 @@ body {
   border-radius: 1px;
 }
 .fm-core-fill {
+  height: 100%;
+  transform-origin: bottom;
+  transition:
+    transform 500ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 400ms ease;
   width: 100%;
   background: var(--fm-tone);
 }
@@ -1605,6 +1774,91 @@ body {
     transition: none;
   }
   .fm-proc-more {
+    animation: none;
+  }
+}
+
+/* --- motion --------------------------------------------------------------------------------------
+ * Charts glide to each new reading and figures count to it (chart-view.mjs, motion.mjs); the rest
+ * eases here: per-core bars and meters grow and shrink, colours change level smoothly, and a change
+ * of screen slides (view transitions, view.mjs changeScreen). All of it stops under reduced motion. */
+.fm-dot,
+.fm-level,
+.fm-big,
+.fm-pressure {
+  transition:
+    color 400ms ease,
+    background-color 400ms ease;
+}
+.fm-pips > span {
+  transition: opacity 400ms ease;
+}
+.fm-ws-bar > span {
+  transition:
+    width 500ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 400ms ease;
+}
+/* The header stays put while the screen under it slides; it cross-fades to the new one. */
+.fm-top {
+  view-transition-name: fm-top;
+}
+::view-transition-group(*),
+::view-transition-old(*),
+::view-transition-new(*) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+:root[data-fm-nav='forward']::view-transition-old(root) {
+  animation-name: fm-out-start;
+}
+:root[data-fm-nav='forward']::view-transition-new(root) {
+  animation-name: fm-in-end;
+}
+:root[data-fm-nav='back']::view-transition-old(root) {
+  animation-name: fm-out-end;
+}
+:root[data-fm-nav='back']::view-transition-new(root) {
+  animation-name: fm-in-start;
+}
+@keyframes fm-out-start {
+  to {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+@keyframes fm-in-end {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+@keyframes fm-out-end {
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+@keyframes fm-in-start {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fm-spark,
+  .fm-plot svg,
+  .fm-core-fill,
+  .fm-dot,
+  .fm-level,
+  .fm-big,
+  .fm-pressure,
+  .fm-pips > span,
+  .fm-ws-bar > span {
+    transition: none;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
     animation: none;
   }
 }

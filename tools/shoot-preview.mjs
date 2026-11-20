@@ -73,6 +73,8 @@ try {
       '--hide-scrollbars',
       '--no-first-run',
       '--no-default-browser-check',
+      // Charts glide and figures count in the panel; captures are of the settled panel.
+      '--force-prefers-reduced-motion',
       `--user-data-dir=${profile}`,
       `--window-size=${shot.size[0]},${shot.size[1]}`,
       `--force-device-scale-factor=${shot.scale}`,

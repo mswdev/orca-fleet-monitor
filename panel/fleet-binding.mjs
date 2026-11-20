@@ -389,9 +389,11 @@ export function externalOpener(orca) {
 /** The worker's defaults (src/health.ts), for a snapshot that carries no thresholds. */
 export const DEFAULT_THRESHOLDS = Object.freeze({
   cpu: Object.freeze({ busy: 70, strained: 85, critical: 95 }),
-  memory: Object.freeze({ busy: 75, strained: 88, critical: 95 })
+  memory: Object.freeze({ busy: 75, strained: 88, critical: 95 }),
+  /** RAM in use, as Activity Monitor counts it, at which a Mac counts as busy (src/health.ts). */
+  ramUsedBusy: 90
 })
-/** The charts show 30 one-minute points, as the design does. */
+/** The charts show the last 30 minutes, as the design does: 30 one-minute points. */
 export const HISTORY_SLOTS = 30
 export const SLOT_MS = 60_000
 export const TOP_WORKSPACES = 5
@@ -420,7 +422,8 @@ function readThresholds(raw) {
       .sort((a, b) => a - b)
     return { busy: values[0], strained: values[1], critical: values[2] }
   }
-  return { cpu: one(raw?.cpu, DEFAULT_THRESHOLDS.cpu), memory: one(raw?.memory, DEFAULT_THRESHOLDS.memory) }
+  const ram = raw && finite(raw.ramUsedBusy) ? Math.min(100, Math.max(1, raw.ramUsedBusy)) : DEFAULT_THRESHOLDS.ramUsedBusy
+  return { cpu: one(raw?.cpu, DEFAULT_THRESHOLDS.cpu), memory: one(raw?.memory, DEFAULT_THRESHOLDS.memory), ramUsedBusy: ram }
 }
 
 /** ok | busy | strained | critical for a percentage, as the worker judges health. */
@@ -433,51 +436,72 @@ export function levelFor(value, thresholds) {
 }
 
 /**
- * History columns as `slots` points, one per `slotMs`, ending at `end`: slot i holds the mean of
- * the readings in (end - (slots - i) * slotMs, end - (slots - 1 - i) * slotMs], or null where
- * there were none (a machine seen for 3 minutes fills only the last 3 slots). The last slot is
- * the newest reading itself, so the line ends where the big number is.
+ * A history column as the charts draw it. `points`: one per wall-clock minute that has readings,
+ * oldest first, at the mean time of its readings (`t`), with their mean (`v`), lowest (`lo`) and
+ * highest (`hi`); `key` is the minute's number, which never changes, so a chart can move a point
+ * rather than redraw it. Minutes count from the epoch, not from `end`: a minute already drawn keeps
+ * its figures as time passes and the chart glides left instead of re-sorting readings into new
+ * minutes. The minute under way is not a point; `live`, the newest reading itself, stands for it,
+ * so the line ends where the big number is. `count` is the readings in the window: a chart with
+ * fewer than two draws nothing. Points start one minute before the window, so a line enters from
+ * the left edge rather than starting short of it.
  */
-export function bucketHistory(columns, key, end, slots = HISTORY_SLOTS, slotMs = SLOT_MS) {
-  const sums = new Array(slots).fill(0)
-  const counts = new Array(slots).fill(0)
+export function trendOf(columns, key, end, windowMs = HISTORY_SLOTS * SLOT_MS, slotMs = SLOT_MS) {
   const times = Array.isArray(columns?.t) ? columns.t : []
   const values = Array.isArray(columns?.[key]) ? columns[key] : []
-  const start = end - slots * slotMs
-  let latest = null
-  let latestAt = Number.NEGATIVE_INFINITY
+  const from = end - windowMs - slotMs
+  const current = Math.floor(end / slotMs)
+  const minutes = new Map()
+  let live = null
+  let count = 0
   for (let i = 0; i < times.length; i += 1) {
     const t = times[i]
-    const value = values[i]
-    if (!finite(t) || !finite(value) || t <= start) continue
-    const slot = Math.min(slots - 1, Math.max(0, Math.ceil((t - start) / slotMs) - 1))
-    sums[slot] += value
-    counts[slot] += 1
-    if (t >= latestAt) {
-      latestAt = t
-      latest = value
+    const v = values[i]
+    if (!finite(t) || !finite(v) || t <= from) continue
+    if (t > end - windowMs) count += 1
+    if (live === null || t >= live.t) live = { t, v }
+    const minute = Math.floor(t / slotMs)
+    if (minute >= current) continue
+    const m = minutes.get(minute)
+    if (m) {
+      m.sumT += t
+      m.sum += v
+      m.n += 1
+      m.lo = Math.min(m.lo, v)
+      m.hi = Math.max(m.hi, v)
+    } else {
+      minutes.set(minute, { sumT: t, sum: v, n: 1, lo: v, hi: v })
     }
   }
-  const out = sums.map((sum, i) => (counts[i] > 0 ? sum / counts[i] : null))
-  if (counts[slots - 1] > 0 && latest !== null) out[slots - 1] = latest
-  return out
+  const points = [...minutes.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([minute, m]) => ({ key: minute, t: m.sumT / m.n, v: m.sum / m.n, lo: m.lo, hi: m.hi }))
+  // A newest reading no later than the last point is already that point (a minute of one reading).
+  const last = points[points.length - 1]
+  if (live && last && live.t <= last.t) live = null
+  return { points, live, count }
 }
 
-/** Average and peak of the raw readings in the window, or null when there are none. */
+/** Average and peak of the raw readings in the window, and when the peak was (its first time),
+ *  or null when there are none. */
 export function windowStats(columns, key, end, windowMs = HISTORY_SLOTS * SLOT_MS) {
   const times = Array.isArray(columns?.t) ? columns.t : []
   const values = Array.isArray(columns?.[key]) ? columns[key] : []
   let sum = 0
   let count = 0
   let peak = Number.NEGATIVE_INFINITY
+  let peakAt = null
   for (let i = 0; i < times.length; i += 1) {
     const value = values[i]
     if (!finite(times[i]) || !finite(value) || times[i] <= end - windowMs) continue
     sum += value
     count += 1
-    peak = Math.max(peak, value)
+    if (value > peak) {
+      peak = value
+      peakAt = times[i]
+    }
   }
-  return count > 0 ? { avg: sum / count, peak } : null
+  return count > 0 ? { avg: sum / count, peak, peakAt } : null
 }
 
 /** The newest reading in the columns, with its time. */
@@ -730,10 +754,29 @@ const nonNegative = (value) => (finite(value) && value >= 0 ? value : null)
 const BATTERY_STATES = ['charging', 'discharging', 'charged', 'not-charging']
 const POWER_SOURCES = ['ac', 'battery', 'ups']
 
-/** A history column as the charts take it: HISTORY_SLOTS one-minute means, and the window's
- *  average and peak. */
+/** A history column as the charts take it: its trend (trendOf) and the window's average and peak. */
 function seriesOf(history, key, now) {
-  return { history: bucketHistory(history, key, now), stats: windowStats(history, key, now) }
+  return { trend: trendOf(history, key, now), stats: windowStats(history, key, now) }
+}
+
+const ruleOf = (t) => [
+  { level: 'busy', at: t.busy },
+  { level: 'strained', at: t.strained },
+  { level: 'critical', at: t.critical }
+]
+
+/**
+ * The levels a chart colours its line by and draws as bands: the rule health judges the plotted
+ * figure by, lowest first, or null where the figure is not judged (a CPU estimate, memory that is
+ * unavailable or unreliable). RAM in use (a Mac's own reading) has one level of its own, busy at
+ * the person's "RAM used" setting: its strained and critical come from memory pressure, which is
+ * not what that chart plots. Pressure and Orca's figure are judged on the memory thresholds.
+ */
+export function chartRule(metric, model, thresholds) {
+  if (metric === 'cpu') return model.estimated ? null : ruleOf(thresholds.cpu)
+  if (!model.reliable || model.kind === 'unavailable') return null
+  if (model.kind === 'used') return [{ level: 'busy', at: thresholds.ramUsedBusy ?? DEFAULT_THRESHOLDS.ramUsedBusy }]
+  return ruleOf(thresholds.memory)
 }
 
 /**
@@ -884,8 +927,9 @@ function toMachine(m, thresholds, now, context) {
       pct: cpuPct,
       estimated,
       tone: estimated ? 'ok' : (levelOrNull(m.health?.cpu) ?? (cpuPct === null ? 'ok' : levelFor(cpuPct, thresholds.cpu))),
-      history: bucketHistory(history, 'cpu', now),
+      trend: trendOf(history, 'cpu', now),
       stats: windowStats(history, 'cpu', now),
+      rule: chartRule('cpu', { estimated }, thresholds),
       groups: online ? coreGroupsOf(m.cpu, thresholds) : null,
       // Too many to draw one by one: the view says so rather than leave the section out unsaid.
       coresHidden: online && perCoreCount > MAX_CORES_DRAWN ? perCoreCount : 0
@@ -903,8 +947,9 @@ function toMachine(m, thresholds, now, context) {
       usedBytes: memKind !== 'pressure' && memKind !== 'unavailable' && m.memory && finite(m.memory.used) ? m.memory.used : null,
       totalBytes: m.memory && finite(m.memory.total) ? m.memory.total : null,
       tone: levelOrNull(m.health?.memory) ?? (memReliable && memPct !== null ? levelFor(memPct, thresholds.memory) : 'ok'),
-      history: bucketHistory(history, memKey, now),
+      trend: trendOf(history, memKey, now),
       stats: windowStats(history, memKey, now),
+      rule: chartRule('memory', { kind: memKind, reliable: memReliable }, thresholds),
       mac,
       win: memKind === 'used' || memKind === 'pressure' || memKind === 'unavailable' ? null : winDetailOf(m, m.memory && finite(m.memory.total) ? m.memory.total : null),
       /** Memory pressure (100 − available) beside RAM in use, for a Mac's own reading. */

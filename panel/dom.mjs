@@ -34,6 +34,13 @@ export function s(tag, props, ...children) {
   return append(applyProps(document.createElementNS(SVG_NS, tag), props), children)
 }
 
+/**
+ * An island: an element whose inside belongs to code of its own (a chart), not to morphing. It is
+ * drawn empty, marked `data-island`, with what that code needs in this property; morph keeps the
+ * element, syncs its attributes, hands it the new value and leaves its children alone.
+ */
+export const ISLAND = Symbol('fm-island')
+
 /** The key that pairs an old node with its replacement in morph(). */
 function keyOf(node) {
   return node.nodeType === 1 ? node.getAttribute('data-key') : null
@@ -113,6 +120,10 @@ function morph(from, to) {
     return
   }
   syncAttributes(from, to)
+  if (from.nodeType === 1 && from.hasAttribute('data-island')) {
+    from[ISLAND] = to[ISLAND]
+    return
+  }
   morphChildren(from, [...to.childNodes])
 }
 

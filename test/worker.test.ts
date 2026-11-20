@@ -104,6 +104,7 @@ test('answers fleet.snapshot and fleet.heartbeat, and a heartbeat turns on fast 
   assert.equal(snap.machines[0]?.name, 'this-desktop')
   assert.equal(snap.cli.source, 'bundled')
   assert.deepEqual(snap.thresholds.cpu, { busy: 70, strained: 85, critical: 95 }, 'thresholds travel with the snapshot')
+  assert.equal(snap.thresholds.ramUsedBusy, 90, "and RAM in use's, which the memory chart bands")
   await t.settle()
   const beat = (await t.mounted.request('fleet.heartbeat')) as { ok: boolean; mode: string }
   assert.deepEqual([beat.ok, beat.mode], [true, 'fast'])

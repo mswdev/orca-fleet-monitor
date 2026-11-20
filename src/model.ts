@@ -490,8 +490,10 @@ export type CliInfo = {
   canStar?: boolean
 }
 
-/** The person's thresholds, so a panel can colour each metric and core the way health is judged. */
-export type FleetThresholds = { cpu: HealthThresholds; memory: HealthThresholds }
+/** The person's thresholds, so a panel can colour each metric and core the way health is judged.
+ *  `ramUsedBusy`: RAM in use (a Mac's own reading) at which it counts as busy; a panel that is not
+ *  sent it (an older worker) takes the default. */
+export type FleetThresholds = { cpu: HealthThresholds; memory: HealthThresholds; ramUsedBusy?: number }
 
 export type FleetSnapshot = {
   v: 1

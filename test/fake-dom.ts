@@ -97,7 +97,7 @@ export class FakeElement extends FakeNode {
   readonly namespaceURI: string | null
   private attrs = new Map<string, string>()
   value = ''
-  readonly style: Record<string, unknown> & { setProperty(name: string, value: string): void; getPropertyValue(name: string): string }
+  readonly style: Record<string, unknown> & { setProperty(name: string, value: string): void; getPropertyValue(name: string): string; removeProperty(name: string): string }
   readonly dataset: Record<string, string>
 
   constructor(doc: FakeDocument, tag: string, namespaceURI: string | null) {
@@ -120,6 +120,12 @@ export class FakeElement extends FakeNode {
         getPropertyValue(name: string) {
           return props.get(name) ?? ''
         },
+        removeProperty(name: string) {
+          const was = props.get(name) ?? ''
+          props.delete(name)
+          write()
+          return was
+        },
         _read(text: string) {
           props.clear()
           for (const part of text.split(';')) {
@@ -127,7 +133,7 @@ export class FakeElement extends FakeNode {
             if (at > 0) props.set(part.slice(0, at).trim(), part.slice(at + 1).trim())
           }
         }
-      } as Record<string, unknown> & { setProperty(name: string, value: string): void; getPropertyValue(name: string): string },
+      } as Record<string, unknown> & { setProperty(name: string, value: string): void; getPropertyValue(name: string): string; removeProperty(name: string): string },
       {
         set(target, key, value) {
           if (typeof key === 'string' && !(key in target)) {
@@ -143,6 +149,10 @@ export class FakeElement extends FakeNode {
       get: (_t, key) => (typeof key === 'string' ? (element.getAttribute(`data-${kebab(key)}`) ?? undefined) : undefined),
       set: (_t, key, value) => {
         if (typeof key === 'string') element.setAttribute(`data-${kebab(key)}`, String(value))
+        return true
+      },
+      deleteProperty: (_t, key) => {
+        if (typeof key === 'string') element.removeAttribute(`data-${kebab(key)}`)
         return true
       }
     })
