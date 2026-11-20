@@ -477,9 +477,13 @@ export function trendOf(columns, key, end, windowMs = HISTORY_SLOTS * SLOT_MS, s
   const points = [...minutes.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([minute, m]) => ({ key: minute, t: m.sumT / m.n, v: m.sum / m.n, lo: m.lo, hi: m.hi }))
-  // A newest reading no later than the last point is already that point (a minute of one reading).
+  // A newest reading no later than the last point is already that point (a minute of one reading):
+  // that point is marked as the newest reading instead.
   const last = points[points.length - 1]
-  if (live && last && live.t <= last.t) live = null
+  if (live && last && live.t <= last.t) {
+    live = null
+    last.newest = true
+  }
   return { points, live, count }
 }
 

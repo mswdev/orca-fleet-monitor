@@ -3,7 +3,7 @@ import type { ChartRule, ChartLevel, Trend } from './fleet-binding.mjs'
 
 /** A point of a frame: `key` is its minute's number, or 'live' for the newest reading; `minute`,
  *  when known, is the number of the minute it falls in (a gap is a minute with no reading). */
-export type FramePoint = { key: number | 'live'; minute?: number; t: number; v: number; lo: number; hi: number }
+export type FramePoint = { key: number | 'live'; minute?: number; newest?: true; t: number; v: number; lo: number; hi: number }
 /** What a chart shows: the window's ends (worker clock), the readings in it, and its points. */
 export type Frame = { start: number; end: number; count: number; points: FramePoint[] }
 export type PlacedPoint = FramePoint & { x: number; y: number; yLo: number; yHi: number }

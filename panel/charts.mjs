@@ -29,11 +29,13 @@ export function frameOf(trend, end, windowMs, slotMs = MINUTE_MS) {
   for (const p of trend?.points ?? []) {
     if (!finite(p?.t) || !finite(p?.v)) continue
     const minute = finite(p.key) ? p.key : Math.floor(p.t / slotMs)
-    points.push({ key: p.key, minute, t: p.t, v: clamp(p.v), lo: clamp(finite(p.lo) ? p.lo : p.v), hi: clamp(finite(p.hi) ? p.hi : p.v) })
+    const point = { key: p.key, minute, t: p.t, v: clamp(p.v), lo: clamp(finite(p.lo) ? p.lo : p.v), hi: clamp(finite(p.hi) ? p.hi : p.v) }
+    if (p.newest === true) point.newest = true
+    points.push(point)
   }
   const live = trend?.live
   if (live && finite(live.t) && finite(live.v)) {
-    points.push({ key: 'live', minute: Math.floor(live.t / slotMs), t: live.t, v: clamp(live.v), lo: clamp(live.v), hi: clamp(live.v) })
+    points.push({ key: 'live', minute: Math.floor(live.t / slotMs), t: live.t, v: clamp(live.v), lo: clamp(live.v), hi: clamp(live.v), newest: true })
   }
   return { start: end - windowMs, end, count: finite(trend?.count) ? trend.count : points.length, points }
 }
@@ -170,11 +172,15 @@ export function rangePath(runs, top = Number.NEGATIVE_INFINITY, bottom = Number.
         return `M${fmt(a.x)} ${fmt(a.yHi)} L${fmt(b.x)} ${fmt(b.yHi)} L${fmt(b.x)} ${fmt(b.yLo)} L${fmt(a.x)} ${fmt(a.yLo)} Z`
       }
       const mean = segments(run, 'y')
+      // Each edge also stays within the readings either side of it: the highest edge never rises
+      // above the higher of two minutes' highest readings, nor the lowest sinks below the lower of
+      // their lowest. The line lies within both bounds, so the order holds.
       const edge = (key) =>
         mean.map((ys, i) => {
           const from = run[i][key] - run[i].y
           const to = run[i + 1][key] - run[i + 1].y
-          return ys.map((y, k) => keep(y + from + ((to - from) * k) / 3))
+          const bound = key === 'yHi' ? (y) => Math.max(y, Math.min(run[i].yHi, run[i + 1].yHi)) : (y) => Math.min(y, Math.max(run[i].yLo, run[i + 1].yLo))
+          return ys.map((y, k) => keep(bound(y + from + ((to - from) * k) / 3)))
         })
       return `${pathOf(run, edge('yHi'))} ${pathOf(run, edge('yLo'), true, 'L')} Z`
     })
@@ -240,7 +246,9 @@ export function tweenFrame(from, to, k) {
   const keys = new Set(to.points.map((p) => p.key))
   const points = to.points.map((p) => {
     const q = before.get(p.key) ?? { t: p.t, ...(valueAt(from.points, p.t) ?? p) }
-    return { key: p.key, t: lerp(q.t, p.t, k), v: lerp(q.v, p.v, k), lo: lerp(q.lo, p.lo, k), hi: lerp(q.hi, p.hi, k) }
+    // Which minute a point is in, and whether it is the newest reading, hold through the move:
+    // a gap stays a gap while the chart glides.
+    return { ...p, t: lerp(q.t, p.t, k), v: lerp(q.v, p.v, k), lo: lerp(q.lo, p.lo, k), hi: lerp(q.hi, p.hi, k) }
   })
   for (const p of from.points) if (!keys.has(p.key)) points.push(p)
   points.sort((a, b) => a.t - b.t)
