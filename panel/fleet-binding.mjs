@@ -386,6 +386,12 @@ export function externalOpener(orca) {
 
 // --- From the live model to the design's FLEET shape ------------------------------------------
 
+/** The version the worker says it is (its manifest's), when it is a plain semantic version: the
+ *  foot of the panel shows it. Null from an older worker, which does not say. */
+export function versionOf(value) {
+  return typeof value === 'string' && value.length <= 32 && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value) ? value : null
+}
+
 /** The worker's defaults (src/health.ts), for a snapshot that carries no thresholds. */
 export const DEFAULT_THRESHOLDS = Object.freeze({
   cpu: Object.freeze({ busy: 70, strained: 85, critical: 95 }),
@@ -1005,6 +1011,7 @@ export function toFleet(view, now = Date.now()) {
       thresholds: readThresholds(null),
       cliError: null,
       canStar: false,
+      version: null,
       launcher: 'orca',
       omitted: 0,
       online: 0,
@@ -1026,6 +1033,7 @@ export function toFleet(view, now = Date.now()) {
     thresholds,
     cliError,
     canStar: view.cli?.canStar === true,
+    version: versionOf(view.cli?.version),
     launcher,
     omitted: finite(view.omitted) && view.omitted > 0 ? view.omitted : 0,
     online: machines.filter((m) => m.online).length,

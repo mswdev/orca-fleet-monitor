@@ -54,6 +54,8 @@ export type MonitorDeps = {
   workerFile?: string | null
   /** Worker commands the manifest declares; only those are registered. */
   declaredCommands?: readonly string[]
+  /** This copy's version (its manifest's), shown at the foot of the panel. */
+  version?: string | null
   /** This computer's platform; process.platform when not given. */
   platform?: string
   /** This computer's processes (src/processes.ts on a Mac, src/linux-processes.ts,
@@ -127,7 +129,8 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     error: cli.error,
     runError: poller?.environmentError() ?? null,
     launcher,
-    ...(safely(() => deps.star?.available() === true) ? { canStar: true } : {})
+    ...(safely(() => deps.star?.available() === true) ? { canStar: true } : {}),
+    ...(deps.version ? { version: deps.version } : {})
   })
   const runner = deps.createRunner(() => cli.path)
 

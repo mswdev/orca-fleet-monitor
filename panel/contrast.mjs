@@ -6,6 +6,7 @@
 
 export const LEVELS = ['ok', 'busy', 'strained', 'critical']
 export const MIN_TEXT_CONTRAST = 4.5
+export const MIN_GRAPHIC_CONTRAST = 3
 
 function channel(value) {
   const v = value / 255
@@ -58,6 +59,8 @@ export function applyHealthContrast(doc = document) {
   const read = (name) => resolve(styles.getPropertyValue(name).trim())
   const surfaces = [read('--fm-card'), read('--fm-bg')]
   const health = LEVELS.map((level) => read(`--fm-health-${level}`))
-  if (needsStrongerHealth(health, surfaces)) html.setAttribute('data-fm-contrast', 'more')
+  // The data colour is never text: drawn marks need 3:1 (WCAG non-text contrast).
+  const data = read('--fm-data')
+  if (needsStrongerHealth(health, surfaces) || needsStrongerHealth([data], surfaces, MIN_GRAPHIC_CONTRAST)) html.setAttribute('data-fm-contrast', 'more')
   return html.getAttribute('data-fm-contrast') === 'more'
 }

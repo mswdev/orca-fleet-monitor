@@ -493,6 +493,8 @@ export type CliInfo = {
   /** The GitHub CLI is installed on this computer, so the panel's "Star on GitHub" link can star
    *  the project when pressed (src/star.ts) and need not only open its page. */
   canStar?: boolean
+  /** This copy of Fleet Monitor's version (its manifest's), shown at the foot of the panel. */
+  version?: string
 }
 
 /** The person's thresholds, so a panel can colour each metric and core the way health is judged.

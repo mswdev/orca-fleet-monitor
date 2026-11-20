@@ -4,14 +4,30 @@
 //
 // Query: state=live|empty|connecting|loading|error  theme=light|dark  machine=<id> (opens its
 // detail)  host=<token set> (pretend a user theme)  live=1 (moving data)  install=open (expands
-// the basic machine's install row)  pair=open (opens the pairing hint)
+// the basic machine's install row)  pair=open (opens the pairing hint)  version=<x.y.z> (the
+// worker's version, at the foot)
 import { applyHealthContrast } from '../../panel/contrast.mjs'
 import { createFleetBinding, externalOpener } from '../../panel/fleet-binding.mjs'
 import { mountFleetView } from '../../panel/view.mjs'
 import { createFakeOrca } from './fake-orca.mjs'
 
-/** Invented host themes, to see that a user's theme wins over the design's fallbacks. */
+/** Invented host themes, to see that a user's theme wins over the design's fallbacks. The two
+ *  `orca-*` ones are built the way Orca builds its own: primary is the text colour. */
 const HOST_THEMES = {
+  'orca-dark': {
+    scheme: 'dark',
+    tokens: {
+      background: '#171717', foreground: '#fafafa', card: '#1c1c1c', 'card-foreground': '#fafafa', muted: '#262626',
+      'muted-foreground': '#a3a3a3', accent: '#262626', primary: '#fafafa', 'primary-foreground': '#171717', border: '#2e2e2e', radius: '8px'
+    }
+  },
+  'orca-light': {
+    scheme: 'light',
+    tokens: {
+      background: '#fafafa', foreground: '#0a0a0a', card: '#ffffff', 'card-foreground': '#0a0a0a', muted: '#f5f5f5',
+      'muted-foreground': '#737373', accent: '#f5f5f5', primary: '#171717', 'primary-foreground': '#fafafa', border: '#e5e5e5', radius: '8px'
+    }
+  },
   slate: {
     scheme: 'dark',
     tokens: {
@@ -45,7 +61,12 @@ if (host) {
 }
 
 applyHealthContrast()
-const { orca } = createFakeOrca({ state: params.get('state') ?? 'live', live: params.get('live') === '1', external: params.get('external') !== '0' })
+const { orca } = createFakeOrca({
+  state: params.get('state') ?? 'live',
+  live: params.get('live') === '1',
+  external: params.get('external') !== '0',
+  version: params.get('version')
+})
 window.orca = orca
 const binding = createFleetBinding(orca)
 const view = mountFleetView(document.getElementById('app'), { binding, openExternal: externalOpener(orca) })
