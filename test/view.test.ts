@@ -254,6 +254,14 @@ describe('a machine', () => {
     assert.match($(v.root, '[data-key="cpu"] .fm-section-head')?.textContent ?? '', /300 cores/)
   })
 
+  test('an online card says how long ago its newest reading came, and the ticker keeps it current', () => {
+    const v = mount(viewOf([local(), machine()]))
+    const ago = $(v.root, '[data-action="open"][data-id="env-a"] .fm-card-ago')!
+    assert.equal(ago.textContent, '2s ago')
+    assert.equal(ago.getAttribute('data-since'), String(NOW - 2_000))
+    assert.equal(ago.getAttribute('aria-hidden'), 'true', 'the card\'s label is not rewritten every second')
+  })
+
   test("an offline card's label says when it was last seen on the worker clock, as its text does", () => {
     // The worker's clock runs an hour ahead of this frame's; it last saw the machine 61 minutes ago.
     const ahead = 3_600_000

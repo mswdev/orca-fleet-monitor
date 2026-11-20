@@ -364,6 +364,19 @@ body {
   border: 1px solid var(--fm-border);
   border-radius: 4px;
 }
+/* How long ago a card's newest reading came, beside its level: it ticks every second. */
+.fm-card-ago {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--fm-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--fm-muted-fg);
+}
+.fm-card-ago + .fm-level {
+  margin-left: 0;
+}
 /* Fleet Monitor out of date on that machine: the tag in the critical colour. */
 .fm-tag--warn {
   font-weight: 600;

@@ -106,6 +106,14 @@ function tag(text) {
   return text ? h('span', { class: 'fm-tag' }, text) : null
 }
 
+/** On a card, how long ago its newest reading came ("3s ago"), kept current by the one-second
+ *  ticker, so the overview shows each machine is updating without opening it. Visual only: the
+ *  card's label is not rewritten every second, and its detail says the same at the top. */
+function cardAgo(m, now) {
+  if (m.updatedAt === null) return null
+  return since('span', { class: 'fm-card-ago', title: 'When its newest reading came', 'aria-hidden': 'true' }, '{ago}', m.updatedAt, now)
+}
+
 /** On a card, a small red tag where the machine's Fleet Monitor is behind the newest one in the
  *  fleet; its detail says which and how to update. The card's label says it too. */
 function outdatedTag(m) {
@@ -318,7 +326,7 @@ function card(m, now) {
   return h(
     'button',
     { ...props, class: 'fm-card' },
-    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), outdatedTag(m), level(m.health, m.healthLabel, m.reasons)),
+    h('span', { class: 'fm-card-head' }, dot(m), h('span', { class: 'fm-name' }, m.name), tag(m.tag), outdatedTag(m), cardAgo(m, now), level(m.health, m.healthLabel, m.reasons)),
     m.lost ? h('span', { class: 'fm-lost-line', data: { health: m.lost.level } }, m.lost.label, ' · ', lostNote('span', 'fm-lost-note', m, now)) : null,
     h(
       'span',
