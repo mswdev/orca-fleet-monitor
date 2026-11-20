@@ -2,15 +2,17 @@
 // Activity tab shows them. Every value is invented.
 import { assert, describe, test } from 'orca/testing'
 import { decodeBeacon, encodeBeacon } from '../src/beacon.ts'
-import { linuxVolumePlaces } from '../src/linux-system.ts'
+import { LinuxSystemReader, linuxVolumePlaces } from '../src/linux-system.ts'
 import { macMainVolumeName, macVolumePlaces, MAX_VOLUMES, parseMacMounts, readVolumes, systemSnapshot } from '../src/mac-system.ts'
 import { parseVolAnswer } from '../src/win-system.ts'
 import { localSample } from './helpers.ts'
 
-const statfs = (sizes: Record<string, [number, number]>) => (path: string) => {
+const statfs = (sizes: Record<string, [number, number]>) => async (path: string) => {
   const s = sizes[path]
   return s ? { bsize: 4096, blocks: s[0] / 4096, bavail: (s[0] - s[1]) / 4096 } : null
 }
+const GB = 1e9
+const blocks = (n: number) => n - (n % 4096)
 
 describe('a Mac', () => {
   const mount = [
@@ -42,9 +44,54 @@ describe('a Mac', () => {
     assert.equal(macVolumePlaces(parseMacMounts(mount), null)[0]?.name, 'Macintosh HD', 'and Macintosh HD when it cannot be told')
   })
 
-  test('each place read with statfs; one that cannot be read is left out', () => {
+  test('each place read with statfs; one that cannot be read is left out', async () => {
     const places = macVolumePlaces(parseMacMounts(mount), 'Macintosh HD')
-    assert.deepEqual(readVolumes(places, statfs({ '/System/Volumes/Data': [994e9 - (994e9 % 4096), 412e9 - (412e9 % 4096)] })).map((v) => v.name), ['Macintosh HD'])
+    assert.deepEqual((await readVolumes(places, statfs({ '/System/Volumes/Data': [blocks(994 * GB), blocks(412 * GB)] }))).map((v) => v.name), ['Macintosh HD'])
+  })
+
+  test('APFS volumes in one container share its space: one disk, named after them all', () => {
+    const shared = [
+      '/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)',
+      '/dev/disk3s7 on /Volumes/Work (apfs, local, journaled)',
+      '/dev/disk7s1 on /Volumes/Media (apfs, local, nodev, nosuid, journaled, noowners)',
+      '/dev/disk7s2 on /Volumes/Scratch (apfs, local, nodev, nosuid, journaled, noowners)',
+      '/dev/disk8s1 on /Volumes/Old Drive (hfs, local, nodev, nosuid, journaled, noowners)',
+      '/dev/disk8s2 on /Volumes/Old Photos (hfs, local, nodev, nosuid, journaled, noowners)'
+    ].join('\n')
+    assert.deepEqual(macVolumePlaces(parseMacMounts(shared), 'Macintosh HD'), [
+      { path: '/System/Volumes/Data', name: 'Macintosh HD · Work', main: true },
+      { path: '/Volumes/Media', name: 'Media · Scratch' },
+      { path: '/Volumes/Old Drive', name: 'Old Drive' },
+      { path: '/Volumes/Old Photos', name: 'Old Photos' }
+    ], 'partitions of another kind are disks of their own')
+  })
+})
+
+describe('a disk that does not answer', () => {
+  test('never holds the reading up, and is not asked again while it is still answering', async () => {
+    const asked: string[] = []
+    const stuck = async (path: string) => {
+      asked.push(path)
+      if (path === '/Volumes/Stuck') return new Promise<null>(() => {})
+      return { bsize: 4096, blocks: 1_000_000, bavail: 250_000 }
+    }
+    const places = [
+      { path: '/', name: 'Macintosh HD', main: true },
+      { path: '/Volumes/Stuck', name: 'Stuck' },
+      { path: '/Volumes/Fine', name: 'Fine' }
+    ]
+    const pending = new Set<string>()
+    let ticks = 0
+    const timer = setInterval(() => (ticks += 1), 1)
+    const started = performance.now()
+    const first = await readVolumes(places, stuck, pending, 40)
+    const took = performance.now() - started
+    clearInterval(timer)
+    assert.deepEqual(first.map((v) => v.name), ['Macintosh HD', 'Fine'])
+    assert.ok(took < 1_000, `answered in ${took.toFixed(0)} ms`)
+    assert.ok(ticks > 0, 'timers ran while it waited: the worker was not held')
+    assert.deepEqual((await readVolumes(places, stuck, pending, 40)).map((v) => v.name), ['Macintosh HD', 'Fine'])
+    assert.equal(asked.filter((p) => p === '/Volumes/Stuck').length, 1, 'asked once')
   })
 })
 
@@ -74,6 +121,54 @@ describe('Linux', () => {
     const atomic = ['composefs / overlay ro 0 0', '/dev/vda4 /sysroot xfs ro 0 0', '/dev/vda4 /var xfs rw 0 0'].join('\n')
     assert.deepEqual(linuxVolumePlaces(atomic), [{ path: '/sysroot', name: '/sysroot', main: true }])
   })
+
+  test('a disk a desktop mounts under /run/media is named by its label', () => {
+    const desktop = ['/dev/nvme0n1p2 / ext4 rw 0 0', 'tmpfs /run/user/1000 tmpfs rw 0 0', '/dev/sdb1 /run/media/sam/USB\\040Stick exfat rw 0 0', '/dev/sdc1 /media/sam/Photos ext4 rw 0 0'].join('\n')
+    assert.deepEqual(linuxVolumePlaces(desktop), [
+      { path: '/', name: '/', main: true },
+      { path: '/run/media/sam/USB Stick', name: 'USB Stick' },
+      { path: '/media/sam/Photos', name: 'Photos' }
+    ])
+  })
+
+  test('in a container, the files bind-mounted into /etc are not a disk; its data mount is', () => {
+    const docker = [
+      'overlay / overlay rw,lowerdir=/var/lib/docker/overlay2/l/A 0 0',
+      '/dev/sda1 /etc/resolv.conf ext4 rw 0 0',
+      '/dev/sda1 /etc/hostname ext4 rw 0 0',
+      '/dev/sda1 /etc/hosts ext4 rw 0 0',
+      '/dev/sda1 /data ext4 rw 0 0'
+    ].join('\n')
+    assert.deepEqual(linuxVolumePlaces(docker), [{ path: '/data', name: '/data', main: true }])
+  })
+
+  test('each ZFS pool is a disk, its datasets one space; / on ZFS is the main one', () => {
+    const zfs = ['rpool/ROOT/ubuntu / zfs rw 0 0', 'rpool/USERDATA/home /home zfs rw 0 0', 'backup /backup zfs rw 0 0', 'backup/daily /backup/daily zfs rw 0 0', '/dev/sdc1 /archive xfs rw 0 0'].join('\n')
+    assert.deepEqual(linuxVolumePlaces(zfs), [
+      { path: '/', name: '/', main: true },
+      { path: '/backup', name: '/backup' },
+      { path: '/archive', name: '/archive' }
+    ])
+  })
+
+  test('a disk taken out goes from the list at the next reading', async () => {
+    let mounts = ['/dev/nvme0n1p2 / ext4 rw 0 0', '/dev/sdb1 /data ext4 rw 0 0'].join('\n')
+    let t = 0
+    const reader = new LinuxSystemReader({
+      readFile: async (path) => (path === '/proc/self/mounts' ? mounts : null),
+      readDir: async () => null,
+      mono: () => t,
+      statfs: () => ({ bsize: 4096, blocks: 1_000_000, bavail: 500_000 }),
+      statfsAsync: async () => ({ bsize: 4096, blocks: 1_000_000, bavail: 500_000 }),
+      platform: 'linux'
+    })
+    await reader.refresh()
+    assert.deepEqual(reader.snapshot()?.disk?.volumes?.map((v) => v.name), ['/', '/data'])
+    mounts = '/dev/nvme0n1p2 / ext4 rw 0 0'
+    t = 61_000
+    await reader.refresh()
+    assert.deepEqual(reader.snapshot()?.disk?.volumes?.map((v) => v.name), ['/'])
+  })
 })
 
 describe('Windows', () => {
@@ -91,6 +186,24 @@ describe('Windows', () => {
       { name: 'Bad Label (E:)', totalBytes: 1e12, usedBytes: 0 }
     ])
     assert.deepEqual(parseVolAnswer('nonsense', 'C:\\'), [])
+  })
+
+  test('a volume mounted in a folder: by its label, else its folder; one with no place is left out', () => {
+    const answer = [
+      { n: 'C:\\', l: 'Windows', s: 512e9, f: 100e9 },
+      { n: 'C:\\Mounts\\Games\\', l: 'Games', s: 2e12, f: 1e12 },
+      { n: 'C:\\Mounts\\Scratch\\', l: '', s: 1e12, f: 0.9e12 },
+      { n: '\\\\?\\Volume{0b6a3d5e-0000-0000-0000-100000000000}\\', l: 'Recovery', s: 1e9, f: 0.5e9 },
+      { n: 'C:\\\u0007\\', l: '', s: 1e12, f: 0.9e12 }
+    ]
+    assert.deepEqual(parseVolAnswer(answer, 'C:\\').map((v) => v.name), ['Windows (C:)', 'Games', 'C:\\Mounts\\Scratch'])
+  })
+
+  test('the system drive is kept however many drives come before it', () => {
+    const answer = [...'DEFGHIJKLM'].map((d) => ({ n: `${d}:\\`, l: '', s: 1e12, f: 0.5e12 })).concat({ n: 'C:\\', l: '', s: 512e9, f: 100e9 })
+    const volumes = parseVolAnswer(answer, 'C:\\')
+    assert.equal(volumes.length, MAX_VOLUMES)
+    assert.deepEqual(volumes[0], { name: 'C:', totalBytes: 512e9, usedBytes: 412e9, main: true })
   })
 })
 

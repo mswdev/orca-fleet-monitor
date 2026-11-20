@@ -102,16 +102,28 @@ function tilesOf(machine, now) {
   }
 }
 
-/** The disk tile's model: the main volume's space (from the volumes where they are reported),
- *  traffic over every disk, and every volume; null with nothing to show. */
+/** What the disk tile calls the machine's own disk when its list of disks left it out. */
+const STARTUP_DISK = 'Startup disk'
+
+/** The disk tile's model: traffic over every disk, every volume the machine names, and the space
+ *  a single tile shows: the main volume's, else the only volume's, else the machine's own disk
+ *  figures. A list without the main volume (it did not answer in time) gets the machine's own
+ *  figures as a row of their own, so another volume is never labelled with them. null with
+ *  nothing to show. */
 function diskOf(disk) {
   if (!disk) return null
   const volumes = (disk.volumes ?? []).map((v) => ({ name: v.name, usedBytes: v.usedBytes, totalBytes: v.totalBytes, pct: v.usedPct, main: v.main }))
-  const main = volumes.find((v) => v.main) ?? null
-  const total = main ? main.totalBytes : finite(disk.totalBytes) && disk.totalBytes > 0 ? disk.totalBytes : null
-  const used = main ? main.usedBytes : finite(disk.usedBytes) ? disk.usedBytes : null
-  if (total === null || used === null) return volumes.length > 0 ? { usedBytes: null, totalBytes: null, readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec), volumes } : null
-  return { usedBytes: used, totalBytes: total, readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec), volumes }
+  const ownTotal = finite(disk.totalBytes) && disk.totalBytes > 0 ? disk.totalBytes : null
+  const ownUsed = finite(disk.usedBytes) && disk.usedBytes >= 0 && ownTotal !== null && disk.usedBytes <= ownTotal ? disk.usedBytes : null
+  if (volumes.length > 0 && !volumes.some((v) => v.main) && ownTotal !== null && ownUsed !== null) {
+    volumes.unshift({ name: STARTUP_DISK, usedBytes: ownUsed, totalBytes: ownTotal, pct: (ownUsed / ownTotal) * 100, main: true })
+  }
+  const shown = volumes.find((v) => v.main) ?? (volumes.length === 1 ? volumes[0] : null)
+  const traffic = { readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec) }
+  const total = shown ? shown.totalBytes : ownTotal
+  const used = shown ? shown.usedBytes : ownUsed
+  if (total === null || used === null) return volumes.length > 0 ? { usedBytes: null, totalBytes: null, ...traffic, volumes } : null
+  return { usedBytes: used, totalBytes: total, ...traffic, volumes }
 }
 
 /** View rows from toProcessList's rows. `share`, when set, is the machine's logical processors: a
@@ -432,16 +444,18 @@ function diskTile(disk) {
   })
 }
 
-/** Several volumes: each by name with how full it is, and the traffic over all of them. */
+/** Several volumes: each by name with how full it is, and the traffic over all of them. Each
+ *  disk is an item of its own to a screen reader, said in a sentence ("Backup: 95% used, …"). */
 function disksTile(disk, parts, spoken) {
   const rows = disk.volumes.map((v, i) => {
     const space = diskSpace(v.usedBytes, v.totalBytes)
     return h(
       'li',
       { class: 'fm-vol', data: { tone: diskTone(v.pct) }, 'data-key': `vol:${i}` },
+      h('span', { class: 'fm-sr' }, `${v.name}: ${pctText(v.pct)}% used, ${space}`),
       h(
         'span',
-        { class: 'fm-vol-row' },
+        { class: 'fm-vol-row', 'aria-hidden': 'true' },
         h('span', { class: 'fm-vol-label', title: v.name }, v.name),
         h('span', { class: 'fm-vol-pct' }, `${pctText(v.pct)}%`),
         h('span', { class: 'fm-vol-space' }, space)
@@ -449,12 +463,11 @@ function disksTile(disk, parts, spoken) {
       h('span', { class: 'fm-ws-bar', 'aria-hidden': 'true' }, h('span', { style: { width: `${Math.min(100, Math.max(0, v.pct))}%` } }))
     )
   })
-  const said = disk.volumes.map((v) => `${v.name} ${pctText(v.pct)}% used, ${diskSpace(v.usedBytes, v.totalBytes)}`).join('; ')
   return h(
     'div',
-    { class: 'fm-metric fm-tile fm-tile--wide fm-disks', data: { tone: 'ok' }, role: 'group', 'aria-label': `Disks: ${said}${spoken.length > 0 ? `; ${spoken.join(', ')}` : ''}`, 'data-key': 'tile:disk' },
-    h('span', { class: 'fm-disks-head' }, h('span', { class: 'fm-metric-label' }, 'Disks'), parts.length > 0 ? h('span', { class: 'fm-tile-cap' }, parts.join(' · ')) : null),
-    h('ul', { class: 'fm-vols', 'aria-hidden': 'true' }, rows)
+    { class: 'fm-metric fm-tile fm-tile--wide fm-disks', data: { tone: 'ok' }, role: 'group', 'aria-label': `Disks${spoken.length > 0 ? `: ${spoken.join(', ')}` : ''}`, 'data-key': 'tile:disk' },
+    h('span', { class: 'fm-disks-head', 'aria-hidden': 'true' }, h('span', { class: 'fm-metric-label' }, 'Disks'), parts.length > 0 ? h('span', { class: 'fm-tile-cap' }, parts.join(' · ')) : null),
+    h('ul', { class: 'fm-vols' }, rows)
   )
 }
 
