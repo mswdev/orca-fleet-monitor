@@ -4,9 +4,10 @@
  * :root, ahead of this file) and puts a `light` or `dark` class on <html>. This file never sets an
  * --orca-* variable, so the host's values always win; it reads them into --fm-* tokens with the
  * design's colours only as fallbacks, for a frame that has no host (the preview). The four health
- * colours are Fleet Monitor's own, with a light and a dark variant chosen by Orca's class, and so
- * is --fm-data, the colour of a reading at an OK level (lines, fills, bars, dots): Orca sets its
- * primary to the theme's text colour, so drawn in it, a healthy machine was plain white (or black). */
+ * colours are Fleet Monitor's own, with a light and a dark variant chosen by Orca's class. --fm-data,
+ * the colour of a reading at an OK level (lines, fills, bars, dots), is the OK health colour in force
+ * (the stronger one too): Orca sets its primary to the theme's text colour, so drawn in it, a healthy
+ * machine was plain white (or black). */
 
 :root {
   color-scheme: light;
@@ -26,7 +27,7 @@
   --fm-health-busy: #a16207;
   --fm-health-strained: #c2410c;
   --fm-health-critical: #b91c1c;
-  --fm-data: #2a62e0;
+  --fm-data: var(--fm-health-ok);
   --fm-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -47,7 +48,6 @@ html.dark {
   --fm-health-busy: #facc15;
   --fm-health-strained: #fb923c;
   --fm-health-critical: #f87171;
-  --fm-data: #7aa2ff;
 }
 @media (prefers-color-scheme: dark) {
   html:not(.light):not(.dark) {
@@ -66,7 +66,6 @@ html.dark {
     --fm-health-busy: #facc15;
     --fm-health-strained: #fb923c;
     --fm-health-critical: #f87171;
-    --fm-data: #7aa2ff;
   }
 }
 
@@ -78,14 +77,12 @@ html[data-fm-contrast='more'] {
   --fm-health-busy: #854d0e;
   --fm-health-strained: #9a3412;
   --fm-health-critical: #991b1b;
-  --fm-data: #1d4ed8;
 }
 html.dark[data-fm-contrast='more'] {
   --fm-health-ok: #86efac;
   --fm-health-busy: #fde047;
   --fm-health-strained: #fdba74;
   --fm-health-critical: #fca5a5;
-  --fm-data: #a5c0ff;
 }
 @media (prefers-color-scheme: dark) {
   html:not(.light):not(.dark)[data-fm-contrast='more'] {
@@ -93,10 +90,9 @@ html.dark[data-fm-contrast='more'] {
     --fm-health-busy: #fde047;
     --fm-health-strained: #fdba74;
     --fm-health-critical: #fca5a5;
-    --fm-data: #a5c0ff;
   }
 }
-/* Where even the stronger blue cannot be told from a surface it is drawn on, contrast.mjs sets
+/* Where even the stronger green cannot be told from a surface it is drawn on, contrast.mjs sets
  * --fm-data inline (html[data-fm-data='theme']) to whichever colour stands out best on them all. */
 
 html,
@@ -155,8 +151,8 @@ body {
   border: 0;
 }
 
-/* Health of a machine sets --fm-level; the level of one metric sets --fm-tone. Charts stay in the
- * primary colour until the metric is elevated. */
+/* Health of a machine sets --fm-level; the level of one metric sets --fm-tone. Charts are in the
+ * data colour (the OK green) until the metric is elevated. */
 [data-health='ok'] {
   --fm-level: var(--fm-health-ok);
 }
