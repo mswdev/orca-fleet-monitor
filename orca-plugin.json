@@ -34,8 +34,8 @@
     },
     {
       "path": "media/screenshot-activity.png",
-      "alt": "This computer's network, disk, GPU and battery readings above its processes sorted by CPU, beside a paired Mac's readings and its 60 busiest processes.",
-      "caption": "Activity: network, disk, GPU, battery and processes",
+      "alt": "This computer's network, GPU and battery readings and its two disks by name, above its processes sorted by CPU, beside a paired Mac's readings, its three disks by name and its 60 busiest processes.",
+      "caption": "Activity: network, GPU, battery, every disk by name, and processes",
       "theme": "dark"
     }
   ],
