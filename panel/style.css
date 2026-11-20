@@ -348,6 +348,18 @@ body {
   white-space: nowrap;
   font-weight: 600;
 }
+/* A card's name and its tags, the tags right after the name: the group takes the room the status
+ * leaves, and the name inside it is only as wide as it needs, down to an ellipsis. */
+.fm-card-title {
+  flex: 1 1 64px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.fm-card-title .fm-name {
+  flex: 0 1 auto;
+}
 .fm-tag {
   flex: none;
   padding: 1px 5px;
