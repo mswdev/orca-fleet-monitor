@@ -274,10 +274,12 @@ export async function readVolumes(
   limit = VOLUME_READS_MAX,
   slow: Set<string> = new Set()
 ): Promise<VolumeReading[]> {
-  // A disk that missed its deadline last time is asked after the others, so two slow ones cannot
-  // keep a healthy one from ever being read.
+  // A disk that missed its deadline is asked after the others, and the slow ones in turn, the one
+  // that missed it longest ago first: two slow disks cannot keep a healthy one, or one that has
+  // recovered, from ever being read.
   const listed = places.slice(0, MAX_VOLUMES).filter((p) => !pending.has(p.path))
-  const queue = [...listed.filter((p) => !slow.has(p.path)), ...listed.filter((p) => slow.has(p.path))]
+  const slowOnes = [...slow].flatMap((path) => listed.filter((p) => p.path === path))
+  const queue = [...listed.filter((p) => !slow.has(p.path)), ...slowOnes]
   const out: VolumeReading[] = []
   const lane = async (): Promise<void> => {
     while (queue.length > 0 && pending.size < limit) {
@@ -287,8 +289,9 @@ export async function readVolumes(
         .catch(() => null)
         .finally(() => pending.delete(place.path))
       const got = await withDeadline(read, deadlineMs)
-      if (got.done) slow.delete(place.path)
-      else slow.add(place.path)
+      // Missed again: to the back of the slow ones.
+      slow.delete(place.path)
+      if (!got.done) slow.add(place.path)
       try {
         const v = got.done ? volumeOf(place.name, got.value, place.main === true) : null
         if (v) out.push(v)
@@ -355,15 +358,18 @@ export async function macMainVolumeName(
   link: (path: string) => Promise<string> = (path) => readlink(path)
 ): Promise<string | null> {
   // Only the links: a mounted volume is never asked about, so a slow one cannot hold this up. A
-  // /Volumes that cannot be listed rejects, so the last name found can stand.
+  // /Volumes that cannot be listed, or a link that cannot be read, rejects rather than say there
+  // is no name, so the last name found can stand.
+  let unread: unknown = null
   for (const entry of (await list()).slice(0, 64)) {
     if (!entry.link) continue
     try {
       if ((await link(`/Volumes/${entry.name}`)) === '/') return entry.name
-    } catch {
-      // Gone, or not readable: not this one.
+    } catch (error) {
+      unread ??= error
     }
   }
+  if (unread !== null) throw unread
   return null
 }
 

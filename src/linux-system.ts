@@ -483,10 +483,12 @@ export function mountEntries(text: unknown): MountEntry[] {
   return out
 }
 
-/** Which of two mounts of one disk names it better: one of LINUX_SPACE_PATHS; else the one that
+/** Which of two mounts of one disk names it better: the one at `mainPath`; one of LINUX_SPACE_PATHS; else the one that
  *  shows more of the filesystem (its own root, not a folder or a file bound in from it, such as a
  *  container's /config.yaml); else the one nearer the root; else the one listed first. */
-function namesBetter(a: MountEntry, than: MountEntry): boolean {
+function namesBetter(a: MountEntry, than: MountEntry, mainPath: string | null): boolean {
+  // Where the machine's own figures were read names its disk, so one disk is never two rows.
+  if (mainPath !== null && (a.path === mainPath) !== (than.path === mainPath)) return a.path === mainPath
   const depth = (p: string) => p.split('/').filter(Boolean).length
   const rank = spaceRank(a.path) - spaceRank(than.path)
   if (rank !== 0) return rank < 0
@@ -526,7 +528,7 @@ export function linuxVolumePlaces(text: unknown, mainPath: string | null = null)
     if (pool !== undefined && !ZFS_POOL.test(pool)) continue
     const key = pool !== undefined ? `zfs:${pool}` : source
     const held = disks.get(key)
-    if (held === undefined || namesBetter(entry, held)) disks.set(key, { ...entry, ...(pool !== undefined ? { pool } : {}) })
+    if (held === undefined || namesBetter(entry, held, mainPath)) disks.set(key, { ...entry, ...(pool !== undefined ? { pool } : {}) })
   }
   const places: VolumePlace[] = [...disks.values()].map(({ path, pool }) => ({ path, name: mountName(path), ...(pool !== undefined ? { pool } : {}) }))
   const main = mainPath === null ? undefined : places.find((v) => v.path === mainPath)

@@ -49,4 +49,4 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 
 Update each machine from **Settings → Plugins** in Orca on that machine. From a terminal on it, a copy installed from the catalog updates with `orca plugin update mswdev.fleet-monitor --environment local` (`orca-ide` instead of `orca` on Linux); approve when it asks. Once this computer runs 1.4.0, a machine that is behind says how to update it, with the exact command when the panel can tell how it was installed. Disk names and versions need 1.4.0 both on the machine and on the computer showing it.
 
-828 tests.
+831 tests.

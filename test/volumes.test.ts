@@ -54,6 +54,11 @@ describe('a Mac', () => {
     assert.deepEqual((await readVolumes(places, statfs({ '/System/Volumes/Data': [blocks(994 * GB), blocks(412 * GB)] }))).map((v) => v.name), ['Macintosh HD'])
   })
 
+  test('a link that cannot be read is not "no name"', async () => {
+    const list = async () => [{ name: 'Work SSD', link: true }]
+    await assert.rejects(macMainVolumeName(list, async () => Promise.reject(new Error('EIO'))), /EIO/)
+  })
+
   test('a name lookup that fails keeps the last name found', async () => {
     const lookups: (() => Promise<string | null>)[] = [async () => 'Work SSD', async () => Promise.reject(new Error('EIO'))]
     let t = 0
@@ -134,6 +139,29 @@ describe('a disk that does not answer', () => {
     assert.equal(most, 2)
     assert.deepEqual(await readVolumes(places, stuck, pending, 20), [])
     assert.deepEqual(asked, ['/', '/a'], 'nothing more is asked while two are stuck')
+  })
+
+  test('a disk that has recovered is read again, however many others stay slow', async () => {
+    const slowPaths = new Set(['/a', '/b', '/c'])
+    const asked: string[][] = []
+    let round: string[] = []
+    const statfs = async (path: string) => {
+      round.push(path)
+      if (slowPaths.has(path)) await new Promise((resolve) => setTimeout(resolve, 30))
+      return { bsize: 4096, blocks: 1_000, bavail: 500 }
+    }
+    const places = ['/a', '/b', '/c'].map((path) => ({ path, name: path }))
+    const pending = new Set<string>()
+    const slow = new Set<string>()
+    for (let n = 0; n < 4; n += 1) {
+      // After the first reading, /c answers at once; /a and /b stay slow.
+      if (n === 1) slowPaths.delete('/c')
+      round = []
+      await readVolumes(places, statfs, pending, 10, 2, slow)
+      asked.push(round)
+      await new Promise((resolve) => setTimeout(resolve, 40))
+    }
+    assert.ok(asked.slice(1).some((r) => r.includes('/c')), JSON.stringify(asked))
   })
 
   test('two slow disks never keep a healthy one from being read', async () => {
@@ -268,6 +296,11 @@ describe('Linux', () => {
     const none = reader(null)
     await none.r.refresh()
     assert.deepEqual(none.r.snapshot()?.disk?.volumes?.map((v) => v.name), ['/archive'])
+  })
+
+  test('one pool mounted at / and /var, its figures read at /var: one row, the main one, at /var', () => {
+    const pool = ['rpool/ROOT / zfs rw 0 0', 'rpool/var /var zfs rw 0 0'].join('\n')
+    assert.deepEqual(linuxVolumePlaces(pool, '/var'), [{ path: '/var', name: '/var', main: true, pool: 'rpool' }])
   })
 
   test('the main disk is the one the machine’s own figures were read at; a disk at /var is not taken for an overlay root', () => {
