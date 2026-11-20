@@ -271,7 +271,7 @@ describe('a machine', () => {
     const history = { t, cpu: t.map(() => 30), mem: t.map(() => 40) }
     const v = mount(viewOf([local(), machine({ history, lastSeenAt: NOW + ahead })], { clockOffsetMs: ahead }))
     const line = $(v.root, '[data-id="env-a"] .fm-spark .fm-line')?.getAttribute('d') ?? ''
-    assert.ok(line.split('L').length >= 25, `the spark spans the 30 minutes (${line.slice(0, 40)}…)`)
+    assert.ok((line.match(/[LC]/g) ?? []).length >= 25, `the spark spans the 30 minutes (${line.slice(0, 40)}…)`)
   })
 })
 

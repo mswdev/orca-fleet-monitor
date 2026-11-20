@@ -37,11 +37,11 @@ describe('a machine\'s network, disk, GPU and battery', () => {
   test('figures, ages and history series', () => {
     const m = fleetOf(machine()).machines[0]!
     assert.deepEqual([m.net?.iface, m.net?.rxBytesPerSec, m.net?.txBytesPerSec, m.net?.ageSec], ['en0', 4_200_000, 310_000, null])
-    assert.equal(m.net?.rx.history[29], 5_000_000)
+    assert.equal(m.net?.rx.trend.live?.v, 5_000_000)
     assert.equal(m.net?.rx.stats?.peak, 5_000_000)
-    assert.deepEqual(m.net?.tx.history.filter((v) => v !== null), [], 'no tx column: an empty series')
+    assert.deepEqual([m.net?.tx.trend.points, m.net?.tx.trend.live], [[], null], 'no tx column: an empty series')
     assert.deepEqual([m.disk?.usedPct, m.disk?.freeBytes, m.disk?.ioAgeSec, m.disk?.spaceAgeSec], [40, 600e9, 10, null])
-    assert.deepEqual([m.gpu?.pct, m.gpu?.ageSec, m.gpu?.history[0]], [12, null, 12])
+    assert.deepEqual([m.gpu?.pct, m.gpu?.ageSec, m.gpu?.trend.points[0]?.v], [12, null, 12])
     assert.deepEqual([m.battery?.present, m.battery?.pct, m.battery?.state, m.battery?.source, m.battery?.minutesRemaining, m.battery?.ageSec], [true, 82, 'charging', 'ac', 38, 20])
   })
 

@@ -17,9 +17,11 @@ import {
   tilesSection,
   toActivityModel
 } from './activity.mjs'
-import { seriesPaths } from './charts.mjs'
+import { chartSlot, createCharts } from './chart-view.mjs'
+import { frameOf } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
-import { INSTALL_SOURCE, MAX_CORES_DRAWN, toFleet } from './fleet-binding.mjs'
+import { HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
+import { createMotion } from './motion.mjs'
 import { ago, duration, gb, loads, pct, share, size } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
@@ -28,6 +30,8 @@ export const PAIR_PATH = 'Settings → Remote Orca servers → Add server'
 export const REPOSITORY_URL = 'https://github.com/mswdev/orca-fleet-monitor'
 const COPIED_MS = 2_000
 const RETRY_SETTLE_MS = 1_500
+/** The span every chart shows. */
+export const WINDOW_MS = HISTORY_SLOTS * SLOT_MS
 
 // --- icons (16 px, stroked, from the design) ----------------------------------------------------
 
@@ -102,8 +106,15 @@ function tag(text) {
   return text ? h('span', { class: 'fm-tag' }, text) : null
 }
 
+/** A big percentage. Its figure counts to a new reading rather than jump to it (motion.mjs). */
 function big(value, large = false) {
-  return h('span', { class: large ? 'fm-big fm-big--lg' : 'fm-big' }, pct(value), h('span', { class: 'fm-unit' }, '%'))
+  const text = pct(value)
+  return h(
+    'span',
+    { class: large ? 'fm-big fm-big--lg' : 'fm-big' },
+    h('span', { class: 'fm-num', 'data-num': text === '–' ? null : text }, text),
+    h('span', { class: 'fm-unit' }, '%')
+  )
 }
 
 /** Text that says how long ago something was, kept current by the panel's one-second ticker. */
@@ -202,20 +213,11 @@ function pairHint(open) {
   )
 }
 
-/** The zero line across a sparkline's whole width, under its series: a machine with a few minutes
- *  of history draws only at the right-hand end (each slot is a minute of the last 30), and the
- *  line says the rest is time not yet seen rather than a glitch. */
-export const SPARK_RAIL = 'M0 26 L100 26'
-
-function spark(values, tone) {
-  const paths = seriesPaths(values, 100, 28, 2)
-  return s(
-    'svg',
-    { class: 'fm-spark', viewBox: '0 0 100 28', preserveAspectRatio: 'none', 'aria-hidden': 'true', focusable: 'false' },
-    s('path', { class: 'fm-spark-rail', d: SPARK_RAIL }),
-    s('path', { class: 'fm-area', d: paths.area || 'M0 0' }),
-    s('path', { class: 'fm-line', d: paths.line || 'M0 0' })
-  )
+/** A card's sparkline of one metric's last 30 minutes, each part in the colour of its level (where
+ *  the metric is judged). A zero line runs under it all: a machine with a few minutes of history
+ *  draws only at the right-hand end, and the line says the rest is time not yet seen. */
+function spark(metricModel, now, key) {
+  return chartSlot({ kind: 'spark', frame: frameOf(metricModel.trend, now, WINDOW_MS), rule: metricModel.rule, label: null }, { class: 'fm-spark-box', 'data-key': key })
 }
 
 /** "Last reading 2 min ago: memory pressure critical, …", kept current. */
@@ -253,13 +255,13 @@ function lostCard(m, now, props) {
   )
 }
 
-function metric(label, value, sub, tone, history, marker = null) {
+function metric(label, value, sub, tone, sparkline, marker = null) {
   return h(
     'span',
     { class: 'fm-metric', data: { tone } },
     h('span', { class: 'fm-metric-label' }, label, marker),
     h('span', { class: 'fm-metric-row' }, big(value), sub ? h('span', { class: 'fm-sub' }, sub) : null),
-    spark(history, tone)
+    sparkline
   )
 }
 
@@ -276,7 +278,7 @@ function skeletonMetrics() {
 }
 
 function card(m, now) {
-  const props = { type: 'button', 'data-key': `card:${m.id}`, 'data-action': 'open', 'data-id': m.id, 'aria-label': cardAria(m, now) }
+  const props = { type: 'button', 'data-key': `card:${m.id}`, 'data-flip': '', 'data-action': 'open', 'data-id': m.id, 'aria-label': cardAria(m, now) }
   if (m.status === 'connecting') {
     return h(
       'button',
@@ -305,8 +307,8 @@ function card(m, now) {
     h(
       'span',
       { class: 'fm-metrics' },
-      metric('CPU', m.cpu.pct, m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : coresText(m), m.cpu.tone, m.cpu.history),
-      metric(m.mem.label, m.mem.reliable ? m.mem.pct : null, memSub(m, false), m.mem.tone, m.mem.history, pressureMarker(m))
+      metric('CPU', m.cpu.pct, m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : coresText(m), m.cpu.tone, spark(m.cpu, now, 'spark:cpu')),
+      metric(m.mem.label, m.mem.reliable ? m.mem.pct : null, memSub(m, false), m.mem.tone, spark(m.mem, now, 'spark:mem'), pressureMarker(m))
     )
   )
 }
@@ -465,26 +467,21 @@ function lostSection(m, now) {
   )
 }
 
-function chart(values, tone, label) {
-  const paths = seriesPaths(values, 300, 72, 0)
+/**
+ * A section's chart of the last 30 minutes: each minute's mean as a line in the colour of its level,
+ * bands at the thresholds health judges it on (where it is judged), the range of each minute's
+ * readings behind the line, the window's peak, and a slider that reads any minute (hover, or the
+ * arrow keys). `what` names it: "CPU", "RAM used".
+ */
+function chart(metricModel, what, label, now, key) {
+  const frame = frameOf(metricModel.trend, now, WINDOW_MS)
+  const stats = metricModel.stats
+  const peak = stats && frame.count >= 2 && Number.isFinite(stats.peakAt) ? { t: stats.peakAt, v: stats.peak } : null
   return h(
     'div',
-    { class: 'fm-chart' },
-    h('div', { class: 'fm-yaxis', 'aria-hidden': 'true' }, h('span', {}, '100'), h('span', {}, '50'), h('span', {}, '0')),
-    h(
-      'div',
-      { class: 'fm-plot' },
-      s(
-        'svg',
-        { viewBox: '0 0 300 72', preserveAspectRatio: 'none', role: 'img', 'aria-label': label, focusable: 'false' },
-        s('line', { class: 'fm-gridline', x1: 0, y1: 0, x2: 300, y2: 0 }),
-        s('line', { class: 'fm-gridline fm-gridline--mid', x1: 0, y1: 36, x2: 300, y2: 36 }),
-        s('line', { class: 'fm-gridline', x1: 0, y1: 72, x2: 300, y2: 72 }),
-        s('path', { class: 'fm-area', d: paths.area || 'M0 0' }),
-        s('path', { class: 'fm-line', d: paths.line || 'M0 0' })
-      ),
-      h('div', { class: 'fm-xaxis', 'aria-hidden': 'true' }, h('span', {}, '-30m'), h('span', {}, '-15m'), h('span', {}, 'now'))
-    )
+    { class: metricModel.rule ? 'fm-chart fm-chart--ruled' : 'fm-chart' },
+    chartSlot({ kind: 'detail', frame, rule: metricModel.rule, label, peak, range: true, scrub: `${what}, minute by minute` }, { class: 'fm-plot', 'data-key': key }),
+    h('div', { class: 'fm-xaxis', 'aria-hidden': 'true' }, h('span', {}, '-30m'), h('span', {}, '-15m'), h('span', {}, 'now'))
   )
 }
 
@@ -538,7 +535,7 @@ function cores(groups) {
                 'div',
                 { class: dense ? 'fm-core-bars fm-core-bars--dense' : 'fm-core-bars' },
                 row.map((v, i) =>
-                  h('div', { class: 'fm-core', data: { tone: tones[r][i] } }, h('div', { class: 'fm-core-fill', style: { height: `${Math.max(3, v)}%` } }))
+                  h('div', { class: 'fm-core', data: { tone: tones[r][i] } }, h('div', { class: 'fm-core-fill', style: { transform: `scaleY(${Math.max(3, Math.min(100, v)) / 100})` } }))
                 )
               )
             )
@@ -561,7 +558,7 @@ function estimateNote(m) {
   )
 }
 
-function cpuSection(m) {
+function cpuSection(m, now) {
   const sub = [coresText(m), m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : ''].filter(Boolean).join(' · ')
   return h(
     'section',
@@ -569,7 +566,7 @@ function cpuSection(m) {
     h('div', { class: 'fm-section-head' }, h('h2', {}, 'CPU'), sub ? h('span', { class: 'fm-sub' }, sub) : null),
     h('div', { class: 'fm-reading' }, big(m.cpu.pct, true), h('span', { class: 'fm-sub' }, statsText(m.cpu.stats))),
     estimateNote(m),
-    chart(m.cpu.history, m.cpu.tone, chartLabel(m.cpu.estimated ? 'CPU estimate' : 'CPU', m.cpu.pct, m.cpu.stats)),
+    chart(m.cpu, m.cpu.estimated ? 'CPU estimate' : 'CPU', chartLabel(m.cpu.estimated ? 'CPU estimate' : 'CPU', m.cpu.pct, m.cpu.stats), now, 'chart:cpu'),
     m.cpu.groups
       ? cores(m.cpu.groups)
       : m.cpu.coresHidden > 0
@@ -633,7 +630,7 @@ const PRESSURE_NOTES = {
   own: 'This Mac’s own memory reading is not available right now.'
 }
 
-function memorySection(m, suggest = null) {
+function memorySection(m, now, suggest = null) {
   const value = m.mem.reliable ? m.mem.pct : null
   // A Mac's own reading, or a Windows computer's: RAM in use, as Activity Monitor or Task Manager.
   const used = m.mem.kind === 'used' || Boolean(m.mem.win)
@@ -653,7 +650,7 @@ function memorySection(m, suggest = null) {
     used && m.mem.carriedSec !== null
       ? h('p', { class: 'fm-note', 'data-key': 'carried-note' }, `Some of these figures are ${m.mem.carriedSec} s old: reading them on that Mac failed.`)
       : null,
-    chart(m.mem.history, m.mem.tone, chartLabel(used ? 'RAM used' : m.mem.label, value, m.mem.stats)),
+    chart(m.mem, used ? 'RAM used' : m.mem.label, chartLabel(used ? 'RAM used' : m.mem.label, value, m.mem.stats), now, 'chart:mem'),
     used && m.mem.mac ? macRows(m) : null,
     m.mem.win ? winRows(m) : null
   )
@@ -671,7 +668,7 @@ function workspacesSection(m) {
       m.workspaces.map((w) =>
         h(
           'li',
-          { class: 'fm-ws', 'data-key': `ws:${w.id}`, 'aria-label': `${w.name}: CPU ${share(w.cpuPct)}, memory ${size(w.memBytes)}` },
+          { class: 'fm-ws', 'data-key': `ws:${w.id}`, 'data-flip': '', 'aria-label': `${w.name}: CPU ${share(w.cpuPct)}, memory ${size(w.memBytes)}` },
           h('span', { class: 'fm-ws-name', title: w.repo ? `${w.name} (${w.repo})` : w.name }, w.name),
           h('span', { class: 'fm-ws-cpu' }, share(w.cpuPct)),
           h('span', { class: 'fm-ws-mem' }, size(w.memBytes)),
@@ -885,7 +882,7 @@ function detail(m, ui, now, act, list) {
     if (facts.length > 0) sections.push(factsSection('Last known', facts))
   } else {
     if (m.lost) sections.push(lostSection(m, now))
-    sections.push(cpuSection(m), memorySection(m, act?.suggest ?? null))
+    sections.push(cpuSection(m, now), memorySection(m, now, act?.suggest ?? null))
     if (m.workspaces.length > 0) sections.push(workspacesSection(m))
     if (m.install) sections.push(installRow(m, ui))
     const facts = systemFacts(m)
@@ -921,10 +918,19 @@ export function mountFleetView(
     setInterval: every = setInterval,
     clearInterval: stop = clearInterval,
     setTimeout: later = setTimeout,
-    openExternal = null
+    openExternal = null,
+    frame = typeof globalThis.requestAnimationFrame === 'function' ? (fn) => globalThis.requestAnimationFrame(fn) : null,
+    clock = () => (typeof globalThis.performance?.now === 'function' ? globalThis.performance.now() : Date.now()),
+    reducedMotion = () => typeof globalThis.matchMedia !== 'function' || globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches
   } = {}
 ) {
   const doc = root.ownerDocument
+  const motionOn = () => !reducedMotion()
+  const hidden = () => doc.visibilityState === 'hidden'
+  const charts = createCharts({ frame, clock, motion: motionOn, hidden })
+  const motion = createMotion({ frame, clock, motion: motionOn, hidden })
+  /** The screen last drawn: rows slide only within one screen. */
+  let screen = null
   const ui = {
     canOpenExternal: typeof openExternal === 'function',
     /** The binding can ask the worker to star; whether this computer can is the fleet's `canStar`. */
@@ -1043,10 +1049,47 @@ export function mountFleetView(
         list = arrange(act.processes)
       }
     }
+    const next = machine ? `detail:${machine.id}:${act?.tabs ? ui.tab : 'overview'}` : 'overview'
+    const same = next === screen
+    screen = next
+    if (same) motion.measure(root)
     root.dataset.screen = machine ? 'detail' : 'overview'
     morphChildren(root, machine ? detail(machine, ui, t, act, list) : overview(fleet, ui, t))
+    charts.sync(root)
+    motion.settle(root, { moved: same })
     syncFields()
     watch(machine, act)
+  }
+
+  /**
+   * Changes screen (`update` draws the new one), sliding the old one out and the new one in where
+   * the browser can (view transitions) and motion is welcome; `after` runs once the new screen is
+   * in the page: scrolling and focus must wait for it. Without, it all happens at once.
+   */
+  function changeScreen(direction, update, after, animate = true) {
+    const start = typeof doc.startViewTransition === 'function' && animate && motionOn() && !hidden()
+    if (!start) {
+      update()
+      after()
+      return
+    }
+    const html = doc.documentElement
+    html.dataset.fmNav = direction
+    const clean = () => {
+      if (html.dataset.fmNav === direction) delete html.dataset.fmNav
+    }
+    try {
+      const transition = doc.startViewTransition(update)
+      transition.updateCallbackDone.then(after, after)
+      // A transition skipped by the next one (a quick back and forth) rejects these: nothing to do.
+      transition.ready?.catch?.(() => {})
+      transition.finished.then(clean, clean)
+    } catch {
+      // Refused (another transition, a hidden frame): change at once.
+      delete html.dataset.fmNav
+      update()
+      after()
+    }
   }
 
   /** Morphing sets attributes only: the search text and the sort are properties of their fields. */
@@ -1085,37 +1128,63 @@ export function mountFleetView(
     if (node instanceof HTMLElement) node.focus({ preventScroll: true })
   }
 
-  /** `moveFocus` is for a person's click or key: focus follows to the new screen's control. */
+  /** `moveFocus` is for a person's click or key: focus follows to the new screen's control, and the
+   *  screens slide. A call from code (the preview) changes at once. */
   function open(id, moveFocus = true) {
     ui.overviewScroll = window.scrollY
     ui.nav = { view: 'detail', id }
     resetActivity()
-    draw()
-    window.scrollTo(0, 0)
-    if (moveFocus) focusSoon('[data-action="back"]')
+    changeScreen(
+      'forward',
+      draw,
+      () => {
+        window.scrollTo(0, 0)
+        if (moveFocus) focusSoon('[data-action="back"]')
+      },
+      moveFocus
+    )
   }
 
   function back(moveFocus = true) {
     const id = ui.nav.id
     ui.nav = { view: 'overview', id: null }
     resetActivity()
-    draw()
-    window.scrollTo(0, ui.overviewScroll)
-    if (id && moveFocus) focusSoon(`[data-action="open"][data-id="${CSS.escape(id)}"]`)
+    const scroll = ui.overviewScroll
+    changeScreen(
+      'back',
+      draw,
+      () => {
+        window.scrollTo(0, scroll)
+        if (id && moveFocus) focusSoon(`[data-action="open"][data-id="${CSS.escape(id)}"]`)
+      },
+      moveFocus
+    )
   }
 
   /** Overview or Activity. Switching keeps the header, scrolls to the top and closes an open row. */
-  function selectTab(tab, moveFocus = false) {
-    if (ui.tab !== tab) {
-      ui.tab = tab
-      ui.openKey = null
-      ui.rowFocus = null
-      ui.held = null
-      ui.announce = ''
-      draw()
-      window.scrollTo(0, 0)
+  function selectTab(tab, moveFocus = false, animate = true) {
+    const focus = () => {
+      if (moveFocus) focusSoon(`#${TAB_IDS[ui.tab]}`)
     }
-    if (moveFocus) focusSoon(`#${TAB_IDS[ui.tab]}`)
+    if (ui.tab === tab) {
+      focus()
+      return
+    }
+    const direction = TAB_ORDER.indexOf(tab) > TAB_ORDER.indexOf(ui.tab) ? 'forward' : 'back'
+    ui.tab = tab
+    ui.openKey = null
+    ui.rowFocus = null
+    ui.held = null
+    ui.announce = ''
+    changeScreen(
+      direction,
+      draw,
+      () => {
+        window.scrollTo(0, 0)
+        focus()
+      },
+      animate
+    )
   }
 
   function clearSearch(focusField) {
@@ -1358,7 +1427,7 @@ export function mountFleetView(
     /** Shows one machine's detail, or the overview with no id, without moving focus. */
     show: (id) => (id ? open(id, false) : back(false)),
     /** For the preview: shows a tab of the machine on screen, without moving focus. */
-    showTab: (tab) => selectTab(tab),
+    showTab: (tab) => selectTab(tab, false, false),
     dispose() {
       stop(ticker)
       ui.watch?.stop()

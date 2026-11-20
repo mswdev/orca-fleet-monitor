@@ -71,7 +71,17 @@ export type WorkspaceModel = { id: string; name: string; repo: string; cpuPct: n
 /** `command` is null when neither the machine's name nor its id can go into a command safely.
  *  `mac`: the machine is a Mac, where Fleet Monitor also adds RAM in use, swap and pressure. */
 export type InstallHint = { reason: 'absent' | 'installed' | 'quiet'; command: string | null; launcher?: 'orca' | 'orca-ide'; mac?: boolean }
-export type Stats = { avg: number; peak: number }
+/** `peakAt`: when the peak was (its first time), worker clock. */
+export type Stats = { avg: number; peak: number; peakAt: number | null }
+/** One wall-clock minute of readings: their mean time, mean, lowest and highest. `key` is the
+ *  minute's number since the epoch. */
+export type TrendPoint = { key: number; t: number; v: number; lo: number; hi: number }
+/** A history column as the charts draw it (trendOf): its minutes, the newest reading, and how many
+ *  readings fell in the window. */
+export type Trend = { points: TrendPoint[]; live: { t: number; v: number } | null; count: number }
+export type ChartLevel = 'busy' | 'strained' | 'critical'
+/** The levels a chart colours its line by and bands it with, lowest first. */
+export type ChartRule = { level: ChartLevel; at: number }[]
 /** A Mac's own memory reading, as the detail rows show it. Bytes unless named otherwise. */
 export type MacDetail = {
   appBytes: number | null
@@ -135,9 +145,10 @@ export type MachineModel = {
     /** Basic tier: estimated from the 1-minute load average, not measured, never judged. */
     estimated: boolean
     tone: Level
-    /** HISTORY_SLOTS one-minute points, oldest first; null where there was no reading. */
-    history: (number | null)[]
+    trend: Trend
     stats: Stats | null
+    /** CPU's thresholds; null for an estimate, which is not judged. */
+    rule: ChartRule | null
     groups: CoreGroupModel[] | null
     /** How many cores there are when more than MAX_CORES_DRAWN (then `groups` is null); else 0. */
     coresHidden: number
@@ -156,8 +167,11 @@ export type MachineModel = {
     totalBytes: number | null
     tone: Level
     /** From history's `ram` column for the `used` kind, its `mem` column otherwise. */
-    history: (number | null)[]
+    trend: Trend
     stats: Stats | null
+    /** RAM in use's own rule (busy at `ramUsedBusy`) for the `used` kind, else the memory
+     *  thresholds; null where memory is not judged. */
+    rule: ChartRule | null
     mac: MacDetail | null
     /** A Windows computer running Fleet Monitor 1.3: Task Manager's memory figures. */
     win: WinDetail | null
@@ -183,7 +197,7 @@ export type MachineModel = {
 }
 
 /** One history series, as the charts take it. */
-export type Series = { history: (number | null)[]; stats: Stats | null }
+export type Series = { trend: Trend; stats: Stats | null }
 /** `ageSec` is set only on a figure carried from an earlier read (1 s or older). */
 export type NetModel = { iface: string; rxBytesPerSec: number | null; txBytesPerSec: number | null; ageSec: number | null; rx: Series; tx: Series }
 export type DiskModel = {
@@ -303,13 +317,18 @@ export function mergeColumns(
 export function createFleetBinding(orca: FleetOrca, options?: FleetBindingOptions): FleetBinding
 
 export function levelFor(value: number | null | undefined, thresholds: HealthThresholds): Level
-export function bucketHistory(
+export function trendOf(
   columns: HistoryColumns | null | undefined,
   key: 'cpu' | 'mem' | 'ram' | 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat',
   end: number,
-  slots?: number,
+  windowMs?: number,
   slotMs?: number
-): (number | null)[]
+): Trend
+export function chartRule(
+  metric: 'cpu' | 'memory',
+  model: { estimated?: boolean; kind?: string; reliable?: boolean },
+  thresholds: FleetThresholds
+): ChartRule | null
 export function windowStats(
   columns: HistoryColumns | null | undefined,
   key: 'cpu' | 'mem' | 'ram' | 'rx' | 'tx' | 'dr' | 'dw' | 'gpu' | 'bat',

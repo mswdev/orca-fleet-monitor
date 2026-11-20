@@ -142,7 +142,7 @@ export type BridgeDeps = {
   post: (payload: FleetUpdate) => void
   now: () => number
   cli: () => CliInfo
-  /** The person's CPU and memory thresholds; the defaults when not given. */
+  /** The person's CPU and memory thresholds, and RAM in use's; the defaults when not given. */
   thresholds?: () => FleetThresholds
   /** This worker run's id, so a panel can tell a restart (seq starting over) from old posts. */
   run?: string

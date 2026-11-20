@@ -78,6 +78,8 @@ async function launchBrowser(chrome, profile) {
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
+      // Charts glide and figures count in the panel; captures are of the settled panel.
+      '--force-prefers-reduced-motion',
       `--user-data-dir=${profile}`,
       '--remote-debugging-port=0',
       'about:blank'

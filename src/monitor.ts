@@ -284,7 +284,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     post: (payload) => orca.panels.post('fleet.update', payload),
     now: deps.now,
     cli: cliInfo,
-    thresholds: () => settings.health,
+    thresholds: () => ({ ...settings.health, ramUsedBusy: settings.memoryRules.ramUsedBusyPercent }),
     run: runId,
     setTimeout: deps.setTimeout,
     clearTimeout: deps.clearTimeout

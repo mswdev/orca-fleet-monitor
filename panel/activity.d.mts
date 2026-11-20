@@ -1,6 +1,6 @@
 // Types for activity.mjs: the view-model the Overview | Activity control, the tiles, the
 // Processes card and the memory line draw from, and the one adapter that makes it.
-import type { MachineModel } from './fleet-binding.mjs'
+import type { MachineModel, Trend } from './fleet-binding.mjs'
 
 export const FIRST_ROWS: number
 export const SUGGEST_FLOOR: number
@@ -13,9 +13,10 @@ export const CPU_HEAD_COMPUTER: string
 
 export type SortKey = 'cpu' | 'memory' | 'energy' | 'name'
 
-export type NetworkTile = { down: number | null; up: number | null; downHistory: (number | null)[]; upHistory: (number | null)[] }
+/** `now`: the worker's clock, where the sparkline's window ends. */
+export type NetworkTile = { down: number | null; up: number | null; downTrend: Trend | null; upTrend: Trend | null; now: number }
 export type DiskTile = { usedBytes: number; totalBytes: number; readBps: number | null; writeBps: number | null }
-export type GpuTile = { pct: number; peak: number | null; history: (number | null)[] }
+export type GpuTile = { pct: number; peak: number | null; avg: number | null; trend: Trend | null; now: number }
 export type BatteryTile = { pct: number; state: 'charging' | 'discharging' | 'charged' | 'not-charging'; minutes: number | null; watts: number | null }
 export type Tiles = { network: NetworkTile | null; disk: DiskTile | null; gpu: GpuTile | null; battery: BatteryTile | null }
 

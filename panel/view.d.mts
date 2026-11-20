@@ -14,7 +14,16 @@ export type FleetViewOptions = {
   setTimeout?: (fn: () => void, ms: number) => unknown
   /** Opens a URL in the browser (the frame's `orca.shell.openExternal`); with none, no link is drawn. */
   openExternal?: ((url: string) => unknown) | null
+  /** Runs a callback before the next paint (requestAnimationFrame); with none, nothing moves. */
+  frame?: ((fn: () => void) => unknown) | null
+  /** A monotonic clock in ms for motion (performance.now). */
+  clock?: () => number
+  /** True when the person asked for reduced motion (or it cannot be told): nothing moves. */
+  reducedMotion?: () => boolean
 }
+
+/** The span every chart shows, in ms. */
+export const WINDOW_MS: number
 
 export type FleetViewHandle = {
   /** The model last drawn. */

@@ -15,9 +15,10 @@
 //   notice: string | null          // one fm-notice under Overview's sections (Fleet Monitor there is too old)
 //   tiles: {                       // each null when the machine does not report it: no tile is drawn
 //     network: { down: number | null, up: number | null,             // bytes per second, now
-//                downHistory: (number | null)[], upHistory: (number | null)[] } | null  // 30 one-minute slots
+//                downTrend: Trend | null, upTrend: Trend | null,     // fleet-binding.mjs trendOf
+//                now: number } | null                                // the worker's clock
 //     disk: { usedBytes: number, totalBytes: number, readBps: number | null, writeBps: number | null } | null
-//     gpu: { pct: number, peak: number | null, history: (number | null)[] } | null
+//     gpu: { pct: number, peak: number | null, avg: number | null, trend: Trend | null, now: number } | null
 //     battery: { pct: number, state: 'charging' | 'discharging' | 'charged' | 'not-charging',
 //                minutes: number | null, watts: number | null } | null
 //   }
@@ -49,9 +50,10 @@
 //   runningSec: number | null
 //   command: string | null, hint: string | null   // the command line and, without its program path, the wide row's hint
 // }
-import { seriesPaths } from './charts.mjs'
+import { chartSlot } from './chart-view.mjs'
+import { frameOf } from './charts.mjs'
 import { h, s } from './dom.mjs'
-import { toProcessList } from './fleet-binding.mjs'
+import { HISTORY_SLOTS, SLOT_MS, toProcessList } from './fleet-binding.mjs'
 import { duration, size } from './format.mjs'
 
 /** Rows drawn before "Show all N", and again after "Show fewer". */
@@ -63,21 +65,23 @@ export const SUGGEST_PAST_SEC = 60
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value)
 const orNull = (value) => (finite(value) ? value : null)
+/** The span a tile's sparkline shows, as the charts do. */
+const WINDOW_MS = HISTORY_SLOTS * SLOT_MS
 
 // --- the adapter: the only code that reads the binding's shapes -------------------------------------
 
 /** A machine's tiles from its MachineModel (toFleet: `net`, `disk`, `gpu`, `battery`). */
-function tilesOf(machine) {
+function tilesOf(machine, now) {
   const { net, disk, gpu, battery } = machine
   return {
     network: net
-      ? { down: orNull(net.rxBytesPerSec), up: orNull(net.txBytesPerSec), downHistory: net.rx?.history ?? [], upHistory: net.tx?.history ?? [] }
+      ? { down: orNull(net.rxBytesPerSec), up: orNull(net.txBytesPerSec), downTrend: net.rx?.trend ?? null, upTrend: net.tx?.trend ?? null, now }
       : null,
     disk:
       disk && finite(disk.totalBytes) && disk.totalBytes > 0 && finite(disk.usedBytes)
         ? { usedBytes: disk.usedBytes, totalBytes: disk.totalBytes, readBps: orNull(disk.readBytesPerSec), writeBps: orNull(disk.writeBytesPerSec) }
         : null,
-    gpu: gpu && finite(gpu.pct) ? { pct: gpu.pct, peak: orNull(gpu.stats?.peak), history: gpu.history ?? [] } : null,
+    gpu: gpu && finite(gpu.pct) ? { pct: gpu.pct, peak: orNull(gpu.stats?.peak), avg: orNull(gpu.stats?.avg), trend: gpu.trend ?? null, now } : null,
     battery:
       battery && battery.present && finite(battery.pct)
         ? {
@@ -175,7 +179,7 @@ function suggestOf(machine) {
  */
 export function toActivityModel({ machine, list, ui = { sort: 'cpu', query: '' }, now }) {
   const live = machine.online && machine.tier === 'full'
-  const tiles = live ? tilesOf(machine) : { network: null, disk: null, gpu: null, battery: null }
+  const tiles = live ? tilesOf(machine, now) : { network: null, disk: null, gpu: null, battery: null }
   const processes = live ? processesOf(machine, list, ui, now) : null
   const tabs = live && (processes !== null || Object.values(tiles).some(Boolean))
   // Fleet Monitor there is too old to read these: before 1.2 on a Mac, before 1.3 anywhere else.
@@ -320,18 +324,23 @@ export function suggestLine(suggest) {
 
 // --- tiles (Activity) ----------------------------------------------------------------------------------
 
-function sparkSvg(series, label) {
-  const [first, second] = series
-  const a = seriesPaths(first, 100, 28, 2)
-  const b = second ? seriesPaths(second, 100, 28, 2) : null
-  return s(
-    'svg',
-    { class: 'fm-spark', viewBox: '0 0 100 28', preserveAspectRatio: 'none', role: 'img', 'aria-label': label, focusable: 'false' },
-    s('path', { class: 'fm-spark-rail', d: 'M0 26 L100 26' }),
-    s('path', { class: 'fm-area', d: a.area || 'M0 0' }),
-    b ? s('path', { class: 'fm-line fm-line--second', d: b.line || 'M0 0' }) : null,
-    s('path', { class: 'fm-line', d: a.line || 'M0 0' })
-  )
+/** A tile's sparkline (chart-view.mjs): `frame` filled, `second` a muted line over it. */
+function sparkSlot(key, frame, second, label) {
+  return chartSlot({ kind: 'spark', frame, second, rule: null, label }, { class: 'fm-spark-box', 'data-key': `spark:${key}` })
+}
+
+/** Every mean and the newest reading in a trend. */
+const trendValues = (trend) => [...(trend?.points ?? []).map((p) => p.v), ...(trend?.live ? [trend.live.v] : [])].filter(finite)
+
+/** A trend in other units as percentages of `top`. */
+function scaleTrend(trend, top) {
+  if (!trend) return null
+  const k = top > 0 ? 100 / top : 0
+  return {
+    ...trend,
+    points: trend.points.map((p) => ({ ...p, v: p.v * k, lo: p.lo * k, hi: p.hi * k })),
+    live: trend.live ? { ...trend.live, v: trend.live.v * k } : null
+  }
 }
 
 function meter(pct, caption) {
@@ -351,23 +360,25 @@ function tile({ key, label, tone = 'ok', figure, sub, slot, aria }) {
   )
 }
 
-const bigPct = (value) => h('span', { class: 'fm-big' }, pctText(value), h('span', { class: 'fm-unit' }, '%'))
+/** A big percentage; its figure counts to a new reading (motion.mjs). */
+const bigPct = (value) => h('span', { class: 'fm-big' }, h('span', { class: 'fm-num', 'data-num': pctText(value) }, pctText(value)), h('span', { class: 'fm-unit' }, '%'))
 
 function networkTile(net) {
   const down = rate(net.down)
   const up = rate(net.up)
   // Both series on one scale: the larger one's peak in the window, plus 15 %.
-  const values = [...net.downHistory, ...net.upHistory].filter(finite)
+  const values = [...trendValues(net.downTrend), ...trendValues(net.upTrend)]
   const top = values.length > 0 ? Math.max(...values) * 1.15 : 0
-  const scale = (series) => series.map((v) => (finite(v) && top > 0 ? (v / top) * 100 : null))
-  const peak = net.downHistory.filter(finite)
+  const peak = trendValues(net.downTrend)
   return tile({
     key: 'network',
     label: 'Network',
     figure: h('span', { class: 'fm-big' }, arrowDown(11), down.n, down.unit ? h('span', { class: 'fm-unit fm-unit--sp' }, down.unit) : null),
     sub: [arrowUp(9), up.text],
-    slot: sparkSvg(
-      [scale(net.downHistory), scale(net.upHistory)],
+    slot: sparkSlot(
+      'network',
+      frameOf(scaleTrend(net.downTrend, top), net.now, WINDOW_MS),
+      frameOf(scaleTrend(net.upTrend, top), net.now, WINDOW_MS),
       peak.length > 0 ? `Network over the last 30 minutes: download peaked at ${rate(Math.max(...peak)).text}` : 'Network over the last 30 minutes: no history yet'
     ),
     aria: `Network: down ${down.text}, up ${up.text}`
@@ -391,15 +402,19 @@ function diskTile(disk) {
 }
 
 function gpuTile(gpu) {
-  const known = gpu.history.filter(finite)
-  const avg = known.length > 0 ? known.reduce((a, b) => a + b, 0) / known.length : null
+  const avg = gpu.avg
   const peak = gpu.peak ?? gpu.pct
   return tile({
     key: 'gpu',
     label: 'GPU',
     figure: bigPct(gpu.pct),
     sub: `peak ${pctText(peak)}%`,
-    slot: sparkSvg([gpu.history], avg === null ? 'GPU over the last 30 minutes: no history yet' : `GPU over the last 30 minutes: average ${pctText(avg)}%, peak ${pctText(peak)}%`),
+    slot: sparkSlot(
+      'gpu',
+      frameOf(gpu.trend, gpu.now, WINDOW_MS),
+      null,
+      avg === null ? 'GPU over the last 30 minutes: no history yet' : `GPU over the last 30 minutes: average ${pctText(avg)}%, peak ${pctText(peak)}%`
+    ),
     aria: `GPU: ${pctText(gpu.pct)}%, peak ${pctText(peak)}%`
   })
 }
@@ -598,7 +613,7 @@ function procRow(r, p, open, tabStop) {
   const num = (cls, key, text) => h('span', { class: ['fm-proc-num', cls, p.sort === key || (key === 'cpu' && p.sort === 'name') ? 'is-key' : null] }, text)
   return h(
     'li',
-    { class: open ? 'fm-proc is-open' : 'fm-proc', 'data-key': `proc:${r.key}` },
+    { class: open ? 'fm-proc is-open' : 'fm-proc', 'data-key': `proc:${r.key}`, 'data-flip': '' },
     h(
       'button',
       {

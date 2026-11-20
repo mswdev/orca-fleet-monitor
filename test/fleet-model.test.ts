@@ -1,13 +1,14 @@
 // toFleet() and its helpers (panel/fleet-binding.mjs), the chart paths (panel/charts.mjs) and the
 // text formats (panel/format.mjs): everything between the worker's model and the drawing.
 import { assert, describe, test } from 'orca/testing'
-import { seriesPaths } from '../panel/charts.mjs'
+import { GAP_MS, frameOf, levelOf, levelStops, linePath, monotone, placeFrame, rangePath, tweenFrame, type Frame } from '../panel/charts.mjs'
 import {
-  bucketHistory,
+  chartRule,
   installCommand,
   INSTALL_SOURCE,
   levelFor,
   toFleet,
+  trendOf,
   windowStats,
   type FleetReadyView,
   type MachineModel
@@ -64,26 +65,75 @@ function view(machines: MachineView[]): FleetReadyView {
 
 const only = (m: MachineView): MachineModel => toFleet(view([m]), NOW).machines[0]!
 
-describe('history as 30 one-minute points', () => {
-  test('averages each minute, leaves minutes without readings empty, and ends on the newest reading', () => {
-    const t = [NOW - 125_000, NOW - 115_000, NOW - 61_000, NOW - 30_000, NOW - 1_000]
-    const cpu = [10, 30, 40, 50, 70]
-    const points = bucketHistory({ t, cpu, mem: t.map(() => null) }, 'cpu', NOW)
-    assert.equal(points.length, 30)
-    assert.deepEqual(points.slice(0, 26), new Array(26).fill(null), 'nothing older than 3 minutes')
-    // (-180 s, -120 s]: 10 · (-120 s, -60 s]: 30 and 40 · the last minute: the newest reading, 70.
-    assert.deepEqual(points.slice(26), [null, 10, 35, 70])
+describe('history as per-minute trends', () => {
+  // NOW falls on a minute's start, so every reading before it is in a minute already over.
+  const t = [NOW - 125_000, NOW - 115_000, NOW - 61_000, NOW - 30_000, NOW - 1_000]
+  const cpu = [10, 30, 40, 50, 70]
+
+  test("one point per minute with readings: its readings' mean, lowest and highest, at their mean time", () => {
+    const trend = trendOf({ t, cpu, mem: t.map(() => null) }, 'cpu', NOW)
+    assert.deepEqual(trend.points, [
+      { key: NOW / MIN - 3, t: NOW - 125_000, v: 10, lo: 10, hi: 10 },
+      { key: NOW / MIN - 2, t: NOW - 88_000, v: 35, lo: 30, hi: 40 },
+      { key: NOW / MIN - 1, t: NOW - 15_500, v: 60, lo: 50, hi: 70 }
+    ])
+    assert.deepEqual(trend.live, { t: NOW - 1_000, v: 70 }, 'the line ends on the newest reading')
+    assert.equal(trend.count, 5)
   })
 
-  test('ignores readings outside the 30 minutes and empty values', () => {
-    const t = [NOW - 31 * MIN, NOW - 10_000]
-    assert.deepEqual(bucketHistory({ t, cpu: [99, null], mem: [] }, 'cpu', NOW), new Array(30).fill(null))
+  test('the minute under way is not a point: the newest reading stands for it', () => {
+    const later = trendOf({ t: [...t, NOW + 10_000], cpu: [...cpu, 90], mem: [] }, 'cpu', NOW + 20_000)
+    assert.equal(later.points.length, 3)
+    assert.deepEqual(later.live, { t: NOW + 10_000, v: 90 })
   })
 
-  test('average and peak come from the raw readings in the window', () => {
-    const t = [NOW - 40 * MIN, NOW - 20 * MIN, NOW - 10 * MIN, NOW - 1_000]
-    assert.deepEqual(windowStats({ t, cpu: [100, 20, 60, 40], mem: [] }, 'cpu', NOW), { avg: 40, peak: 60 })
+  test('a minute already drawn keeps its figures as time passes', () => {
+    const columns = { t, cpu, mem: [] }
+    assert.deepEqual(trendOf(columns, 'cpu', NOW + 5_000).points, trendOf(columns, 'cpu', NOW + 55_000).points)
+  })
+
+  test('a minute of one reading that is also the newest is one point, not two', () => {
+    const trend = trendOf({ t: [NOW - 30_000], cpu: [42], mem: [] }, 'cpu', NOW)
+    assert.equal(trend.points.length, 1)
+    assert.equal(trend.live, null)
+    assert.equal(trend.count, 1)
+  })
+
+  test('ignores readings outside the window (but one minute before it, to enter from the edge) and empty values', () => {
+    const trend = trendOf({ t: [NOW - 40 * MIN, NOW - 30.5 * MIN, NOW - 10_000], cpu: [99, 20, null], mem: [] }, 'cpu', NOW)
+    assert.deepEqual(trend.points.map((p) => p.v), [20])
+    assert.equal(trend.count, 0, 'the reading just before the window is not counted in it')
+  })
+
+  test('average and peak come from the raw readings in the window, with when the peak was', () => {
+    const times = [NOW - 40 * MIN, NOW - 20 * MIN, NOW - 10 * MIN, NOW - 1_000]
+    assert.deepEqual(windowStats({ t: times, cpu: [100, 20, 60, 40], mem: [] }, 'cpu', NOW), { avg: 40, peak: 60, peakAt: NOW - 10 * MIN })
     assert.equal(windowStats({ t: [], cpu: [], mem: [] }, 'cpu', NOW), null)
+  })
+})
+
+describe('chart rules: what each chart is coloured and banded by', () => {
+  const thresholds = { cpu: { busy: 60, strained: 80, critical: 90 }, memory: { busy: 70, strained: 85, critical: 92 }, ramUsedBusy: 93 }
+  test("measured CPU on the person's CPU thresholds; an estimate on none", () => {
+    assert.deepEqual(chartRule('cpu', { estimated: false }, thresholds), [
+      { level: 'busy', at: 60 },
+      { level: 'strained', at: 80 },
+      { level: 'critical', at: 90 }
+    ])
+    assert.equal(chartRule('cpu', { estimated: true }, thresholds), null)
+  })
+  test('RAM in use on its one rule; pressure and Orca\'s figure on the memory thresholds; nothing unjudged', () => {
+    assert.deepEqual(chartRule('memory', { kind: 'used', reliable: true }, thresholds), [{ level: 'busy', at: 93 }])
+    assert.deepEqual(chartRule('memory', { kind: 'pressure', reliable: true }, thresholds)?.map((r) => r.at), [70, 85, 92])
+    assert.deepEqual(chartRule('memory', { kind: 'orca', reliable: true }, thresholds)?.map((r) => r.at), [70, 85, 92])
+    assert.equal(chartRule('memory', { kind: 'unavailable', reliable: false }, thresholds), null)
+    assert.equal(chartRule('memory', { kind: 'orca', reliable: false }, thresholds), null)
+  })
+  test("a snapshot's thresholds reach the model, RAM in use's own included", () => {
+    const m = toFleet({ ...view([machine()]), thresholds: thresholds as never }, NOW).machines[0]!
+    assert.deepEqual(m.cpu.rule?.map((r) => r.at), [60, 80, 90])
+    const older = chartRule('memory', { kind: 'used', reliable: true }, { cpu: thresholds.cpu, memory: thresholds.memory } as never)
+    assert.deepEqual(older, [{ level: 'busy', at: 90 }], "a worker that does not send RAM in use's rule: the default")
   })
 })
 
@@ -408,23 +458,83 @@ test('the preview and the listing images are judged on the thresholds Fleet Moni
   }
 })
 
-describe('chart paths', () => {
-  test('spread points evenly and keep gaps open', () => {
-    const p = seriesPaths([null, 0, 100, null, 50], 100, 10, 0)
-    assert.equal(p.line, 'M25 10 L50 0 M100 5 L100 5')
-    assert.equal(p.area, 'M25 10 L50 0 L50 10 L25 10 Z')
-    assert.equal(p.points, 3)
+describe('chart geometry', () => {
+  const frame = (points: [number, number][], count = points.length, end = 100): Frame => ({
+    start: 0,
+    end,
+    count,
+    points: points.map(([t, v], i) => ({ key: i === points.length - 1 ? ('live' as const) : i, t, v, lo: v, hi: v }))
   })
 
-  test('nothing to draw is empty', () => {
-    assert.deepEqual(seriesPaths(new Array(30).fill(null), 300, 72), { line: '', area: '', points: 0 })
+  test('x is time across the window, y is 0..100 down the box', () => {
+    const runs = placeFrame(frame([[0, 0], [50, 100], [100, 50]]), 100, 10, 0)
+    assert.deepEqual(runs.map((run) => run.map((p) => [p.x, p.y])), [[[0, 10], [50, 0], [100, 5]]])
   })
 
-  test('a single reading in all (a worker just started) draws no lone dot', () => {
-    const one = [...new Array(29).fill(null), 42]
-    assert.deepEqual(seriesPaths(one, 100, 28, 2), { line: '', area: '', points: 1 })
-    assert.deepEqual(seriesPaths([42], 300, 72), { line: '', area: '', points: 1 })
-    assert.equal(seriesPaths([...new Array(28).fill(null), 40, 42], 100, 28, 2).line, 'M96.6 16.4 L100 15.9', 'two readings are a line')
+  test('a minute with no reading breaks the line; a lone point between gaps is a dot', () => {
+    const runs = placeFrame({ start: 0, end: 4 * GAP_MS, count: 3, points: [
+      { key: 1, t: 0, v: 50, lo: 50, hi: 50 },
+      { key: 2, t: 2 * GAP_MS, v: 50, lo: 50, hi: 50 },
+      { key: 3, t: 4 * GAP_MS, v: 50, lo: 50, hi: 50 }
+    ] } as Frame, 100, 10, 0)
+    assert.equal(runs.length, 3)
+    assert.equal(linePath(runs), 'M0 5 L0 5 M50 5 L50 5 M100 5 L100 5')
+  })
+
+  test('fewer than two readings in all draws nothing', () => {
+    assert.deepEqual(placeFrame(frame([[90, 42]], 1), 100, 28, 2), [])
+    assert.deepEqual(placeFrame(frameOf({ points: [], live: null, count: 0 }, 100, 100), 100, 28, 2), [])
+    assert.equal(linePath(placeFrame(frame([[50, 40], [100, 42]]), 100, 28, 2)), 'M50 16.4 L100 15.9', 'two readings are a line')
+  })
+
+  test('the smooth line never overshoots a reading, nor leaves 0..100', () => {
+    const values = [0, 100, 0, 100, 3, 97, 50, 50, 51, 0, 100, 100, 0]
+    const runs = placeFrame(frame(values.map((v, i) => [i * 8, v])), 100, 100, 0)
+    const d = monotone(runs[0]!)
+    const numbers = d.replace(/[MC]/g, ' ').trim().split(/\s+/).map(Number)
+    let [x0, y0] = [numbers[0]!, numbers[1]!]
+    for (let i = 2; i < numbers.length; i += 6) {
+      const [x1, y1, x2, y2, x3, y3] = numbers.slice(i, i + 6) as [number, number, number, number, number, number]
+      for (let k = 0; k <= 1; k += 0.05) {
+        const y = (1 - k) ** 3 * y0 + 3 * (1 - k) ** 2 * k * y1 + 3 * (1 - k) * k ** 2 * y2 + k ** 3 * y3
+        assert.ok(y >= Math.min(y0, y3) - 0.11 && y <= Math.max(y0, y3) + 0.11, `segment to x=${x3} stays between its readings (${y})`)
+      }
+      ;[x0, y0] = [x3, y3]
+    }
+    assert.ok(x0 > 0)
+  })
+
+  test("the range band runs along each minute's highest reading and back along its lowest", () => {
+    const runs = placeFrame({ start: 0, end: 100, count: 2, points: [
+      { key: 1, t: 0, v: 50, lo: 40, hi: 60 },
+      { key: 2, t: 100, v: 50, lo: 40, hi: 60 }
+    ] } as Frame, 100, 100, 0)
+    assert.equal(rangePath(runs), 'M0 40 L100 40 L100 60 L0 60 Z')
+  })
+
+  test('colour stops change level at each threshold, top to bottom', () => {
+    const rule = [{ level: 'busy', at: 70 }, { level: 'strained', at: 85 }, { level: 'critical', at: 95 }] as const
+    const stops = levelStops(rule as never, 100, 0)
+    assert.deepEqual(stops.map((s) => [Math.round(s.offset * 100), s.level]), [
+      [0, 'critical'], [5, 'critical'], [5, 'strained'], [15, 'strained'], [15, 'busy'], [30, 'busy'], [30, 'ok'], [100, 'ok']
+    ])
+    assert.equal(levelStops([{ level: 'busy', at: 90 }] as never, 100, 0).length, 8, 'always eight stops')
+    assert.equal(levelOf(85, rule as never), 'strained')
+    assert.equal(levelOf(84.9, rule as never), 'busy')
+  })
+
+  test('a frame in motion: points move, a new minute grows out of the old line, the window glides', () => {
+    const from: Frame = { start: 0, end: 100, count: 3, points: [{ key: 1, t: 0, v: 0, lo: 0, hi: 0 }, { key: 'live', t: 100, v: 100, lo: 100, hi: 100 }] }
+    const to: Frame = { start: 20, end: 120, count: 4, points: [
+      { key: 1, t: 0, v: 0, lo: 0, hi: 0 },
+      { key: 2, t: 50, v: 80, lo: 80, hi: 80 },
+      { key: 'live', t: 120, v: 40, lo: 40, hi: 40 }
+    ] }
+    const half = tweenFrame(from, to, 0.5)
+    assert.deepEqual([half.start, half.end], [10, 110])
+    assert.deepEqual(half.points.map((p) => [p.key, p.t, p.v]), [[1, 0, 0], [2, 50, 65], ['live', 110, 70]], 'the new point starts at 50 on the old line')
+    assert.equal(tweenFrame(from, to, 1), to)
+    assert.equal(tweenFrame(from, to, 0), from)
   })
 })
 
