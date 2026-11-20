@@ -36,6 +36,7 @@ function fakeDeps(time: FakeTime, cli: FakeCli, override: { cliPath?: string | n
     runId: () => 'cafe01',
     workerFile: '/home/u/code/orca-fleet-monitor/src/worker.ts',
     declaredCommands: ['fleet.show'],
+    version: '9.9.9',
     platform: override.platform ?? 'darwin',
     ...override.more
   }
@@ -95,6 +96,14 @@ test('the worker module has the shape Orca calls', () => {
   assert.equal(worker.localMachineName(''), 'This machine')
 })
 
+test("the worker reads its version from its manifest, and only a plain version", () => {
+  const manifest = JSON.parse(readFileSync(new URL('../orca-plugin.json', import.meta.url), 'utf8')) as { version: string }
+  assert.equal(worker.pluginVersion(), manifest.version)
+  assert.equal(worker.pluginVersion(() => '{"version":"1.4.0-beta.2"}'), '1.4.0-beta.2')
+  assert.equal(worker.pluginVersion(() => '{"version":"<b>1</b>"}'), null)
+  assert.equal(worker.pluginVersion(() => 'not json'), null)
+})
+
 test('answers fleet.snapshot and fleet.heartbeat, and a heartbeat turns on fast polling', async () => {
   const t = await mount()
   const snap = (await t.mounted.request('fleet.snapshot')) as FleetSnapshot
@@ -105,6 +114,7 @@ test('answers fleet.snapshot and fleet.heartbeat, and a heartbeat turns on fast 
   assert.equal(snap.cli.source, 'bundled')
   assert.deepEqual(snap.thresholds.cpu, { busy: 70, strained: 85, critical: 95 }, 'thresholds travel with the snapshot')
   assert.equal(snap.thresholds.ramUsedBusy, 90, "and RAM in use's, which the memory chart bands")
+  assert.equal(snap.cli.version, '9.9.9', 'and the version, for the foot of the panel')
   await t.settle()
   const beat = (await t.mounted.request('fleet.heartbeat')) as { ok: boolean; mode: string }
   assert.deepEqual([beat.ok, beat.mode], [true, 'fast'])

@@ -616,7 +616,7 @@ describe('the "Star on GitHub" link', () => {
     const done = $(v.root, '[data-action="star"]')!
     assert.ok(done === link && v.document.activeElement === link, 'and after: focus never drops to the page')
     assert.deepEqual([done.textContent, done.getAttribute('aria-disabled')], ['Starred on GitHub. Thank you.', 'true'])
-    assert.equal($(v.root, '[data-key="foot"]')!.getAttribute('aria-live'), 'polite')
+    assert.equal($(v.root, '[data-key="foot-star"]')!.getAttribute('aria-live'), 'polite')
     done.click()
     await settle()
     assert.equal(asked, 1)
@@ -691,6 +691,28 @@ describe('the "Star on GitHub" link', () => {
     const v = mount(starrable(), null, star)
     assert.equal($(v.root, '[data-key="foot"]'), null, 'a press there would star from the computer the worker runs on')
     assert.equal(asked, 0)
+  })
+
+  test('the foot names the running version on the right, the link on the left', () => {
+    const offered = frame(true)
+    const versioned = (cli: Record<string, unknown>) => viewOf([local()], { cli: { path: '/x/orca', source: 'bundled', error: null, ...cli } as never })
+    const v = mount(versioned({ version: '1.4.0' }), externalOpener(offered.orca))
+    const foot = $(v.root, '[data-key="foot"]')!
+    assert.deepEqual(
+      (foot.childNodes as FakeElement[]).map((n) => n.getAttribute('data-key')),
+      ['foot-star', 'version']
+    )
+    assert.equal($(foot, '[data-key="version"]')!.textContent, 'v1.4.0')
+    assert.equal($(foot, '[data-key="version"]')!.getAttribute('title'), 'Fleet Monitor 1.4.0')
+    dom.restore()
+    dom = installFakeDom()
+    const browser = mount(versioned({ version: '1.4.0' }), null)
+    assert.equal($(browser.root, '[data-key="version"]')?.textContent, 'v1.4.0', 'shown even where there is no link')
+    assert.equal($(browser.root, '[data-action="star"]'), null)
+    dom.restore()
+    dom = installFakeDom()
+    const odd = mount(versioned({ version: '<b>9</b>' }), null)
+    assert.equal($(odd.root, '[data-key="foot"]'), null, 'anything but a plain version is not shown')
   })
 
   test('sits at the foot of the overview, not on a machine’s detail', async () => {

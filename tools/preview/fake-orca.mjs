@@ -6,7 +6,7 @@ import { sampleSnapshot } from './sample-fleet.mjs'
  * state: live | empty | connecting | loading (never answers) | error (worker unreachable)
  * live: true posts a changing update every 2 s, as the worker does while a panel is open.
  */
-export function createFakeOrca({ state = 'live', live = false, now = () => Date.now(), external = true } = {}) {
+export function createFakeOrca({ state = 'live', live = false, now = () => Date.now(), external = true, version = null } = {}) {
   const handlers = new Map()
   let seq = 1
   let snapshot = null
@@ -53,6 +53,8 @@ export function createFakeOrca({ state = 'live', live = false, now = () => Date.
           if (state === 'loading') return new Promise(() => {})
           if (state === 'error') return Promise.reject(Object.assign(new Error('The plugin worker is not running'), { code: 'unavailable' }))
           snapshot = { ...sampleSnapshot(state, now()), seq }
+          // The worker's version at the foot of the panel, only when asked for (captures leave it out).
+          if (version) snapshot = { ...snapshot, cli: { ...snapshot.cli, version } }
           return Promise.resolve(snapshot)
         }
         if (name === 'fleet.heartbeat') return Promise.resolve({ ok: true, mode: 'fast', seq })

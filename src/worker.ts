@@ -107,6 +107,7 @@ export function realDeps(): MonitorDeps {
     runId: () => randomBytes(4).toString('hex'),
     workerFile: ownFile,
     declaredCommands: declaredCommands(),
+    version: pluginVersion(),
     processes,
     dispose: () => host?.stop(),
     star: createStar({ pluginFile: ownFile }),
@@ -135,6 +136,17 @@ export function declaredCommands(read: () => string = () => readFileSync(new URL
       : []
   } catch {
     return []
+  }
+}
+
+/** This copy's version, from its manifest, so the panel can say which one is running; null when
+ *  the manifest cannot be read or its version is not a plain semantic version. */
+export function pluginVersion(read: () => string = () => readFileSync(new URL('../orca-plugin.json', import.meta.url), 'utf8')): string | null {
+  try {
+    const version = (JSON.parse(read()) as { version?: unknown }).version
+    return typeof version === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null
+  } catch {
+    return null
   }
 }
 

@@ -31,10 +31,12 @@
       const params = new URLSearchParams(location.search)
       const theme = params.get('theme') === 'dark' ? 'dark' : 'light'
       const host = params.get('host') ?? ''
-      document.body.classList.toggle('dark', theme === 'dark' || host === 'slate')
+      document.body.classList.toggle('dark', theme === 'dark' || host === 'slate' || host === 'orca-dark')
       const links = [
         ['Light', '?theme=light'],
         ['Dark', '?theme=dark'],
+        ['Orca dark (primary is the text colour)', '?host=orca-dark'],
+        ['Orca light', '?host=orca-light'],
         ['Host theme: slate', '?host=slate'],
         ['Host theme: paper', '?host=paper'],
         ['Host theme: mist (tinted)', '?host=mist']

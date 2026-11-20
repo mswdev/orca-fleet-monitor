@@ -301,6 +301,8 @@ export type FleetModel = {
   cliError: string | null
   /** What a person types for Orca's CLI here. */
   launcher: 'orca' | 'orca-ide'
+  /** The running worker's version, from its manifest; null from a worker that does not say. */
+  version: string | null
   omitted: number
   online: number
   total: number
@@ -351,6 +353,7 @@ export function installCommand(
   options?: { launcher?: string; ambiguous?: boolean }
 ): string | null
 export function toFleet(view: FleetView | null | undefined, now?: number): FleetModel
+export function versionOf(value: unknown): string | null
 
 /** `orca.shell.openExternal` when the frame's `orca.host.has('shell.openExternal')` says it is
  *  offered (the desktop app), else null. */

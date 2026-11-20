@@ -26,7 +26,7 @@ const BOX = Object.freeze({
   spark: Object.freeze({ w: 100, h: 28, pad: 2 })
 })
 const LEVEL_COLOR = Object.freeze({
-  ok: 'var(--fm-primary)',
+  ok: 'var(--fm-data)',
   busy: 'var(--fm-health-busy)',
   strained: 'var(--fm-health-strained)',
   critical: 'var(--fm-health-critical)'

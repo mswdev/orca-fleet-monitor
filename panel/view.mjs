@@ -413,17 +413,29 @@ function overview(fleet, ui, now) {
  * as a link of its own.
  */
 function starFoot(fleet, ui) {
+  const version = fleet.version ? h('span', { class: 'fm-version', 'data-key': 'version', title: `Fleet Monitor ${fleet.version}` }, `v${fleet.version}`) : null
+  const star = starLink(ui)
+  if (!star && !version) return null
+  // The link on the left, the version on the right; the link's part announces its changing words.
+  return h(
+    'footer',
+    { class: 'fm-foot', 'data-key': 'foot' },
+    h('span', { class: 'fm-foot-star', 'data-key': 'foot-star', 'aria-live': 'polite' }, star),
+    version
+  )
+}
+
+function starLink(ui) {
   // Only in the desktop app, where the frame can open the page: Orca's browser and mobile clients
   // never had the link, and a press there would star from whatever computer runs the worker.
   if (!ui.canOpenExternal) return null
   // One button throughout, so the keyboard's focus stays on it as its words change; the footer
   // announces them. aria-disabled, not disabled: a disabled button drops focus to the page.
-  const foot = (child) => h('footer', { class: 'fm-foot', 'data-key': 'foot', 'aria-live': 'polite' }, child)
   const link = (action, label, more = {}) => h('button', { type: 'button', class: 'fm-foot-link', 'data-action': action, 'data-key': 'star', ...more }, label)
-  if (ui.star === 'done') return foot(link('star', 'Starred on GitHub. Thank you.', { 'aria-disabled': 'true' }))
-  if (ui.star === 'busy') return foot(link('star', 'Starring…', { 'aria-disabled': 'true' }))
-  if (ui.star === 'failed') return foot(link('star-open', 'Could not star from here. Open it on GitHub'))
-  return foot(link('star', 'Star on GitHub'))
+  if (ui.star === 'done') return link('star', 'Starred on GitHub. Thank you.', { 'aria-disabled': 'true' })
+  if (ui.star === 'busy') return link('star', 'Starring…', { 'aria-disabled': 'true' })
+  if (ui.star === 'failed') return link('star-open', 'Could not star from here. Open it on GitHub')
+  return link('star', 'Star on GitHub')
 }
 
 // --- detail ------------------------------------------------------------------------------------
