@@ -556,6 +556,40 @@ describe('a machine that stopped answering while its memory was short', () => {
   })
 })
 
+describe('Fleet Monitor out of date on a machine', () => {
+  const versioned = (version: string | null) =>
+    machine({ beacon: { state: 'fresh', ageMs: 1_000, seq: 9, pluginKey: 'local.fleet-monitor', remotePlugin: 'running', version } })
+  const fleetOf = (version: string | null) => viewOf([local(), versioned(version)], { cli: { path: '/x/orca', source: 'bundled', error: null, version: '1.4.0' } as never })
+
+  test('its detail says so in red at the top, with the command that updates it', async () => {
+    const v = mount(fleetOf('1.3.9'))
+    v.handle.show('env-a')
+    const warn = $(v.root, '[data-key="version-warn"]')!
+    assert.ok(warn, 'shown')
+    const sections = (($(v.root, '.fm-sections')!.childNodes) as FakeElement[]).map((n) => n.getAttribute('data-key'))
+    assert.equal(sections[0], 'version-warn', 'first, above the charts')
+    assert.equal(text($(warn, 'h2')!), 'Fleet Monitor is out of date here')
+    assert.match(text(warn), /This machine runs Fleet Monitor 1\.3\.9; This desk runs 1\.4\.0\./)
+    assert.equal($(warn, '[data-command]')!.textContent, 'orca plugin update mswdev.fleet-monitor --environment "Build Box"')
+    const row = v.root.querySelectorAll('.fm-fact').find((r) => text($(r, 'dt')!) === 'Fleet Monitor')!
+    assert.equal(text($(row, '.fm-version-old')!), '1.3.9')
+    assert.match(text(row), /out of date · 1\.4\.0 is newest/)
+  })
+
+  test('one too old to name its version is out of date too; one up to date shows its version and no warning', () => {
+    const old = mount(fleetOf(null))
+    old.handle.show('env-a')
+    assert.match(text($(old.root, '[data-key="version-warn"]')!), /This machine runs a Fleet Monitor older than 1\.4\.0/)
+    dom.restore()
+    dom = installFakeDom()
+    const current = mount(fleetOf('1.4.0'))
+    current.handle.show('env-a')
+    assert.equal($(current.root, '[data-key="version-warn"]'), null)
+    const row = current.root.querySelectorAll('.fm-fact').find((r) => text($(r, 'dt')!) === 'Fleet Monitor')!
+    assert.equal(text($(row, 'dd')!), '1.4.0')
+  })
+})
+
 describe('the "Star on GitHub" link', () => {
   /** A frame API as Orca gives it, offering `shell.openExternal` or not. */
   const frame = (offered: boolean) => {

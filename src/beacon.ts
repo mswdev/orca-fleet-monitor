@@ -3,9 +3,10 @@
 //
 // Compatibility: the version stays 1 for as long as fields are only added. A reader ignores keys
 // it does not know, and every key added after the first release (`cg`; `mm` in 1.1; `nw`, `dk`,
-// `gp`, `bt` and `pl` in 1.2; `wm` in 1.3) is optional, so an older Fleet Monitor on either side keeps working.
+// `gp`, `bt` and `pl` in 1.2; `wm` in 1.3; `fv` in 1.4) is optional, so an older Fleet Monitor on
+// either side keeps working.
 // The process list travels in lines of its own (src/process-line.ts), which beacon readers skip.
-import { clipText, COUNT_LIMITS, lastEntries } from './bounds.ts'
+import { clipText, COUNT_LIMITS, isPluginVersion, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
 import { isInterfaceName } from './mac-system.ts'
 import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel, WinMemory } from './model.ts'
@@ -53,6 +54,9 @@ type Wire = {
    *  from 1.3). 2 when it cannot list its processes at all (1.3: a Windows machine whose PowerShell
    *  cannot run the reader); an older reader takes that for "does not publish them", which is so. */
   pl?: 1 | 2
+  /** The writer's Fleet Monitor version (1.4 and later), so a paired desktop can tell when the
+   *  machines run different ones. */
+  fv?: string
 }
 
 /** `nw`: the default interface and its bytes per second in (`r`) and out (`t`), absent on the
@@ -380,7 +384,7 @@ const clip = (text: string, max: number): string => (text.length > max ? text.sl
  *  says that this copy also writes process lines, or (`'unavailable'`) that it cannot list them. */
 export function encodeBeacon(
   sample: LocalSample,
-  meta: { run: string; seq: number; intervalMs: number; processes?: boolean | 'unavailable' },
+  meta: { run: string; seq: number; intervalMs: number; processes?: boolean | 'unavailable'; version?: string | null },
   maxChars = BEACON_MAX_CHARS
 ): string | null {
   const wire: Wire = {
@@ -404,7 +408,8 @@ export function encodeBeacon(
     l: [round2(sample.load[0]), round2(sample.load[1]), round2(sample.load[2])],
     ...(sample.macMemory ? { mm: encodeMac(sample.macMemory) } : {}),
     ...encodeSystem(sample.system),
-    ...(meta.processes === 'unavailable' ? { pl: 2 as const } : meta.processes ? { pl: 1 as const } : {})
+    ...(meta.processes === 'unavailable' ? { pl: 2 as const } : meta.processes ? { pl: 1 as const } : {}),
+    ...(isPluginVersion(meta.version) ? { fv: meta.version } : {})
   }
   // Degrade in steps: per-core values (and the groups over them) first, then the network, disk,
   // GPU, battery and Windows memory figures, then long free-text fields. The Mac memory figures (about 200
@@ -501,6 +506,7 @@ export function decodeBeacon(line: unknown, loggedAt: number | null = null): Bea
     // Only where a 1.2 beacon has them, so an older one decodes exactly as it always did.
     ...(system ? { system } : {}),
     ...(w.pl === 1 ? { publishesProcesses: true } : w.pl === 2 ? { cannotListProcesses: true } : {}),
+    ...(isPluginVersion(w.fv) ? { version: w.fv } : {}),
     loggedAt: loggedAt ?? t
   }
 }

@@ -50,17 +50,27 @@ function makeResolver(doc) {
   }
 }
 
-/** Measures the live theme and sets or clears html[data-fm-contrast]. */
+/**
+ * Measures the live theme and sets or clears html[data-fm-contrast] (stronger health and data
+ * colours) and html[data-fm-data] (`text`: data drawn in the text colour, where even the stronger
+ * blue misses 3:1 on some surface it is drawn on). The data colour is never text, so its marks need
+ * 3:1 (WCAG non-text contrast), against the card and page and against the muted tracks that bars
+ * and meters fill.
+ */
 export function applyHealthContrast(doc = document) {
   const html = doc.documentElement
   html.removeAttribute('data-fm-contrast')
+  html.removeAttribute('data-fm-data')
   const resolve = makeResolver(doc)
-  const styles = getComputedStyle(html)
-  const read = (name) => resolve(styles.getPropertyValue(name).trim())
+  const read = (name) => resolve(getComputedStyle(html).getPropertyValue(name).trim())
   const surfaces = [read('--fm-card'), read('--fm-bg')]
+  const tracks = [...surfaces, read('--fm-muted')]
   const health = LEVELS.map((level) => read(`--fm-health-${level}`))
-  // The data colour is never text: drawn marks need 3:1 (WCAG non-text contrast).
-  const data = read('--fm-data')
-  if (needsStrongerHealth(health, surfaces) || needsStrongerHealth([data], surfaces, MIN_GRAPHIC_CONTRAST)) html.setAttribute('data-fm-contrast', 'more')
+  const dataFails = () => needsStrongerHealth([read('--fm-data')], tracks, MIN_GRAPHIC_CONTRAST)
+  if (needsStrongerHealth(health, surfaces) || dataFails()) {
+    html.setAttribute('data-fm-contrast', 'more')
+    // Checked again on the colour now in force: a theme can defeat the stronger blue too.
+    if (dataFails()) html.setAttribute('data-fm-data', 'text')
+  }
   return html.getAttribute('data-fm-contrast') === 'more'
 }

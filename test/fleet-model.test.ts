@@ -4,8 +4,10 @@ import { assert, describe, test } from 'orca/testing'
 import { GAP_MS, frameOf, levelOf, levelStops, linePath, monotone, placeFrame, rangePath, tweenFrame, type Frame } from '../panel/charts.mjs'
 import {
   chartRule,
+  compareVersions,
   installCommand,
   measuredCpu,
+  versionOf,
   INSTALL_SOURCE,
   levelFor,
   toFleet,
@@ -629,6 +631,37 @@ describe('text', () => {
   })
 })
 
+describe('Fleet Monitor versions across the fleet', () => {
+  test('versions are semantic versions, ranked as semantic versioning ranks them', () => {
+    assert.equal(versionOf('1.4.0-rc.1+build.42'), '1.4.0-rc.1+build.42')
+    for (const bad of ['01.4.0', '1.4.0-..', '1.4', ' 1.4.0', `1.4.0-${'x'.repeat(70)}`, 140]) assert.equal(versionOf(bad), null, String(bad))
+    const order = ['1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta', '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0', '1.3.1', '1.4.0', '1.10.0']
+    for (let i = 1; i < order.length; i += 1) assert.ok(compareVersions(order[i - 1]!, order[i]!) < 0, `${order[i - 1]} < ${order[i]}`)
+    assert.equal(compareVersions('1.4.0+a', '1.4.0+b'), 0, 'build metadata does not rank')
+  })
+
+  const versioned = (version: string | null, extra: Partial<MachineView> = {}) =>
+    machine({ id: `env-${version ?? 'old'}`, name: `Box ${version ?? 'old'}`, beacon: { state: 'fresh', ageMs: 1_000, seq: 1, pluginKey: 'local.fleet-monitor', remotePlugin: 'running', version }, ...extra })
+  const fleetWith = (local: string | null, ...remotes: MachineView[]) =>
+    toFleet({ ...view([machine({ id: 'local', kind: 'local', name: 'This desk' }), ...remotes]), cli: { path: '/x/orca', source: 'bundled', error: null, ...(local ? { version: local } : {}) } }, NOW).machines
+
+  test('a machine behind the newest one is out of date, and says where the newest runs', () => {
+    const [here, same, old, tooOld] = fleetWith('1.4.0', versioned('1.4.0'), versioned('1.3.9'), versioned(null))
+    assert.deepEqual(here!.fleetMonitor, { version: '1.4.0', outdated: false, newest: '1.4.0', newestOn: null, update: 'orca plugin update mswdev.fleet-monitor' })
+    assert.equal(same!.fleetMonitor?.outdated, false)
+    assert.deepEqual([old!.fleetMonitor?.outdated, old!.fleetMonitor?.newestOn], [true, 'This desk'])
+    assert.equal(old!.fleetMonitor?.update, 'orca plugin update mswdev.fleet-monitor --environment "Box 1.3.9"')
+    assert.deepEqual([tooOld!.fleetMonitor?.version, tooOld!.fleetMonitor?.outdated], [null, true], 'one too old to say is older than 1.4.0')
+  })
+
+  test('this computer can be the one behind; machines not running it have no version', () => {
+    const [here, newer, basic] = fleetWith('1.4.0', versioned('1.5.0'), versioned(null, { id: 'env-basic', tier: 'basic' }))
+    assert.deepEqual([here!.fleetMonitor?.outdated, here!.fleetMonitor?.newestOn], [true, 'Box 1.5.0'])
+    assert.equal(newer!.fleetMonitor?.outdated, false)
+    assert.equal(basic!.fleetMonitor, null)
+  })
+})
+
 describe('health colour contrast', () => {
   test('the design colours stand on a white card; a tinted light card needs the stronger set', async () => {
     const { contrastRatio, needsStrongerHealth } = await import('../panel/contrast.mjs')
@@ -640,6 +673,14 @@ describe('health colour contrast', () => {
     assert.equal(needsStrongerHealth(design, [hex('#d5d6db')]), true)
     assert.equal(needsStrongerHealth(stronger, [hex('#d5d6db')]), false)
     assert.equal(needsStrongerHealth([null, ...design], [null]), false, 'unknown colours are not guessed')
+  })
+
+  test('the data blue is measured at 3:1, on the muted tracks too', async () => {
+    const { MIN_GRAPHIC_CONTRAST, needsStrongerHealth } = await import('../panel/contrast.mjs')
+    const hex = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16))
+    assert.equal(needsStrongerHealth([hex('#2a62e0')], [hex('#ffffff'), hex('#fafafa')], MIN_GRAPHIC_CONTRAST), false)
+    assert.equal(needsStrongerHealth([hex('#2a62e0')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), true, 'a dark grey track')
+    assert.equal(needsStrongerHealth([hex('#1d4ed8')], [hex('#ffffff'), hex('#b0b0b0')], MIN_GRAPHIC_CONTRAST), false, 'the stronger blue there')
   })
 })
 

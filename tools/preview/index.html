@@ -31,6 +31,7 @@
       const params = new URLSearchParams(location.search)
       const theme = params.get('theme') === 'dark' ? 'dark' : 'light'
       const host = params.get('host') ?? ''
+      const version = params.get('version')
       document.body.classList.toggle('dark', theme === 'dark' || host === 'slate' || host === 'orca-dark')
       const links = [
         ['Light', '?theme=light'],
@@ -71,7 +72,11 @@
           frame.width = String(width)
           frame.height = String(height)
           frame.title = `${title}, ${width} px`
-          frame.src = `frame.html?${query}&theme=${theme}${host ? `&host=${host}` : ''}`
+          const src = new URLSearchParams(query)
+          src.set('theme', theme)
+          if (host) src.set('host', host)
+          if (version) src.set('version', version)
+          frame.src = `frame.html?${src}`
           figure.append(frame)
           row.append(figure)
         }
