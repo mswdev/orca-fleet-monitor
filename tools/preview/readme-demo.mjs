@@ -22,6 +22,8 @@ import * as sample from './sample-fleet.mjs'
 
 const { FLEET, sampleSnapshot } = sample
 const FPS = 10
+/** Motion per frame: real time at FPS. */
+const FRAME_MS = 1000 / FPS
 const TICK_FRAMES = 10
 const TICK_MS = 5_000
 const START = Date.UTC(2026, 0, 15, 10, 0, 0)
@@ -128,6 +130,11 @@ if (!opened) {
 window.orca = orca
 // The panel's timers are run by hand, once a frame, so nothing depends on how long a capture takes.
 let everySecond = () => {}
+// Its motion too: charts and figures move on the clip's own clock, FRAME_MS of motion per frame,
+// so they play at real speed while the readings run at five times; what they ask a frame for runs
+// at the next one. Motion is on whatever the page's reduced-motion setting says.
+let motionClock = 0
+let queued = []
 const binding = createFleetBinding(orca, { now: () => clock, setInterval: () => 0, clearInterval: () => {} })
 mountFleetView(document.getElementById('app'), {
   binding,
@@ -136,8 +143,27 @@ mountFleetView(document.getElementById('app'), {
     everySecond = fn
     return 0
   },
-  clearInterval: () => {}
+  clearInterval: () => {},
+  frame: (fn) => queued.push(fn),
+  clock: () => motionClock,
+  reducedMotion: () => false
 })
+
+/** Every CSS transition, slide (Element.animate) and screen change (a view transition) held at the
+ *  point FRAME_MS a frame puts it, from the frame it started on: the same frames on every run. */
+const startedOn = new WeakMap()
+function stepAnimations(n) {
+  for (const animation of document.getAnimations()) {
+    if (!startedOn.has(animation)) {
+      startedOn.set(animation, n)
+      animation.pause()
+    }
+    const at = (n - startedOn.get(animation)) * FRAME_MS
+    const end = animation.effect?.getComputedTiming().endTime
+    if (typeof end === 'number' && at >= end) animation.finish()
+    else animation.currentTime = at
+  }
+}
 
 // --- the script: where the pointer goes, what it clicks, when the page scrolls ---------------------
 
@@ -198,6 +224,8 @@ window.demo = {
   },
   async frame(n) {
     clock = START + Math.round((n * TICK_MS) / TICK_FRAMES)
+    motionClock = n * FRAME_MS
+    for (const fn of queued.splice(0)) fn()
     if (n % TICK_FRAMES === 0) post(n / TICK_FRAMES)
     everySecond()
     if (document.querySelector('#fm-tab-activity[aria-selected="true"]') && n >= SCROLL.from && n <= SCROLL.to) {
@@ -210,6 +238,10 @@ window.demo = {
     pointer.style.transform = `translate(${at.x - 2}px, ${at.y - 1}px) scale(${sincePress === 0 ? 0.86 : 1})`
     ring.style.transform = `translate(${at.x}px, ${at.y}px) scale(${0.5 + 0.28 * sincePress})`
     ring.style.opacity = sincePress <= 3 ? String(0.9 - 0.25 * sincePress) : '0'
+    stepAnimations(n)
+    await painted()
+    // A screen change starts its slide while painting: held at its start like the rest.
+    stepAnimations(n)
     await painted()
   }
 }
