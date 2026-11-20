@@ -4,6 +4,8 @@
 // set (html[data-fm-contrast="more"], see style.css). Checked once at start and on every theme
 // change Orca reports.
 
+import { chosenColor } from './colors.mjs'
+
 export const LEVELS = ['ok', 'busy', 'strained', 'critical']
 export const MIN_TEXT_CONTRAST = 4.5
 export const MIN_GRAPHIC_CONTRAST = 3
@@ -95,8 +97,9 @@ export function applyHealthContrast(doc = document) {
   const dataFails = () => worstContrast(read('--fm-data'), tracks) < MIN_GRAPHIC_CONTRAST
   if (needsStrongerHealth(health, surfaces) || dataFails()) {
     html.setAttribute('data-fm-contrast', 'more')
-    // Checked again on the colour now in force: a theme can defeat the stronger green too.
-    if (dataFails()) {
+    // Checked again on the colour now in force: a theme can defeat the stronger green too. An OK
+    // colour the person chose (colors.mjs) is theirs: it is never swapped for another.
+    if (dataFails() && !chosenColor('ok', doc)) {
       const best = bestOn([read('--fm-data'), read('--fm-card-fg'), read('--fm-fg'), read('--fm-muted-fg'), ...GREYS], tracks)
       if (best) {
         html.style.setProperty('--fm-data', `rgb(${best.join(', ')})`)

@@ -77,7 +77,7 @@ The panel opens on an overview with one card per machine. Click a card for that 
 - Charts glide to each new reading, and figures count up or down to their new values. With your system's reduce motion setting on, everything changes at once.
 - The foot of the overview shows which version of Fleet Monitor this computer runs. A machine's detail lists the version it runs. When one machine runs an older version than another, its card has a red **Outdated Version** tag, and its detail says which version is newer and gives the command that updates it.
 - A status bar item names the machine that most needs attention, such as `Mac Studio strained · 1 offline`, and lists every machine in its tooltip. Clicking it opens the panel.
-- Colours follow your Orca theme, light or dark. A reading at an OK level is drawn in the same green as an OK machine's dot, because Orca's theme accent is its text colour.
+- Colours follow your Orca theme, light or dark. A reading at an OK level is drawn in the same green as an OK machine's dot, because Orca's theme accent is its text colour. You can pick your own colour for each level in [Settings](#settings).
 
 To add a machine, pair it in Orca under **Settings → Remote Orca servers → Add server**. The panel's **+** button shows the same hint.
 
@@ -252,6 +252,7 @@ On a Linux desktop, type `orca-ide` where these commands say `orca`.
 | CPU busy, strained, critical at | 70,&nbsp;85,&nbsp;95&nbsp;% | The thresholds for the CPU level. |
 | Memory busy, strained, critical at | 75,&nbsp;88,&nbsp;95&nbsp;% | The thresholds for memory pressure, the share of memory the system no longer has available. |
 | RAM used busy at | 90&nbsp;% | A machine whose RAM used passes this counts as Busy. [Memory](#memory) has the other memory rules. |
+| OK, Busy, Strained, Critical colour | Empty | Your own colour for each level, if you find Fleet Monitor's green, yellow, orange and red hard to tell apart or would rather have others. Type a hex code such as `#0072b2` or a colour name such as `blue`. Each one colours the dots, words, figures, lines and bars at that level, in light and dark themes alike, and healthy charts take the OK colour. Leave one empty for Fleet Monitor's own. |
 | Alert when memory runs short | On | Sends a desktop notification when a machine's memory reaches Strained or Critical, or when it stops answering while its memory is short. [Memory alerts](#memory-alerts) has the details. |
 | Orca CLI path | Empty | Leave it empty to find the CLI that ships with this Orca. On Windows that is `orca.exe`; a path to `orca.cmd` uses the `orca.exe` beside it. |
 | Publish this machine's readings | On | Writes a short reading to this plugin's log every 5 seconds, so a paired desktop can show this machine at the full level. It also writes the names and owners of its top processes about every 30 seconds. |
@@ -347,7 +348,7 @@ There are no runtime dependencies and no build step. Orca runs the TypeScript as
 
 ### Previewing the panel
 
-`tools/preview/` runs the real panel against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`, and `tools/preview/activity-sample.mjs` for what 1.2 adds). It covers every state in light and dark and with invented host themes, at 220, 360 and 700 px. Two of the host themes, `orca-dark` and `orca-light`, set the accent to the text colour, as Orca's own themes do, and `version=1.4.0` in the address shows versions, with the Mac mini on an older one; `tools/preview/activity.html` has each state of the Activity tab. No real machine names appear, so its images are safe to publish.
+`tools/preview/` runs the real panel against a stand-in for Orca, fed with invented sample data (`tools/preview/sample-fleet.mjs`, and `tools/preview/activity-sample.mjs` for what 1.2 adds). It covers every state in light and dark and with invented host themes, at 220, 360 and 700 px. Two of the host themes, `orca-dark` and `orca-light`, set the accent to the text colour, as Orca's own themes do, `version=1.4.0` in the address shows versions, with the Mac mini on an older one, and `ok=`, `busy=`, `strained=` and `critical=` try the colour settings (`ok=%230072b2`); `tools/preview/activity.html` has each state of the Activity tab. No real machine names appear, so its images are safe to publish.
 
 ```sh
 npm run preview                       # then open http://127.0.0.1:4173/tools/preview/

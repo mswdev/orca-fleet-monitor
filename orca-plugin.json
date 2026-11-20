@@ -148,6 +148,42 @@
         "maximum": 100
       },
       {
+        "key": "colorOk",
+        "title": "OK colour",
+        "description": "The colour of machines and readings at OK, healthy charts included in the panel, in light and dark themes alike: a hex code such as #0072b2, or a colour name such as blue. Leave it empty for Fleet Monitor's own green.",
+        "type": "string",
+        "default": "",
+        "maxLength": 32,
+        "placeholder": "Fleet Monitor's green"
+      },
+      {
+        "key": "colorBusy",
+        "title": "Busy colour",
+        "description": "The colour of machines and readings at Busy in the panel, in light and dark themes alike: a hex code such as #0072b2, or a colour name such as blue. Leave it empty for Fleet Monitor's own yellow.",
+        "type": "string",
+        "default": "",
+        "maxLength": 32,
+        "placeholder": "Fleet Monitor's yellow"
+      },
+      {
+        "key": "colorStrained",
+        "title": "Strained colour",
+        "description": "The colour of machines and readings at Strained in the panel, in light and dark themes alike: a hex code such as #0072b2, or a colour name such as blue. Leave it empty for Fleet Monitor's own orange.",
+        "type": "string",
+        "default": "",
+        "maxLength": 32,
+        "placeholder": "Fleet Monitor's orange"
+      },
+      {
+        "key": "colorCritical",
+        "title": "Critical colour",
+        "description": "The colour of machines and readings at Critical in the panel, in light and dark themes alike: a hex code such as #0072b2, or a colour name such as blue. Leave it empty for Fleet Monitor's own red.",
+        "type": "string",
+        "default": "",
+        "maxLength": 32,
+        "placeholder": "Fleet Monitor's red"
+      },
+      {
         "key": "cliPath",
         "title": "Orca CLI path",
         "description": "Leave empty to find the CLI that ships with this Orca.",
