@@ -2,9 +2,11 @@
 // changes) in the fake DOM, with a frame scheduler and a clock the test drives. Every value is
 // invented.
 import { afterEach, assert, beforeEach, describe, test } from 'orca/testing'
-import { MOVE_MS, RISE_MS } from '../panel/chart-view.mjs'
+import { chartSlot, createCharts, MOVE_MS, RISE_MS } from '../panel/chart-view.mjs'
+import { frameOf } from '../panel/charts.mjs'
 import type { FleetReadyView, FleetView } from '../panel/fleet-binding.mjs'
 import { COUNT_MS } from '../panel/motion.mjs'
+import { tilesSection } from '../panel/activity.mjs'
 import { mountFleetView } from '../panel/view.mjs'
 import { DEFAULT_HEALTH } from '../src/health.ts'
 import type { MachineView } from '../src/model.ts'
@@ -256,6 +258,53 @@ describe('what the review found', () => {
     v.settle()
     v.push(fleet(), NOW + 5_000)
     assert.equal(v.frames.length, 0, 'no frame is asked for to redraw nothing')
+  })
+
+  test('a machine measured for the first time redraws at once: its old estimates never glide through the new colours', () => {
+    const t = [NOW - 120_000, NOW - 60_000, NOW - 1_000]
+    const estimated = machine({ tier: 'basic', cpu: { percent: 98, source: 'load', perCore: null, groups: null }, history: { t, cpu: [98, 98, 98], mem: [40, 40, 40], ce: [1, 1, 1] } })
+    const v = mount(viewOf([local(), estimated]))
+    v.settle()
+    const measured = machine({ cpu: { percent: 10, source: 'beacon', perCore: [10], groups: null }, history: { t: [...t, NOW + 4_000], cpu: [98, 98, 98, 10], mem: [40, 40, 40, 40], ce: [1, 1, 1, null] } })
+    v.push(viewOf([local(), measured], { seq: 2 }), NOW + 5_000)
+    for (const fn of v.frames.splice(0)) fn()
+    assert.equal(d(v.root, '[data-id="env-a"] .fm-spark .fm-line'), 'M0 0', 'one measured reading: nothing drawn, at once')
+  })
+
+  test('the newest reading alone in its minute, just under a threshold, is judged unrounded, peak ring too', () => {
+    const v = mount(viewOf([local(), machine({ history: { t: [NOW - 90_000, NOW - 30_000], cpu: [40, 95], mem: [40, 40] }, cpu: { percent: 94.96, source: 'beacon', perCore: [95], groups: null } })]), { reduced: true })
+    v.handle.show('env-a')
+    const hit = $(v.root, '[data-key="chart:cpu"] .fm-hit')!
+    hit.dispatchEvent({ type: 'focus', target: hit })
+    assert.equal(hit.getAttribute('aria-valuetext'), 'Now: 95%, strained')
+    assert.equal($(v.root, '[data-key="chart:cpu"] .fm-peak')!.style.getPropertyValue('border-color'), 'var(--fm-health-strained)')
+  })
+
+  test('a network tile with only upload history names its upload peak, and moves', () => {
+    const up = { points: [{ key: 1, t: NOW - 90_000, v: 2e6, lo: 2e6, hi: 2e6 }], live: { t: NOW - 1_000, v: 1e6 }, count: 4 }
+    const tiles = tilesSection({ network: { down: null, up: 1e6, downTrend: null, upTrend: up, downPeak: null, upPeak: 2e6, now: NOW }, disk: null, gpu: null, battery: null })!
+    dom.root.append(tiles as unknown as FakeElement)
+    assert.equal($(dom.root, 'svg.fm-spark') ?? null, null, 'drawn by the chart layer, not yet synced')
+    const frames: (() => void)[] = []
+    const charts = createCharts({ frame: (fn) => frames.push(fn), clock: () => 0, motion: () => true })
+    charts.sync(dom.root as unknown as ParentNode)
+    assert.equal($(dom.root, 'svg.fm-spark')?.getAttribute('aria-label'), 'Network over the last 30 minutes: upload peaked at 2.0 MB/s')
+    assert.notEqual(d(dom.root, '.fm-line--second'), 'M0 0', 'the upload line is drawn')
+  })
+
+  test('changing only the slider or the range band redraws the chart', () => {
+    const charts = createCharts()
+    const trend = { points: [{ key: 1, t: NOW - 90_000, v: 40, lo: 30, hi: 50 }, { key: 2, t: NOW - 30_000, v: 45, lo: 35, hi: 55 }], live: null, count: 6 }
+    const spec = { kind: 'detail' as const, frame: frameOf(trend, NOW, 30 * 60_000), rule: null, label: 'CPU', range: true, scrub: 'CPU, minute by minute' }
+    const slot = chartSlot(spec, { 'data-key': 'chart:x' }) as unknown as FakeElement
+    dom.root.append(slot)
+    charts.sync(dom.root as unknown as ParentNode)
+    assert.notEqual(d(dom.root, '.fm-range'), 'M0 0')
+    ;(slot as unknown as Record<symbol, unknown>)[Object.getOwnPropertySymbols(slot).find((sym) => sym.description === 'fm-island')!] = { ...spec, range: false, scrub: null }
+    charts.sync(dom.root as unknown as ParentNode)
+    assert.equal(d(dom.root, '.fm-range'), 'M0 0')
+    assert.equal($(dom.root, '.fm-hit')?.hasAttribute('hidden'), true)
+    assert.equal($(dom.root, '.fm-hit')?.getAttribute('aria-label'), null)
   })
 
   test('a history rewrite that keeps the count and the newest reading still redraws the chart', () => {

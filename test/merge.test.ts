@@ -235,6 +235,14 @@ describe('memory from a Mac’s own reading (1.1)', () => {
     assert.equal(alone.memory?.reliable, true, 'RAM in use is still known')
   })
 
+  test('RAM in use carried too long to be judged stays out of history', () => {
+    const carried = macMemory({ ageMs: 20_000 })
+    const m = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin', macMemory: carried }) }))
+    assert.equal(historyPointOf(m, 9)?.ram, undefined)
+    const fresh = mergeMachine(base({ id: 'local', kind: 'local', local: localSample({ platform: 'darwin', macMemory: macMemory({ ageMs: 5_000 }) }) }))
+    assert.equal(typeof historyPointOf(fresh, 9)?.ram, 'number', 'carried for a moment: still a reading')
+  })
+
   test('the RAM used threshold comes from the settings', () => {
     const busy = macMemory({ used: 14.6 * GIB, app: 9.1 * GIB })
     const at = (ramUsedBusyPercent: number) =>

@@ -75,7 +75,7 @@ export type InstallHint = { reason: 'absent' | 'installed' | 'quiet'; command: s
 export type Stats = { avg: number; peak: number; peakAt: number | null }
 /** One wall-clock minute of readings: their mean time, mean, lowest and highest. `key` is the
  *  minute's number since the epoch. */
-export type TrendPoint = { key: number; t: number; v: number; lo: number; hi: number }
+export type TrendPoint = { key: number; t: number; v: number; lo: number; hi: number; newest?: true }
 /** A history column as the charts draw it (trendOf): its minutes, the newest reading, and how many
  *  readings fell in the window. */
 export type Trend = { points: TrendPoint[]; live: { t: number; v: number } | null; count: number }
@@ -329,8 +329,10 @@ export function chartRule(
   model: { estimated?: boolean; kind?: string; reliable?: boolean; stale?: boolean },
   thresholds: FleetThresholds
 ): ChartRule | null
-/** The CPU column without readings marked as load-average estimates (`ce`). */
-export function measuredCpu<T extends HistoryColumns | null | undefined>(columns: T): T
+/** The CPU column without readings marked as load-average estimates (`ce`): then only `t` and
+ *  `cpu` (with an empty `mem`); without `ce`, the columns as given. */
+export function measuredCpu(columns: HistoryColumns): HistoryColumns
+export function measuredCpu(columns: HistoryColumns | null | undefined): HistoryColumns | null | undefined
 export const MAC_FIGURES_MAX_AGE_MS: number
 export function windowStats(
   columns: HistoryColumns | null | undefined,

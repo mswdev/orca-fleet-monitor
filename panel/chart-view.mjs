@@ -73,11 +73,12 @@ function signature(target, spec) {
   const one = (f) =>
     f ? `${Math.round(f.end / 1_000)}|${f.count}|${f.points.map((p) => `${p.key}:${p.t}:${p.v}:${p.lo}:${p.hi}`).join(',')}` : '-'
   const peak = spec.peak ? `${spec.peak.t}:${spec.peak.v}` : '-'
-  return `${one(target.main)}/${one(target.second)}/${peak}/${spec.current ?? '-'}`
+  return `${one(target.main)}/${one(target.second)}/${peak}/${spec.current ?? '-'}/${spec.range ? 1 : 0}/${spec.scrub ?? ''}`
 }
 
-/** Whether a target has anything to draw: moving between two empty charts is a waste of frames. */
-const drawable = (target) => Boolean(target?.main && target.main.count >= 2 && target.main.points.length > 0)
+/** Whether a target has anything to draw (either line): moving between two empty charts is a waste
+ *  of frames. */
+const drawable = (target) => [target?.main, target?.second].some((f) => Boolean(f && f.count >= 2 && f.points.length > 0))
 
 /** How long ago a reading was, as the slider says it: "Now" within the last minute. */
 function agoText(end, t) {
@@ -274,7 +275,10 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
       show(st.nodes.peak, on)
       if (on) {
         place(st.nodes.peak, x, yOf(peak.v, height, pad), st.box)
-        st.nodes.peak.style.setProperty('border-color', rule ? LEVEL_COLOR[levelOf(peak.v, rule)] : 'var(--fm-tone)')
+        // The peak may be the newest reading itself: then it is judged unrounded, as the end is.
+        const newest = st.target?.main?.points.find((q) => q.newest === true)
+        const level = levelOf(newest && newest.t === peak.t ? exactOf(st, { ...newest, v: peak.v }) : peak.v, rule)
+        st.nodes.peak.style.setProperty('border-color', rule ? LEVEL_COLOR[level] : 'var(--fm-tone)')
         const text = `peak ${Math.round(peak.v)}`
         if (st.nodes.peakLabel.textContent !== text) st.nodes.peakLabel.textContent = text
       }
@@ -336,10 +340,12 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
     hit.setAttribute('aria-valuetext', spoken)
   }
 
-  /** The newest reading unrounded, where the point is that reading; else the point's own figure. */
+  /** The newest reading unrounded, where the point is that reading (the live point, or a minute of
+   *  that one reading); else the point's own figure. */
   function exactOf(st, p) {
     const current = st.spec.current
-    return p.key === 'live' && typeof current === 'number' && Number.isFinite(current) && Math.abs(current - p.v) <= 0.051 ? current : p.v
+    const newest = p.key === 'live' || p.newest === true
+    return newest && typeof current === 'number' && Number.isFinite(current) && Math.abs(current - p.v) <= 0.051 ? current : p.v
   }
 
   /** What the slider and the note say of a point, from the reading itself, not a frame in motion. */
@@ -413,7 +419,10 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
       st.nodes.svg.removeAttribute('aria-label')
       st.nodes.svg.setAttribute('aria-hidden', 'true')
     }
-    if (st.nodes.hit && spec.scrub) st.nodes.hit.setAttribute('aria-label', spec.scrub)
+    if (st.nodes.hit) {
+      if (spec.scrub) st.nodes.hit.setAttribute('aria-label', spec.scrub)
+      else st.nodes.hit.removeAttribute('aria-label')
+    }
     const target = { main: spec.frame, second: spec.second ?? null }
     const sig = signature(target, spec)
     if (sig === st.sig) {
@@ -430,7 +439,9 @@ export function createCharts({ frame = null, clock = () => Date.now(), motion = 
     const first = st.target === null
     const worthMoving = drawable(target) || drawable(st.shown)
     st.target = target
-    if (!first && worthMoving && step !== null && step > 0 && step <= MAX_GLIDE_MS && canMove()) {
+    // A new rule (the machine is measured now, not estimated) is a new chart, not a move: the old
+    // line must not pass through the new colours on its way out.
+    if (!first && !restyled && worthMoving && step !== null && step > 0 && step <= MAX_GLIDE_MS && canMove()) {
       st.from = st.shown
       st.t0 = clock()
       st.duration = MOVE_MS

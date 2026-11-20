@@ -1,6 +1,6 @@
 // Merges what we know about one machine (local sample, Orca diagnostics, remote beacon) into
 // the single model the panel and status bar read.
-import { assessHealth, rank, type HealthSettings, type MemoryRules } from './health.ts'
+import { assessHealth, macFiguresFresh, rank, type HealthSettings, type MemoryRules } from './health.ts'
 import type {
   BeaconRecord,
   BeaconState,
@@ -331,7 +331,9 @@ export function historyPointOf(state: MachineState, t: number): HistoryPoint | n
   const memory = state.memory && state.memory.reliable ? state.memory : null
   const used = memory?.kind === 'used'
   const mem = memory ? (used ? (memory.pressurePercent ?? null) : memory.percent) : null
-  const ram = used ? memory!.percent : null
+  // RAM in use carried over failed reads for too long to be judged is not a reading of that moment:
+  // it stays out of history, so a chart never colours it as a level health did not give it.
+  const ram = used && macFiguresFresh(memory!.mac).ram ? memory!.percent : null
   if (state.cpu.percent === null && mem === null && ram === null) return null
   const base: HistoryPoint = ram === null ? { t, cpu: state.cpu.percent, mem } : { t, cpu: state.cpu.percent, mem, ram }
   // An estimate is marked, so a chart drawn once the machine is measured can leave it out.
@@ -349,7 +351,7 @@ export function beaconMemoryPercent(r: BeaconRecord): number | null {
 /** RAM in use from a Mac's beacon (1.1), as a percentage; null for any other beacon. */
 export function beaconRamPercent(r: BeaconRecord): number | null {
   const mac = r.macMemory
-  return mac && mac.total > 0 ? clampPercent((mac.used / mac.total) * 100) : null
+  return mac && mac.total > 0 && macFiguresFresh(mac).ram ? clampPercent((mac.used / mac.total) * 100) : null
 }
 
 /** A history point from an older beacon, on the local clock (`offsetMs` = remote minus local). */

@@ -16,7 +16,7 @@
 //   tiles: {                       // each null when the machine does not report it: no tile is drawn
 //     network: { down: number | null, up: number | null,             // bytes per second, now
 //                downTrend: Trend | null, upTrend: Trend | null,     // fleet-binding.mjs trendOf
-//                downPeak: number | null,                            // the window's highest download reading
+//                downPeak: number | null, upPeak: number | null,     // the window's highest readings
 //                now: number } | null                                // the worker's clock
 //     disk: { usedBytes: number, totalBytes: number, readBps: number | null, writeBps: number | null } | null
 //     gpu: { pct: number, peak: number | null, avg: number | null, trend: Trend | null, now: number } | null
@@ -82,6 +82,7 @@ function tilesOf(machine, now) {
           downTrend: net.rx?.trend ?? null,
           upTrend: net.tx?.trend ?? null,
           downPeak: orNull(net.rx?.stats?.peak),
+          upPeak: orNull(net.tx?.stats?.peak),
           now
         }
       : null,
@@ -387,7 +388,11 @@ function networkTile(net) {
       frameOf(scaleTrend(net.downTrend, top), net.now, WINDOW_MS),
       frameOf(scaleTrend(net.upTrend, top), net.now, WINDOW_MS),
       // The peak of the readings themselves, not of a minute's mean.
-      net.downPeak !== null ? `Network over the last 30 minutes: download peaked at ${rate(net.downPeak).text}` : 'Network over the last 30 minutes: no history yet'
+      net.downPeak !== null
+        ? `Network over the last 30 minutes: download peaked at ${rate(net.downPeak).text}`
+        : net.upPeak !== null
+          ? `Network over the last 30 minutes: upload peaked at ${rate(net.upPeak).text}`
+          : 'Network over the last 30 minutes: no history yet'
     ),
     aria: `Network: down ${down.text}, up ${up.text}`
   })

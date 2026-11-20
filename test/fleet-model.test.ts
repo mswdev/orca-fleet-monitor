@@ -507,6 +507,19 @@ describe('chart geometry', () => {
     assert.equal(runs.length, 2)
   })
 
+  test('a gap stays a gap while the chart glides', () => {
+    const at = (end: number) => frameOf(trendOf({ t: [NOW + 59_000, NOW + 121_000, NOW + 150_000], cpu: [40, 50, 55], mem: [] }, 'cpu', end), end, 30 * MIN)
+    const half = tweenFrame(at(NOW + 180_000), at(NOW + 185_000), 0.5)
+    assert.equal(placeFrame(half, 300, 96, 2).length, 2)
+  })
+
+  test('a newest reading that is a whole minute alone is marked as the newest', () => {
+    const trend = trendOf({ t: [NOW - 90_000, NOW - 30_000], cpu: [40, 94.96], mem: [] }, 'cpu', NOW)
+    assert.equal(trend.live, null)
+    assert.equal(trend.points[trend.points.length - 1]?.newest, true)
+    assert.equal(frameOf(trend, NOW, 30 * MIN).points.at(-1)?.newest, true)
+  })
+
   test('fewer than two readings in all draws nothing', () => {
     assert.deepEqual(placeFrame(frame([[90, 42]], 1), 100, 28, 2), [])
     assert.deepEqual(placeFrame(frameOf({ points: [], live: null, count: 0 }, 100, 100), 100, 28, 2), [])
@@ -549,6 +562,20 @@ describe('chart geometry', () => {
     const hi = curve(forward!, false)
     const lo = curve(`M${back}`, true)
     for (let s = 0; s < hi.length; s += 1) for (let k = 0; k <= 1; k += 0.1) assert.ok(hi[s]!(k) <= lo[s]!(k) + 0.11, `highest above lowest (segment ${s}, ${k.toFixed(1)})`)
+  })
+
+  test('the range band never rises above the readings either side of it', () => {
+    // Minutes of [0], [0, 80], [80], [0]: the highest readings are 0, 80, 80, 0.
+    const runs = placeFrame({ start: 0, end: 300, count: 5, points: [
+      { key: 1, t: 0, v: 0, lo: 0, hi: 0 },
+      { key: 2, t: 100, v: 40, lo: 0, hi: 80 },
+      { key: 3, t: 200, v: 80, lo: 80, hi: 80 },
+      { key: 4, t: 300, v: 0, lo: 0, hi: 0 }
+    ] } as Frame, 300, 100, 0)
+    const forward = rangePath(runs, 0, 100).split(' L')[0]!
+    const n = forward.replace(/[MC]/g, ' ').trim().split(/\s+/).map(Number)
+    const ys = n.filter((_, i) => i % 2 === 1)
+    assert.ok(Math.min(...ys) >= 20 - 0.05, `no control point above 80 % (lowest y ${Math.min(...ys)})`)
   })
 
   test("the range band runs along each minute's highest reading and back along its lowest", () => {
