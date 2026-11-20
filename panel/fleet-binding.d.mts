@@ -186,6 +186,11 @@ export type MachineModel = {
   orca: { cpuPct: number; memBytes: number | null } | null
   workspaces: WorkspaceModel[]
   install: InstallHint | null
+  /** The Fleet Monitor it runs, against the newest any machine runs; null where it runs none (basic
+   *  tier, offline). `version` is null for one older than FIRST_VERSIONED, which does not say;
+   *  `newestOn` names a machine running `newest` when this one is behind; `update` is the command,
+   *  typed on this computer, that updates it (null where it cannot be named safely). */
+  fleetMonitor: { version: string | null; outdated: boolean; newest: string | null; newestOn: string | null; update: string | null } | null
   lastKnown: { cpuPct: number | null; memPct: number | null }
   /** Network, disk, GPU and battery (1.2): each null unless the machine is online and is this Mac
    *  or a Mac running Fleet Monitor 1.2. Rates are bytes per second. */
@@ -354,6 +359,9 @@ export function installCommand(
 ): string | null
 export function toFleet(view: FleetView | null | undefined, now?: number): FleetModel
 export function versionOf(value: unknown): string | null
+export function compareVersions(a: string, b: string): number
+export const PLUGIN_VERSION_MAX: number
+export const FIRST_VERSIONED: string
 
 /** `orca.shell.openExternal` when the frame's `orca.host.has('shell.openExternal')` says it is
  *  offered (the desktop app), else null. */

@@ -196,6 +196,8 @@ export type BeaconRecord = {
   /** The beacon says its writer cannot list its processes at all (1.3: a Windows machine whose
    *  PowerShell cannot run the reader). */
   cannotListProcesses?: boolean
+  /** Its writer's Fleet Monitor version (1.4 and later); absent from older ones. */
+  version?: string
   /** When the remote Orca appended the log line (remote clock). */
   loggedAt: number
 }
@@ -386,6 +388,9 @@ export type BeaconState = {
   pluginKey: string | null
   /** What `orca plugin list` said about Fleet Monitor on that machine. */
   remotePlugin: 'running' | 'installed' | 'absent' | 'unknown'
+  /** The Fleet Monitor version its newest beacon names (1.4 and later); null when it names none
+   *  (an older one, or no beacon). This computer's is the panel's own (CliInfo.version). */
+  version?: string | null
 }
 
 export type MachineState = {

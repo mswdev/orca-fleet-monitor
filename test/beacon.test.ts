@@ -200,6 +200,22 @@ describe('core groups (added after the first release)', () => {
   })
 })
 
+describe('the Fleet Monitor version (added in 1.4)', () => {
+  test('a beacon names its writer\'s version; an older one names none', () => {
+    const line = encodeBeacon(localSample(), { ...meta, version: '1.4.0-rc.1+build.42' })!
+    assert.equal(decodeBeacon(line)?.version, '1.4.0-rc.1+build.42')
+    assert.equal('version' in decodeBeacon(encodeBeacon(localSample(), meta)!)!, false)
+  })
+
+  test('anything but a semantic version is neither sent nor read', () => {
+    for (const bad of ['01.4.0', '1.4.0-..', '<b>1</b>', `1.4.0-${'x'.repeat(70)}`]) {
+      assert.equal(encodeBeacon(localSample(), { ...meta, version: bad })!.includes('"fv"'), false, bad)
+      const forged = BEACON_PREFIX + JSON.stringify({ ...JSON.parse(encodeBeacon(localSample(), meta)!.slice(BEACON_PREFIX.length)), fv: bad })
+      assert.equal(decodeBeacon(forged)?.version, undefined, bad)
+    }
+  })
+})
+
 test('readBeacons keeps beacons only, oldest first, across worker runs', () => {
   const line = (seq: number, t: number, run = 'run-a') => encodeBeacon(localSample({ t }), { run, seq, intervalMs: 5_000 })
   const lines = [

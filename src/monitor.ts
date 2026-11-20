@@ -376,7 +376,13 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     syncPublishing()
     if (settings.beacon) {
       seq += 1
-      const line = encodeBeacon(sample, { run: runId, seq, intervalMs: BEACON_INTERVAL_MS, processes: processes?.unavailable?.() ? 'unavailable' : publishingProcesses() })
+      const line = encodeBeacon(sample, {
+        run: runId,
+        seq,
+        intervalMs: BEACON_INTERVAL_MS,
+        processes: processes?.unavailable?.() ? 'unavailable' : publishingProcesses(),
+        version: deps.version ?? null
+      })
       if (line) orca.log(line)
     }
     activePoller.onLocalSample()

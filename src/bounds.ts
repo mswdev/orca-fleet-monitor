@@ -74,6 +74,18 @@ export function isPluginKey(key: unknown, pluginId: string): key is string {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(key.slice(0, key.length - suffix.length))
 }
 
+/** The longest plugin version Fleet Monitor shows or sends. */
+export const PLUGIN_VERSION_MAX = 64
+/** Semantic Versioning 2.0.0, as Orca's manifests take it: no leading zeros, prerelease and build
+ *  identifiers that are not empty. */
+const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/
+
+/** A Fleet Monitor version, from this copy's manifest or another machine's beacon: a semantic
+ *  version of at most PLUGIN_VERSION_MAX characters. */
+export function isPluginVersion(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= PLUGIN_VERSION_MAX && SEMVER.test(value)
+}
+
 /** An environment id Fleet Monitor will pass to `--environment`: letters, digits, `.`, `_` and `-`,
  *  not starting with `-`. Orca makes these ids itself (UUIDs) when a server is paired. */
 export function isEnvironmentId(id: unknown): id is string {

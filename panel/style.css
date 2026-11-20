@@ -87,6 +87,20 @@ html.dark[data-fm-contrast='more'] {
   --fm-health-critical: #fca5a5;
   --fm-data: #a5c0ff;
 }
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark)[data-fm-contrast='more'] {
+    --fm-health-ok: #86efac;
+    --fm-health-busy: #fde047;
+    --fm-health-strained: #fdba74;
+    --fm-health-critical: #fca5a5;
+    --fm-data: #a5c0ff;
+  }
+}
+/* A theme where even the stronger blue cannot be told from a surface it is drawn on: the text
+ * colour, which the theme keeps readable on its own cards. */
+html[data-fm-data='text'] {
+  --fm-data: var(--fm-card-fg);
+}
 
 html,
 body {
@@ -578,6 +592,22 @@ body {
   background: var(--fm-muted);
   border-radius: 6px;
 }
+/* Fleet Monitor behind the newest one in the fleet: in the critical colour, so it is seen. */
+.fm-version-warn {
+  border-color: color-mix(in srgb, var(--fm-health-critical) 55%, var(--fm-border));
+}
+.fm-version-warn h2,
+.fm-version-warn p:not(.fm-sr):not(.fm-note) {
+  color: var(--fm-health-critical);
+}
+.fm-version-warn p {
+  font-size: 12px;
+}
+.fm-version-old {
+  font-weight: 600;
+  color: var(--fm-health-critical);
+}
+
 .fm-notice {
   margin: 10px 0 0;
   padding: 9px 12px;

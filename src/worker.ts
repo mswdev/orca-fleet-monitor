@@ -6,6 +6,7 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import type { OrcaWorkerApi } from 'orca/worker'
+import { isPluginVersion } from './bounds.ts'
 import { createProcessRunner, resolveCli, workerCliEnvironment } from './cli.ts'
 import { readCoreGroups } from './core-groups.ts'
 import { LinuxProcessSampler } from './linux-processes.ts'
@@ -140,11 +141,11 @@ export function declaredCommands(read: () => string = () => readFileSync(new URL
 }
 
 /** This copy's version, from its manifest, so the panel can say which one is running; null when
- *  the manifest cannot be read or its version is not a plain semantic version. */
+ *  the manifest cannot be read or its version is not a semantic version (isPluginVersion). */
 export function pluginVersion(read: () => string = () => readFileSync(new URL('../orca-plugin.json', import.meta.url), 'utf8')): string | null {
   try {
     const version = (JSON.parse(read()) as { version?: unknown }).version
-    return typeof version === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null
+    return isPluginVersion(version) ? version : null
   } catch {
     return null
   }

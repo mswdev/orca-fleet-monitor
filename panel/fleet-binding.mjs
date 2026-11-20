@@ -386,10 +386,62 @@ export function externalOpener(orca) {
 
 // --- From the live model to the design's FLEET shape ------------------------------------------
 
-/** The version the worker says it is (its manifest's), when it is a plain semantic version: the
- *  foot of the panel shows it. Null from an older worker, which does not say. */
+/** Semantic Versioning 2.0.0, as Orca's manifests take it (src/bounds.ts isPluginVersion). */
+const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/
+export const PLUGIN_VERSION_MAX = 64
+
+/** A Fleet Monitor version as a worker or a beacon gives it, when it is a semantic version of at
+ *  most PLUGIN_VERSION_MAX characters; else null (an older worker or machine does not say). */
 export function versionOf(value) {
-  return typeof value === 'string' && value.length <= 32 && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value) ? value : null
+  return typeof value === 'string' && value.length <= PLUGIN_VERSION_MAX && SEMVER.test(value) ? value : null
+}
+
+/** Semantic versioning precedence of two versions (versionOf's): negative when `a` is older, 0 when
+ *  they rank the same (build metadata does not count), positive when `a` is newer. */
+export function compareVersions(a, b) {
+  const parse = (v) => {
+    const [, major, minor, patch, pre] = SEMVER.exec(v)
+    return { core: [Number(major), Number(minor), Number(patch)], pre: pre ? pre.split('.') : [] }
+  }
+  const x = parse(a)
+  const y = parse(b)
+  for (let i = 0; i < 3; i += 1) if (x.core[i] !== y.core[i]) return x.core[i] - y.core[i]
+  // A release ranks above any of its prereleases.
+  if (x.pre.length === 0 || y.pre.length === 0) return y.pre.length - x.pre.length
+  for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i += 1) {
+    const p = x.pre[i]
+    const q = y.pre[i]
+    if (p === q) continue
+    const pn = /^\d+$/.test(p)
+    const qn = /^\d+$/.test(q)
+    if (pn && qn) return Number(p) - Number(q)
+    if (pn !== qn) return pn ? -1 : 1
+    return p < q ? -1 : 1
+  }
+  return x.pre.length - y.pre.length
+}
+
+/** The first Fleet Monitor that sends its version in its beacon: one that sends none is older. */
+export const FIRST_VERSIONED = '1.4.0'
+
+/**
+ * Which Fleet Monitor each machine runs, against the newest any of them runs: `version` (null for
+ * one too old to say, which runs something before FIRST_VERSIONED), `outdated` when it is behind
+ * the newest, `newest` and `newestOn` (the machine that runs it; this computer first). Machines not
+ * running Fleet Monitor (basic tier, offline) have none.
+ */
+function withParity(machines) {
+  const running = machines.filter((m) => m.fleetMonitor)
+  const known = running.filter((m) => m.fleetMonitor.version !== null)
+  let newest = null
+  for (const m of known) if (newest === null || compareVersions(m.fleetMonitor.version, newest) > 0) newest = m.fleetMonitor.version
+  const holder = newest === null ? null : (known.find((m) => m.local && compareVersions(m.fleetMonitor.version, newest) === 0) ?? known.find((m) => compareVersions(m.fleetMonitor.version, newest) === 0))
+  for (const m of running) {
+    const v = m.fleetMonitor.version
+    const behind = newest !== null && (v === null ? compareVersions(FIRST_VERSIONED, newest) <= 0 : compareVersions(v, newest) < 0)
+    m.fleetMonitor = { ...m.fleetMonitor, outdated: behind, newest, newestOn: behind && holder ? holder.name : null }
+  }
+  return machines
 }
 
 /** The worker's defaults (src/health.ts), for a snapshot that carries no thresholds. */
@@ -564,6 +616,15 @@ const LOCAL_SELECTOR = 'local'
  * (`ambiguous`, worked out by toFleet); otherwise the environment id, which Orca also accepts, in
  * the `--environment=<id>` form. With neither, there is no command, only words.
  */
+/** The command that updates Fleet Monitor on a machine, typed on this computer: no --environment
+ *  for this computer itself, else as installCommand names it; null where it cannot be named safely. */
+function updateCommand(machine, context) {
+  const launcher = LAUNCHERS.includes(context.launcher) ? context.launcher : 'orca'
+  if (machine.kind === 'local') return `${launcher} plugin update ${INSTALL_SOURCE}`
+  const install = installCommand(machine, { launcher, ambiguous: context.ambiguous?.has(machine.id) })
+  return install ? install.replace(` plugin install ${INSTALL_SOURCE}`, ` plugin update ${INSTALL_SOURCE}`) : null
+}
+
 export function installCommand(machine, options = {}) {
   const name = typeof machine?.name === 'string' ? machine.name : ''
   const id = typeof machine?.id === 'string' ? machine.id : ''
@@ -992,6 +1053,15 @@ function toMachine(m, thresholds, now, context) {
     orca: m.orca && finite(m.orca.cpu) ? { cpuPct: m.orca.cpu / Math.max(1, cores ?? 1), memBytes: finite(m.orca.memory) ? m.orca.memory : null } : null,
     workspaces: online ? workspacesOf(m.workspaces, cores) : [],
     install: !local && online && basic ? installHintOf(m, context, isMac) : null,
+    // The Fleet Monitor it runs: this computer's is the panel's own; a paired machine's, from its
+    // beacon (one that names none is older than FIRST_VERSIONED). withParity() adds the rest.
+    fleetMonitor: local
+      ? context.version
+        ? { version: context.version, outdated: false, newest: null, newestOn: null, update: updateCommand(m, context) }
+        : null
+      : online && !basic
+        ? { version: versionOf(m.beacon?.version), outdated: false, newest: null, newestOn: null, update: updateCommand(m, context) }
+        : null,
     lastKnown: { cpuPct: newestCpu?.value ?? cpuPct, memPct: newestMem?.value ?? (memReliable ? memPct : null) },
     ...systemOf(m, history, now),
     processes: processSummaryOf(m, m.memory && finite(m.memory.total) ? m.memory.total : null, now)
@@ -1025,7 +1095,8 @@ export function toFleet(view, now = Date.now()) {
   const localPlatform = raw.find((m) => m.kind === 'local')?.host?.platform ?? null
   const launcher = LAUNCHERS.includes(view.cli?.launcher) ? view.cli.launcher : localPlatform === 'linux' ? 'orca-ide' : 'orca'
   const ambiguous = ambiguousNames(raw.filter((m) => m.kind !== 'local'))
-  const machines = raw.map((m) => toMachine(m, thresholds, now, { launcher, ambiguous }))
+  const version = versionOf(view.cli?.version)
+  const machines = withParity(raw.map((m) => toMachine(m, thresholds, now, { launcher, ambiguous, version })))
   const cliError = [view.cli?.error, view.cli?.runError].map((e) => (typeof e === 'string' && e ? plainText(e) : null)).find(Boolean) ?? null
   return {
     state: 'live',
@@ -1033,7 +1104,7 @@ export function toFleet(view, now = Date.now()) {
     thresholds,
     cliError,
     canStar: view.cli?.canStar === true,
-    version: versionOf(view.cli?.version),
+    version,
     launcher,
     omitted: finite(view.omitted) && view.omitted > 0 ? view.omitted : 0,
     online: machines.filter((m) => m.online).length,

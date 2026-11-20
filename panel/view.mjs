@@ -20,7 +20,7 @@ import {
 import { chartSlot, createCharts } from './chart-view.mjs'
 import { frameOf } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
-import { HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
+import { FIRST_VERSIONED, HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
 import { createMotion } from './motion.mjs'
 import { ago, duration, gb, loads, pct, share, size } from './format.mjs'
 
@@ -742,8 +742,6 @@ function installBody(m, ui, open) {
       )
     )
   }
-  const copied = (ui.copied.get(m.id) ?? 0) > Date.now()
-  const failed = ui.copyFailed.has(m.id)
   return h(
     'div',
     props,
@@ -752,6 +750,16 @@ function installBody(m, ui, open) {
       {},
       'Run this here, on this computer. Orca lists what Fleet Monitor would be allowed to do and prints the command that approves it; nothing is installed until you run that one.'
     ),
+    commandBox(m, ui, hint.command)
+  )
+}
+
+/** A command to run on this computer, with a Copy button (the copy action finds it by the machine's
+ *  id: its install command, or the update command of an out-of-date one). */
+function commandBox(m, ui, command) {
+  const copied = (ui.copied.get(m.id) ?? 0) > Date.now()
+  const failed = ui.copyFailed.has(m.id)
+  return [
     h(
       'div',
       { class: 'fm-command' },
@@ -760,7 +768,7 @@ function installBody(m, ui, open) {
       h(
         'code',
         { 'data-command': m.id },
-        hint.command.split(' ').map((word, i) => [i > 0 ? ' ' : null, word.length <= 18 ? h('span', { class: 'fm-word' }, word) : word])
+        command.split(' ').map((word, i) => [i > 0 ? ' ' : null, word.length <= 18 ? h('span', { class: 'fm-word' }, word) : word])
       ),
       h(
         'button',
@@ -775,6 +783,25 @@ function installBody(m, ui, open) {
       { class: 'fm-sr', role: 'status', 'aria-live': 'polite', 'data-key': 'copy-status' },
       copied ? 'Command copied' : failed ? 'Copying did not work. The command is selected.' : ''
     )
+  ]
+}
+
+/**
+ * At the top of a machine's detail when its Fleet Monitor is behind the newest one any machine runs:
+ * which it runs, which is newer and where, and the command that updates it. Machines on different
+ * versions read and report different things (an older one may lack activity, RAM in use, …).
+ */
+function versionWarning(m, ui) {
+  const fm = m.fleetMonitor
+  if (!fm?.outdated || !fm.newest) return null
+  const runs = fm.version ? `Fleet Monitor ${fm.version}` : `a Fleet Monitor older than ${FIRST_VERSIONED}`
+  const where = m.local ? 'This computer runs' : 'This machine runs'
+  return h(
+    'section',
+    { class: 'fm-section fm-version-warn', 'aria-label': 'Fleet Monitor out of date', 'data-key': 'version-warn' },
+    h('h2', {}, 'Fleet Monitor is out of date here'),
+    h('p', {}, `${where} ${runs}; ${fm.newestOn ?? 'another machine'} runs ${fm.newest}. Update it so every machine reports the same readings.`),
+    fm.update ? commandBox(m, ui, fm.update) : null
   )
 }
 
@@ -829,6 +856,15 @@ function systemFacts(m) {
   }
   if (m.uptimeSec !== null) facts.push({ k: 'Uptime', v: duration(m.uptimeSec) })
   if (m.orca) facts.push({ k: 'Orca itself', v: `${share(m.orca.cpuPct)} CPU · ${size(m.orca.memBytes)}` })
+  const fm = m.fleetMonitor
+  if (fm) {
+    const version = fm.version ?? `older than ${FIRST_VERSIONED}`
+    facts.push({
+      k: 'Fleet Monitor',
+      v: fm.outdated ? h('span', { class: 'fm-version-old' }, version) : version,
+      note: fm.outdated ? `out of date · ${fm.newest} is newest` : ''
+    })
+  }
   return facts
 }
 
@@ -905,6 +941,8 @@ function detail(m, ui, now, act, list) {
     if (facts.length > 0) sections.push(factsSection('Last known', facts))
   } else {
     if (m.lost) sections.push(lostSection(m, now))
+    const warning = versionWarning(m, ui)
+    if (warning) sections.push(warning)
     sections.push(cpuSection(m, now), memorySection(m, now, act?.suggest ?? null))
     if (m.workspaces.length > 0) sections.push(workspacesSection(m))
     if (m.install) sections.push(installRow(m, ui))
@@ -1225,7 +1263,8 @@ export function mountFleetView(
 
   function copy(id) {
     const m = fleet.machines.find((x) => x.id === id)
-    const command = m?.install?.command
+    // A basic machine's install command, or an out-of-date one's update command: never both.
+    const command = m?.install?.command ?? (m?.fleetMonitor?.outdated ? m.fleetMonitor.update : null)
     if (!command) return
     if (copyText(command)) {
       ui.copyFailed.delete(id)

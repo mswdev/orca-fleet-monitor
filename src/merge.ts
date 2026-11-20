@@ -229,7 +229,8 @@ export function mergeMachine(input: MergeInput): MachineState {
       ageMs: input.kind === 'local' ? 0 : (beacon?.ageMs ?? null),
       seq: beacon?.latest?.seq ?? null,
       pluginKey: beacon?.pluginKey ?? null,
-      remotePlugin: input.kind === 'local' ? 'running' : (beacon?.remotePlugin ?? 'unknown')
+      remotePlugin: input.kind === 'local' ? 'running' : (beacon?.remotePlugin ?? 'unknown'),
+      version: input.kind === 'local' ? null : (beacon?.latest?.version ?? null)
     },
     updatedAt: input.now
   }

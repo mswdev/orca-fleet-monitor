@@ -53,8 +53,15 @@ export function createFakeOrca({ state = 'live', live = false, now = () => Date.
           if (state === 'loading') return new Promise(() => {})
           if (state === 'error') return Promise.reject(Object.assign(new Error('The plugin worker is not running'), { code: 'unavailable' }))
           snapshot = { ...sampleSnapshot(state, now()), seq }
-          // The worker's version at the foot of the panel, only when asked for (captures leave it out).
-          if (version) snapshot = { ...snapshot, cli: { ...snapshot.cli, version } }
+          // Versions only when asked for (captures leave them out): this computer's at the foot of the
+          // panel, the same on every paired machine but the Mac mini, which runs one too old to say.
+          if (version) {
+            snapshot = {
+              ...snapshot,
+              cli: { ...snapshot.cli, version },
+              machines: snapshot.machines.map((m) => (m.kind === 'remote' && m.id !== 'mini' ? { ...m, beacon: { ...m.beacon, version } } : m))
+            }
+          }
           return Promise.resolve(snapshot)
         }
         if (name === 'fleet.heartbeat') return Promise.resolve({ ok: true, mode: 'fast', seq })
