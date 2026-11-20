@@ -189,6 +189,8 @@ async function launchBrowser(chrome, profile) {
     async close() {
       await send('Browser.close').catch(() => child.kill())
       await new Promise((resolve) => (child.exitCode === null ? child.once('exit', resolve) : resolve()))
+      // Its stderr pipe would keep Node running after the browser has gone.
+      child.stderr?.destroy()
     }
   }
 }
@@ -257,6 +259,9 @@ async function shootDemo() {
     mkdirSync(dir)
     let down = false
     for (let n = 0; n < frames; n += 1) {
+      // The clocks first, so whatever this frame's input starts (a click's screen change) starts
+      // at this frame's time, however soon the browser gets to it.
+      await page.evaluate(`window.demo.at(${n})`)
       const pointer = await page.evaluate(`window.demo.pointer(${n})`)
       await page.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pointer.x, y: pointer.y, button: down ? 'left' : 'none', buttons: down ? 1 : 0 })
       if (pointer.down !== down) {

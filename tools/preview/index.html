@@ -32,6 +32,7 @@
       const theme = params.get('theme') === 'dark' ? 'dark' : 'light'
       const host = params.get('host') ?? ''
       const version = params.get('version')
+      const colors = ['ok', 'busy', 'strained', 'critical'].map((level) => [level, params.get(level)]).filter(([, value]) => value)
       document.body.classList.toggle('dark', theme === 'dark' || host === 'slate' || host === 'orca-dark')
       const links = [
         ['Light', '?theme=light'],
@@ -76,6 +77,7 @@
           src.set('theme', theme)
           if (host) src.set('host', host)
           if (version) src.set('version', version)
+          for (const [level, value] of colors) src.set(level, value)
           frame.src = `frame.html?${src}`
           figure.append(frame)
           row.append(figure)

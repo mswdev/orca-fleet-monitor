@@ -57,6 +57,38 @@ describe('on the page', () => {
     assert.equal(html.getAttribute('data-fm-colors'), null)
   })
 
+  test('only a colour is ever set, however the colours are handed over', () => {
+    const doc = new FakeDocument()
+    assert.deepEqual(applyColors({ ok: 'linear-gradient(red, blue)', busy: 'url(x)', strained: '#abc', critical: 'teal' }, doc as never, knows), ['strained', 'critical'])
+    assert.equal(doc.documentElement.style.getPropertyValue('--fm-health-ok'), '')
+    assert.equal(doc.documentElement.style.getPropertyValue('--fm-health-strained'), '#aabbcc')
+  })
+
+  test('changes that cannot be listened to still leave the colours read, and the panel opening', async () => {
+    const doc = new FakeDocument()
+    const orca = {
+      settings: {
+        get: async () => ({ colorOk: '#0072b2' }),
+        onDidChange: () => {
+          throw new Error('no events here')
+        }
+      }
+    }
+    await followColors(orca, () => {}, doc as never, knows).ready
+    assert.equal(doc.documentElement.style.getPropertyValue('--fm-health-ok'), '#0072b2')
+  })
+
+  test('a read still under way when it is disposed changes nothing', async () => {
+    const doc = new FakeDocument()
+    let release: (value: Record<string, unknown>) => void = () => {}
+    const orca = { settings: { get: () => new Promise<Record<string, unknown>>((resolve) => (release = resolve)) } }
+    const follow = followColors(orca, () => {}, doc as never, knows)
+    follow.dispose()
+    release({ colorOk: '#0072b2' })
+    await follow.ready
+    assert.equal(doc.documentElement.style.getPropertyValue('--fm-health-ok'), '')
+  })
+
   test('followed from Orca’s settings: now, and on each change to a colour setting', async () => {
     const doc = new FakeDocument()
     let values: Record<string, unknown> = { colorOk: 'teal', cpuBusyPercent: 70 }

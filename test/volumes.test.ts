@@ -2,7 +2,7 @@
 // Activity tab shows them. Every value is invented.
 import { assert, describe, test } from 'orca/testing'
 import { decodeBeacon, encodeBeacon } from '../src/beacon.ts'
-import { LinuxSystemReader, linuxVolumePlaces } from '../src/linux-system.ts'
+import { LinuxSystemReader, linuxVolumePlaces, parseZfsList } from '../src/linux-system.ts'
 import { macMainVolumeName, macVolumePlaces, MAX_VOLUMES, parseMacMounts, readVolumes, systemSnapshot } from '../src/mac-system.ts'
 import { parseVolAnswer } from '../src/win-system.ts'
 import { localSample } from './helpers.ts'
@@ -34,13 +34,17 @@ describe('a Mac', () => {
     ], 'not Recovery (hidden), not an installer image (read-only), never a network share')
   })
 
-  test('the start-up disk is named as Finder names it: the entry in /Volumes that links to /', () => {
-    const links: Record<string, string> = { '/Volumes/Work SSD': '/' }
-    assert.equal(macMainVolumeName(() => ['My Backup', 'Work SSD'], (p) => {
-      if (!(p in links)) throw new Error('not a link')
-      return links[p]!
-    }), 'Work SSD')
-    assert.equal(macMainVolumeName(() => { throw new Error('no /Volumes') }), null)
+  test('the start-up disk is named as Finder names it: the entry in /Volumes that links to /', async () => {
+    const asked: string[] = []
+    const link = async (p: string) => {
+      asked.push(p)
+      if (p === '/Volumes/Work SSD') return '/'
+      throw new Error('not a link')
+    }
+    const list = async () => [{ name: 'My Backup', link: false }, { name: 'Old', link: true }, { name: 'Work SSD', link: true }]
+    assert.equal(await macMainVolumeName(list, link), 'Work SSD')
+    assert.deepEqual(asked, ['/Volumes/Old', '/Volumes/Work SSD'], 'a mounted volume is never asked about')
+    assert.equal(await macMainVolumeName(async () => Promise.reject(new Error('no /Volumes'))), null)
     assert.equal(macVolumePlaces(parseMacMounts(mount), null)[0]?.name, 'Macintosh HD', 'and Macintosh HD when it cannot be told')
   })
 
@@ -93,6 +97,42 @@ describe('a disk that does not answer', () => {
     assert.deepEqual((await readVolumes(places, stuck, pending, 40)).map((v) => v.name), ['Macintosh HD', 'Fine'])
     assert.equal(asked.filter((p) => p === '/Volumes/Stuck').length, 1, 'asked once')
   })
+
+  test('at most two reads are outstanding at once, stuck ones included, so Node’s file threads stay free', async () => {
+    let outstanding = 0
+    let most = 0
+    const asked: string[] = []
+    const stuck = async (path: string) => {
+      asked.push(path)
+      outstanding += 1
+      most = Math.max(most, outstanding)
+      return new Promise<null>(() => {})
+    }
+    const places = ['/', '/a', '/b', '/c', '/d'].map((path) => ({ path, name: path }))
+    const pending = new Set<string>()
+    assert.deepEqual(await readVolumes(places, stuck, pending, 20), [])
+    assert.equal(most, 2)
+    assert.deepEqual(await readVolumes(places, stuck, pending, 20), [])
+    assert.deepEqual(asked, ['/', '/a'], 'nothing more is asked while two are stuck')
+  })
+
+  test('a reading that could read none of the disks it listed keeps what it held', async () => {
+    let answer: 'ok' | 'stuck' = 'ok'
+    let t = 0
+    const reader = new LinuxSystemReader({
+      readFile: async (path) => (path === '/proc/self/mounts' ? '/dev/nvme0n1p2 / ext4 rw 0 0' : null),
+      readDir: async () => null,
+      mono: () => t,
+      statfs: () => ({ bsize: 4096, blocks: 1_000_000, bavail: 500_000 }),
+      statfsAsync: async () => (answer === 'ok' ? { bsize: 4096, blocks: 1_000_000, bavail: 500_000 } : null),
+      platform: 'linux'
+    })
+    await reader.refresh()
+    answer = 'stuck'
+    t = 61_000
+    await reader.refresh()
+    assert.deepEqual(reader.snapshot()?.disk?.volumes?.map((v) => v.name), ['/'])
+  })
 })
 
 describe('Linux', () => {
@@ -131,24 +171,55 @@ describe('Linux', () => {
     ])
   })
 
-  test('in a container, the files bind-mounted into /etc are not a disk; its data mount is', () => {
+  test('in a container, files bound in are not a disk, and its data mount is not taken for its start-up disk', () => {
     const docker = [
       'overlay / overlay rw,lowerdir=/var/lib/docker/overlay2/l/A 0 0',
       '/dev/sda1 /etc/resolv.conf ext4 rw 0 0',
       '/dev/sda1 /etc/hostname ext4 rw 0 0',
       '/dev/sda1 /etc/hosts ext4 rw 0 0',
+      '/dev/sda1 /app/config.json ext4 rw 0 0',
       '/dev/sda1 /data ext4 rw 0 0'
     ].join('\n')
-    assert.deepEqual(linuxVolumePlaces(docker), [{ path: '/data', name: '/data', main: true }])
+    // No main: the root is an overlay, so the panel shows the machine's own figures for it.
+    assert.deepEqual(linuxVolumePlaces(docker), [{ path: '/data', name: '/data' }])
   })
 
-  test('each ZFS pool is a disk, its datasets one space; / on ZFS is the main one', () => {
-    const zfs = ['rpool/ROOT/ubuntu / zfs rw 0 0', 'rpool/USERDATA/home /home zfs rw 0 0', 'backup /backup zfs rw 0 0', 'backup/daily /backup/daily zfs rw 0 0', '/dev/sdc1 /archive xfs rw 0 0'].join('\n')
+  test('each ZFS pool is a disk, its datasets one space, marked with the pool; / on ZFS is the main one', () => {
+    const zfs = ['rpool/ROOT/ubuntu / zfs rw 0 0', 'rpool/USERDATA/home /home zfs rw 0 0', 'backup /backup zfs rw 0 0', 'backup/daily /backup/daily zfs rw 0 0', '-o /x zfs rw 0 0', '/dev/sdc1 /archive xfs rw 0 0'].join('\n')
     assert.deepEqual(linuxVolumePlaces(zfs), [
-      { path: '/', name: '/', main: true },
-      { path: '/backup', name: '/backup' },
+      { path: '/', name: '/', main: true, pool: 'rpool' },
+      { path: '/backup', name: '/backup', pool: 'backup' },
       { path: '/archive', name: '/archive' }
-    ])
+    ], 'and never a pool whose name would read as an option')
+  })
+
+  test('a pool’s space is the pool’s, from zfs list, never one dataset’s; with no answer from zfs, the pool is left out', async () => {
+    assert.deepEqual([...parseZfsList('rpool\t900000000000\t100000000000\nbad name\t1\t1\nbackup\tx\t1\n').entries()], [['rpool', { used: 900e9, available: 100e9 }]])
+    const mounts = ['rpool/ROOT/ubuntu / zfs rw 0 0', 'rpool/data /data zfs rw 0 0', '/dev/sdc1 /archive xfs rw 0 0'].join('\n')
+    const reader = (answer: string | null) => {
+      const runs: string[][] = []
+      const r = new LinuxSystemReader({
+        readFile: async (path) => (path === '/proc/self/mounts' ? mounts : null),
+        readDir: async () => null,
+        exec: async (file, args) => {
+          runs.push([file, ...args])
+          return answer === null ? { error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }), stdout: '' } : { error: null, stdout: answer }
+        },
+        mono: () => 0,
+        // One dataset alone: 10 GB of its own and 100 GB free, as statfs would say of it.
+        statfs: () => ({ bsize: 4096, blocks: blocks(110 * GB) / 4096, bavail: blocks(100 * GB) / 4096 }),
+        statfsAsync: async () => ({ bsize: 4096, blocks: 1_000_000, bavail: 500_000 }),
+        platform: 'linux'
+      })
+      return { r, runs }
+    }
+    const ok = reader('rpool\t900000000000\t100000000000\n')
+    await ok.r.refresh()
+    assert.deepEqual(ok.r.snapshot()?.disk?.volumes?.[0], { name: '/', totalBytes: 1000e9, usedBytes: 900e9, main: true })
+    assert.deepEqual(ok.runs[0], ['/usr/sbin/zfs', 'list', '-Hp', '-o', 'name,used,available', '-d', '0', 'rpool'])
+    const none = reader(null)
+    await none.r.refresh()
+    assert.deepEqual(none.r.snapshot()?.disk?.volumes?.map((v) => v.name), ['/archive'])
   })
 
   test('a disk taken out goes from the list at the next reading', async () => {

@@ -21,7 +21,7 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 
 ### Motion
 
-- Charts glide to each new reading, and a detail chart rises from its baseline when it opens. Minutes are counted on the clock, so a minute already drawn never changes and the chart scrolls rather than redrawing.
+- Charts glide to each new reading, and a detail chart rises from its baseline when it opens. Minutes are counted on the clock, so the chart scrolls as time passes instead of redrawing.
 - Figures count up or down to their new values, per-core bars and meters grow and shrink, and level colours fade into each other.
 - Workspace and process rows that change place slide there, on lists of up to 60 rows.
 - Opening a machine, going back and switching between Overview and Activity slide the screen.
@@ -29,14 +29,14 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 
 ### Disks
 
-- The Activity tab shows how full each local disk is, by name. On a Mac these are the startup disk and the other volumes Finder shows that can be written to; APFS volumes that share one disk's space are one row. On Linux they are the filesystems on the machine's own disks and its ZFS pools, without boot partitions, snaps or container storage. On Windows they are the fixed drives, named as Explorer names them, such as `Data (D:)`, and fixed volumes mounted in a folder. Network shares are never included.
+- The Activity tab shows how full each local disk is, by name, up to eight. On a Mac these are the startup disk and the other volumes Finder shows that can be written to; APFS volumes that share one disk's space are one row. On Linux they are the filesystems on the machine's own disks and its ZFS pools (each pool's space as `zfs list` gives it), without boot partitions, snaps or container storage. On Windows they are the fixed drives, named as Explorer names them, such as `Data (D:)`, and fixed volumes mounted in a folder. Network shares are never included.
 - With one disk, the tile names it. With several, a wide **Disks** tile has a row for each, coloured busy from 90% full and strained from 95%. Read and write speed stays the total over every disk.
 
 ### Versions
 
 - The foot of the overview shows this computer's version of Fleet Monitor, with **Star on GitHub** moved to the left.
 - A machine's detail lists the version it runs under **System**.
-- When a machine runs an older version than another, its card has a red **Outdated Version** tag, and its detail opens with a red notice naming the newer version and where it runs, with a Copy button for the `orca plugin update` command that updates it there. This computer can be the one behind too.
+- When a machine runs an older version than another, its card has a red **Outdated Version** tag, and its detail opens with a red notice naming the newer version and where it runs, and how to update it there: a Copy button for the exact `orca plugin update` command when the panel can tell how it was installed, or where to find it in settings when it cannot. This computer can be the one behind too.
 - Fleet Monitor 1.4 publishes its version. A paired machine on an older version shows as older than 1.4.0. One whose version cannot be told is never called out of date.
 
 ### The overview
@@ -47,6 +47,6 @@ Charts that show what health was doing, a panel that moves smoothly, every disk 
 
 ### Updating
 
-Run `orca plugin update mswdev.fleet-monitor` on each machine (`orca-ide` instead of `orca` on Linux) and approve when it asks. Disk names and versions need 1.4.0 both on the machine and on the computer showing it.
+Update each machine from **Settings → Plugins** in Orca on that machine. From a terminal on it, a copy installed from the catalog updates with `orca plugin update mswdev.fleet-monitor --environment local` (`orca-ide` instead of `orca` on Linux); approve when it asks. Once this computer runs 1.4.0, a machine that is behind shows the exact command for it. Disk names and versions need 1.4.0 both on the machine and on the computer showing it.
 
-818 tests.
+824 tests.

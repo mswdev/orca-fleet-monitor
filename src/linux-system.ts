@@ -61,6 +61,11 @@ export const SYS_POWER_SUPPLY_PATH = '/sys/class/power_supply'
 export const NVIDIA_VERSION_PATH = '/proc/driver/nvidia/version'
 export const NVIDIA_GPUS_PATH = '/proc/driver/nvidia/gpus'
 export const NVIDIA_SMI_PATH = '/usr/bin/nvidia-smi'
+/** Where OpenZFS installs `zfs`, for each pool's size and use (`zfs list`). */
+export const ZFS_PATHS = ['/usr/sbin/zfs', '/sbin/zfs', '/usr/local/sbin/zfs'] as const
+const ZFS_MAX_BYTES = 16 * 1024
+/** A ZFS pool's name: a letter, then letters, digits and _ - . : (never an option to zfs). */
+const ZFS_POOL = /^[A-Za-z][A-Za-z0-9_.:-]{0,254}$/
 export const NVIDIA_SMI_ARGS = ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'] as const
 /** The main volume: `/`, except where `/` is a small read-only image (Fedora Atomic and CoreOS
  *  mount a composefs of a few MB there, always full) and the real disk is under `/sysroot` and
@@ -450,6 +455,16 @@ function spaceRank(path: string): number {
   return i < 0 ? LINUX_SPACE_PATHS.length : i
 }
 
+/** Which of two mounts of one disk names it better: one of LINUX_SPACE_PATHS, else the one
+ *  nearer the root (a disk's own mount, not a folder or file bound in from it, such as a
+ *  container's /app/config.json), else the one listed first. */
+function namesBetter(path: string, than: string): boolean {
+  const rank = spaceRank(path) - spaceRank(than)
+  if (rank !== 0) return rank < 0
+  const depth = (p: string) => p.split('/').filter(Boolean).length
+  return depth(path) < depth(than)
+}
+
 /** A mount's name as a person knows it: a desktop's removable disk by its label (the last part of
  *  /run/media/<user>/<label>, /media/<label>), anything else by where it is mounted. */
 function mountName(path: string): string {
@@ -464,12 +479,13 @@ function mountName(path: string): string {
  * The volumes a person thinks of as this machine's disks, from /proc/self/mounts: each local
  * filesystem on a block device (not a loop device), and each ZFS pool, once per disk (a btrfs disk
  * mounted at several subvolumes, a pool's datasets: one space), at the mount that names it best
- * (one of LINUX_SPACE_PATHS, else the first listed). The main one is the first of
- * LINUX_SPACE_PATHS among them, else the first.
+ * (namesBetter). A pool is marked with its name: its space is the pool's (`zfs list`), never one
+ * dataset's. The main one is the first of LINUX_SPACE_PATHS among them; with none of those (a
+ * container's root is an overlay), none is, and the machine's own disk figures stand for it.
  */
 export function linuxVolumePlaces(text: unknown): VolumePlace[] {
   if (typeof text !== 'string') return []
-  const disks = new Map<string, string>()
+  const disks = new Map<string, { path: string; pool?: string }>()
   let lines = 0
   for (const line of text.split('\n')) {
     if ((lines += 1) > 4096) break
@@ -479,14 +495,31 @@ export function linuxVolumePlaces(text: unknown): VolumePlace[] {
     if (!zfs && (!device.startsWith('/dev/') || /^\/dev\/(loop|zram|ram)\d/.test(device))) continue
     const path = unescapeMount(rawPath)
     if (!path.startsWith('/') || skippedMount(path)) continue
-    const key = zfs ? `zfs:${device.split('/')[0]}` : device
+    const pool = zfs ? device.split('/')[0]! : undefined
+    if (pool !== undefined && !ZFS_POOL.test(pool)) continue
+    const key = pool !== undefined ? `zfs:${pool}` : device
     const held = disks.get(key)
-    if (held === undefined || spaceRank(path) < spaceRank(held)) disks.set(key, path)
+    if (held === undefined || namesBetter(path, held.path)) disks.set(key, { path, ...(pool !== undefined ? { pool } : {}) })
   }
-  const places: VolumePlace[] = [...disks.values()].map((path) => ({ path, name: mountName(path) }))
-  const main = LINUX_SPACE_PATHS.map((p) => places.find((v) => v.path === p)).find(Boolean) ?? places[0]
+  const places: VolumePlace[] = [...disks.values()].map(({ path, pool }) => ({ path, name: mountName(path), ...(pool !== undefined ? { pool } : {}) }))
+  const main = LINUX_SPACE_PATHS.map((p) => places.find((v) => v.path === p)).find(Boolean)
   if (main) main.main = true
   return [...(main ? [main] : []), ...places.filter((v) => v !== main)]
+}
+
+/** `zfs list -Hp -o name,used,available -d 0 <pools>`: each pool's bytes used (its datasets and
+ *  snapshots together) and available, by name. */
+export function parseZfsList(text: unknown): Map<string, { used: number; available: number }> {
+  const out = new Map<string, { used: number; available: number }>()
+  if (typeof text !== 'string' || text.length > ZFS_MAX_BYTES) return out
+  for (const line of text.split('\n')) {
+    const [name, used, available] = line.split('\t')
+    if (!name || !ZFS_POOL.test(name) || !/^\d{1,19}$/.test(used ?? '') || !/^\d{1,19}$/.test(available ?? '')) continue
+    const u = Number(used)
+    const a = Number(available)
+    if (Number.isSafeInteger(u) && Number.isSafeInteger(a) && Number.isSafeInteger(u + a) && u + a > 0) out.set(name, { used: u, available: a })
+  }
+  return out
 }
 
 // --- the reader ------------------------------------------------------------------------------
@@ -607,7 +640,29 @@ export class LinuxSystemReader {
     const mounts = await this.file(PROC_MOUNTS_PATH)
     // Kept as it was only when the list could not be read: a disk taken out goes at once.
     if (mounts === null) return
-    this.volumes = { value: await readVolumes(linuxVolumePlaces(mounts), this.statfsVolume, this.volumesPending), at: now }
+    const places = linuxVolumePlaces(mounts)
+    const pools = [...new Set(places.flatMap((p) => (p.pool ? [p.pool] : [])))]
+    const sizes = pools.length > 0 ? await this.zfsPools(pools) : new Map<string, { used: number; available: number }>()
+    // A pool's space is the pool's, from zfs; with no answer from it, the pool is left out.
+    const statfs: StatFsAsync = (path) => {
+      const place = places.find((p) => p.path === path)
+      if (!place?.pool) return this.statfsVolume(path)
+      const size = sizes.get(place.pool)
+      return Promise.resolve(size ? { bsize: 1, blocks: size.used + size.available, bavail: size.available } : null)
+    }
+    const volumes = await readVolumes(places, statfs, this.volumesPending)
+    // Disks listed but none read (all still answering): what was held stands, until it is too old.
+    if (volumes.length === 0 && places.length > 0) return
+    this.volumes = { value: volumes, at: now }
+  }
+
+  /** Each of `pools`' use, from the first `zfs` that answers; empty when none does. */
+  private async zfsPools(pools: readonly string[]): Promise<Map<string, { used: number; available: number }>> {
+    for (const file of ZFS_PATHS) {
+      const out = await this.run(file, ['list', '-Hp', '-o', 'name,used,available', '-d', '0', ...pools.slice(0, MAX_VOLUMES)], ZFS_MAX_BYTES)
+      if (out !== null) return parseZfsList(out)
+    }
+    return new Map()
   }
 
   private heavy(): boolean {

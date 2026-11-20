@@ -7,6 +7,6 @@ export const LEVELS: readonly Level[]
 export const COLOR_SETTINGS: Readonly<Record<Level, string>>
 export function colorOf(value: unknown, knows?: (name: string) => boolean): string | null
 export function colorsOf(settings: Record<string, unknown> | null | undefined, knows?: (name: string) => boolean): Colors
-export function applyColors(colors: Partial<Colors> | null | undefined, doc?: Doc): Level[]
+export function applyColors(colors: Partial<Record<Level, unknown>> | null | undefined, doc?: Doc, knows?: (name: string) => boolean): Level[]
 export function chosenColor(level: Level, doc?: Doc): boolean
 export function followColors(orca: { settings?: Settings } | null | undefined, after?: () => void, doc?: Doc, knows?: (name: string) => boolean): { ready: Promise<void>; dispose(): void }
