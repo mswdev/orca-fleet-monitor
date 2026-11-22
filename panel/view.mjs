@@ -609,19 +609,6 @@ function estimateNote(m) {
   )
 }
 
-/** Rows under the CPU card: the CPU's and the GPU's temperature, in °C with °F on hover. A GPU
- *  at rest whose sensors are off (Apple silicon) has its row, with a dash; a figure the machine
- *  does not report has none. */
-function tempRows(m) {
-  const t = m.temp
-  if (!t) return null
-  const value = (c) => (c === null ? '–' : h('span', { class: 'fm-temp', title: fahrenheit(c) }, celsius(c)))
-  const rows = []
-  if (t.cpuC !== null) rows.push({ k: 'CPU temperature', v: value(t.cpuC), note: t.cpuZone ? 'ACPI thermal zone, may not be the CPU itself' : '' })
-  if (t.gpuC !== null || t.gpuOff) rows.push({ k: 'GPU temperature', v: value(t.gpuC), note: t.gpuOff ? 'idle' : '' })
-  return h('dl', { class: 'fm-facts fm-cpu-facts', 'data-key': 'cpu-facts' }, rows.map(factRow))
-}
-
 function cpuSection(m, now) {
   const sub = [coresText(m), m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : ''].filter(Boolean).join(' · ')
   return h(
@@ -635,8 +622,7 @@ function cpuSection(m, now) {
       ? cores(m.cpu.groups)
       : m.cpu.coresHidden > 0
         ? h('p', { class: 'fm-note', 'data-key': 'cores-hidden' }, `Per-core load is not drawn above ${MAX_CORES_DRAWN} cores.`)
-        : null,
-    tempRows(m)
+        : null
   )
 }
 
@@ -889,6 +875,18 @@ function chipLabel(m) {
   return m.platform === 'darwin' && /apple/i.test(m.chip ?? '') ? 'Chip' : 'CPU'
 }
 
+/** The CPU's and the GPU's temperature, in °C with °F on hover. A GPU at rest whose sensors are
+ *  off (Apple silicon) has its row, with a dash; a figure the machine does not report has none. */
+function tempFacts(m) {
+  const t = m.temp
+  if (!t) return []
+  const value = (c) => (c === null ? '–' : h('span', { class: 'fm-temp', title: fahrenheit(c) }, celsius(c)))
+  const facts = []
+  if (t.cpuC !== null) facts.push({ k: 'CPU temperature', v: value(t.cpuC), note: t.cpuZone ? 'ACPI thermal zone, may not be the CPU itself' : '' })
+  if (t.gpuC !== null || t.gpuOff) facts.push({ k: 'GPU temperature', v: value(t.gpuC), note: t.gpuOff ? 'idle' : '' })
+  return facts
+}
+
 function systemFacts(m) {
   const facts = []
   if (m.tier === 'basic') {
@@ -898,6 +896,7 @@ function systemFacts(m) {
     const full = m.load.five !== null && m.load.fifteen !== null
     facts.push({ k: 'Load avg', v: loads(m.load), note: full ? '1m · 5m · 15m' : '1m' })
   }
+  facts.push(...tempFacts(m))
   if (m.uptimeSec !== null) facts.push({ k: 'Uptime', v: duration(m.uptimeSec) })
   if (m.orca) facts.push({ k: 'Orca itself', v: `${share(m.orca.cpuPct)} CPU · ${size(m.orca.memBytes)}` })
   const fm = m.fleetMonitor
