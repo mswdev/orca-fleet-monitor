@@ -1208,8 +1208,7 @@ body {
   overflow-wrap: anywhere;
 }
 /* What a Mac's RAM in use is made of, under its chart. */
-.fm-mem-facts,
-.fm-cpu-facts {
+.fm-mem-facts {
   padding-top: 10px;
   border-top: 1px solid var(--fm-border);
 }
