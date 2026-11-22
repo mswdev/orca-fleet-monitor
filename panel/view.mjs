@@ -22,7 +22,7 @@ import { frameOf } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
 import { FIRST_VERSIONED, HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
 import { createMotion } from './motion.mjs'
-import { ago, agoShort, duration, fillAgo, gb, loads, pct, share, size } from './format.mjs'
+import { ago, agoShort, celsius, duration, fahrenheit, fillAgo, gb, loads, pct, share, size } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
 export const PAIR_PATH = 'Settings → Remote Orca servers → Add server'
@@ -609,6 +609,19 @@ function estimateNote(m) {
   )
 }
 
+/** Rows under the CPU card: the CPU's and the GPU's temperature, in °C with °F on hover. A GPU
+ *  at rest whose sensors are off (Apple silicon) has its row, with a dash; a figure the machine
+ *  does not report has none. */
+function tempRows(m) {
+  const t = m.temp
+  if (!t) return null
+  const value = (c) => (c === null ? '–' : h('span', { class: 'fm-temp', title: fahrenheit(c) }, celsius(c)))
+  const rows = []
+  if (t.cpuC !== null) rows.push({ k: 'CPU temperature', v: value(t.cpuC), note: t.cpuZone ? 'ACPI thermal zone, may not be the CPU itself' : '' })
+  if (t.gpuC !== null || t.gpuOff) rows.push({ k: 'GPU temperature', v: value(t.gpuC), note: t.gpuOff ? 'idle' : '' })
+  return h('dl', { class: 'fm-facts fm-cpu-facts', 'data-key': 'cpu-facts' }, rows.map(factRow))
+}
+
 function cpuSection(m, now) {
   const sub = [coresText(m), m.cpu.estimated ? (m.cpu.pct === null ? 'no estimate' : 'estimate') : ''].filter(Boolean).join(' · ')
   return h(
@@ -622,7 +635,8 @@ function cpuSection(m, now) {
       ? cores(m.cpu.groups)
       : m.cpu.coresHidden > 0
         ? h('p', { class: 'fm-note', 'data-key': 'cores-hidden' }, `Per-core load is not drawn above ${MAX_CORES_DRAWN} cores.`)
-        : null
+        : null,
+    tempRows(m)
   )
 }
 

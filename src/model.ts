@@ -103,6 +103,23 @@ export type GpuReading = {
   ageMs?: number
 }
 
+/** The CPU's and the GPU's temperature, in whole °C, each null where it could not be read (1.5).
+ *  A Mac: the SMC, the hottest CPU core and the hottest GPU sensor. Linux: hwmon (`coretemp`,
+ *  `k10temp`, a SoC's thermal sensor; `amdgpu`, `nouveau`, `i915`, `xe`) and `nvidia-smi`.
+ *  Windows: the ACPI thermal zone for the CPU, which may not be the die itself (`cpuZone`), and
+ *  the GPU's own sensor as Task Manager reads it (D3DKMT). Only 1 to 125 °C is kept. */
+export type TempReading = {
+  cpuC: number | null
+  gpuC: number | null
+  /** The CPU figure is an ACPI thermal zone (Windows), not the CPU's own sensor. */
+  cpuZone?: true
+  /** The GPU has sensors but they are off because it is at rest: Apple silicon's switch off
+   *  within a second of the GPU going idle, and read again as soon as it works. */
+  gpuOff?: true
+  /** How old it is, in ms; it is read about every 30 s. */
+  ageMs?: number
+}
+
 /** The power source, and the internal battery when there is one: `pmset -g batt` on a Mac,
  *  `/sys/class/power_supply` on Linux, the system's power status on Windows. */
 export type BatteryReading = {
@@ -143,6 +160,8 @@ export type MacSystem = {
   disk: DiskReading | null
   gpu: GpuReading | null
   battery: BatteryReading | null
+  /** CPU and GPU temperature (1.5); absent where none could be read. */
+  temp?: TempReading | null
   /** Windows only (1.3): its memory as Task Manager shows it. Absent elsewhere. */
   winMemory?: WinMemory | null
 }

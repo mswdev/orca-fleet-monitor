@@ -11,6 +11,9 @@
 //   GPU       `ioreg -r -d 1 -c IOAccelerator` about every 30 s: "Device Utilization %", the
 //             busiest GPU when there are several
 //   battery   `pmset -g batt` about once a minute: power source, charge, state, time remaining
+//   temp      the SMC about every 30 s, through `osascript -l JavaScript` (MAC_TEMP_SCRIPT): the
+//             hottest CPU core and GPU sensor. The keys are listed once (about 1.2 s on an M2
+//             Pro), then only those are read (about 95 ms)
 //
 // What is read less often than every reading is carried until the next read, with its age; a
 // read that fails carries the last value for a while longer, then the value is dropped. Every
@@ -23,14 +26,19 @@ import { statfsSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { createRunBounded, type ExecFile } from './mac-memory.ts'
 import { readdir, readlink, statfs as statfsAsync } from 'node:fs/promises'
-import type { BatteryReading, DiskReading, GpuReading, MacSystem, NetReading, VolumeReading } from './model.ts'
+import type { BatteryReading, DiskReading, GpuReading, MacSystem, NetReading, TempReading, VolumeReading } from './model.ts'
 
 export const NETSTAT_PATH = '/usr/sbin/netstat'
 export const ROUTE_PATH = '/sbin/route'
 export const IOREG_PATH = '/usr/sbin/ioreg'
 export const PMSET_PATH = '/usr/bin/pmset'
 export const MOUNT_PATH = '/sbin/mount'
+export const OSASCRIPT_PATH = '/usr/bin/osascript'
 const TIMEOUT_MS = 2_000
+/** Listing every SMC key asks it about each of its 2,000 to 3,000 keys. */
+const TEMP_LIST_TIMEOUT_MS = 10_000
+/** A Mac whose SMC cannot be listed this many times in a row is not asked again. */
+export const TEMP_LIST_TRIES = 3
 /** This reader's own bounded runner, apart from the memory reads' (src/mac-memory.ts). */
 export const systemRunBounded: ExecFile = createRunBounded()
 /** ioreg prints every property of each matching object: about 45 KB for one Apple GPU. */
@@ -42,6 +50,7 @@ export const SYSTEM_CADENCE = {
   routeMs: 60_000,
   diskIoMs: 20_000,
   gpuMs: 30_000,
+  tempMs: 30_000,
   batteryMs: 60_000,
   spaceMs: 60_000
 } as const
@@ -49,6 +58,7 @@ export const SYSTEM_MAX_AGE = {
   netMs: 12_000,
   diskIoMs: 50_000,
   gpuMs: 70_000,
+  tempMs: 70_000,
   batteryMs: 180_000,
   spaceMs: 180_000
 } as const
@@ -147,6 +157,127 @@ export function parseGpu(text: unknown): number | null {
   }
   return best
 }
+
+/** The lowest and highest temperature kept, in °C. A powered-down Apple silicon block reads
+ *  under 10 (its sensor is off), and a key that is not a temperature can read anything. */
+export const TEMP_MIN_C = 15
+export const TEMP_MAX_C = 125
+
+/** A temperature in the range a CPU or GPU can be at, as a whole °C, or null. */
+export function plausibleTemp(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= TEMP_MIN_C && value <= TEMP_MAX_C ? Math.round(value) : null
+}
+
+/** The SMC keys read for temperatures. Apple silicon: `Tp..` (P-cores), `Te..` (E-cores), `Tg..`
+ *  (GPU). An Intel Mac: `TC0P`, `TC0D`, `TC0E`, `TC0F`, `TC0H` and `TC<n>C` (CPU), `TG0P`, `TG0D`,
+ *  `TG0H` (GPU). Checked on an M2 Pro: under a GPU-only load `Tg..` went from 6 to 75 °C while
+ *  `Tp..` stayed off, and under a CPU-only load `Tp..` reached 108 °C while `Tg..` stayed off. */
+export const SMC_CPU_KEY = /^(?:T[pe][0-9A-Za-z]{2}|TC0[PDEFH]|TC\dC)$/
+export const SMC_GPU_KEY = /^(?:Tg[0-9A-Za-z]{2}|TG0[PDH])$/
+const SMC_ANSWER_MAX_BYTES = 64 * 1024
+/** The most keys read for temperatures: an M2 Pro has 44. */
+export const SMC_KEYS_MAX = 200
+
+/**
+ * The SMC's temperature keys and their values, from MAC_TEMP_SCRIPT's answer: `{ "Tp01": 62.5, … }`.
+ * The CPU is its hottest core, the GPU its hottest sensor, each in TEMP_MIN_C to TEMP_MAX_C. A GPU
+ * whose keys are there but all read below that range is at rest, its sensors off (`gpuOff`). Null when
+ * neither is known.
+ */
+export function parseMacTemps(text: unknown): { reading: TempReading | null; keys: string[] } | null {
+  if (typeof text !== 'string' || text.length > SMC_ANSWER_MAX_BYTES) return null
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const keys: string[] = []
+  let cpu: number | null = null
+  let gpu: number | null = null
+  let gpuKeys = 0
+  for (const [key, value] of Object.entries(raw).slice(0, SMC_KEYS_MAX)) {
+    const isCpu = SMC_CPU_KEY.test(key)
+    const isGpu = SMC_GPU_KEY.test(key)
+    if (!isCpu && !isGpu) continue
+    keys.push(key)
+    const c = plausibleTemp(value)
+    if (isGpu) gpuKeys += 1
+    if (c === null) continue
+    if (isCpu) cpu = cpu === null ? c : Math.max(cpu, c)
+    else gpu = gpu === null ? c : Math.max(gpu, c)
+  }
+  const gpuOff = gpu === null && gpuKeys > 0
+  const reading: TempReading | null = cpu === null && gpu === null && !gpuOff ? null : { cpuC: cpu, gpuC: gpu, ...(gpuOff ? { gpuOff: true as const } : {}) }
+  return { reading, keys }
+}
+
+/**
+ * Reads the SMC's temperatures without privileges, as JavaScript for Automation (macOS 10.10 and
+ * later) through IOKit: `IOServiceOpen` on AppleSMC, then `IOConnectCallStructMethod` with the
+ * 80-byte SMCKeyData_t (key at 0, key info at 28, result at 40, command at 42, index at 44, value
+ * at 48). Given keys (as a JSON list, the first argument) it reads those; given none it lists
+ * every key and reads the ones SMC_CPU_KEY and SMC_GPU_KEY would keep (the same patterns, written
+ * out here). Prints `{ key: °C }`; a value of a type it does not know (`flt ` on Apple silicon,
+ * `sp78` on Intel) is left out.
+ */
+export const MAC_TEMP_SCRIPT = `function run(argv) {
+ObjC.import('Foundation'); ObjC.import('IOKit');
+ObjC.bindFunction('mach_task_self', ['unsigned int', []]);
+ObjC.bindFunction('IOServiceMatching', ['id', ['char *']]);
+ObjC.bindFunction('IOServiceGetMatchingService', ['unsigned int', ['unsigned int', 'id']]);
+ObjC.bindFunction('IOServiceOpen', ['int', ['unsigned int', 'unsigned int', 'unsigned int', 'void *']]);
+ObjC.bindFunction('IOServiceClose', ['int', ['unsigned int']]);
+ObjC.bindFunction('IOObjectRelease', ['int', ['unsigned int']]);
+ObjC.bindFunction('IOConnectCallStructMethod', ['int', ['unsigned int', 'unsigned int', 'void *', 'unsigned long', 'void *', 'void *']]);
+var A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function enc(a) { var s = ''; for (var i = 0; i < a.length; i += 3) { var n = (a[i] << 16) | ((a[i + 1] || 0) << 8) | (a[i + 2] || 0); s += A[n >> 18 & 63] + A[n >> 12 & 63] + (i + 1 < a.length ? A[n >> 6 & 63] : '=') + (i + 2 < a.length ? A[n & 63] : '='); } return s; }
+function dec(s) { var o = []; s = s.replace(/=+$/, ''); for (var i = 0; i < s.length; i += 4) { var n = 0; for (var j = 0; j < 4; j++) n = (n << 6) | (i + j < s.length ? A.indexOf(s[i + j]) : 0); o.push(n >> 16 & 255); if (i + 2 < s.length) o.push(n >> 8 & 255); if (i + 3 < s.length) o.push(n & 255); } return o; }
+function data(bytes) { return $.NSData.alloc.initWithBase64EncodedStringOptions($(enc(bytes)), 0).mutableCopy; }
+function bytes(d) { return dec(ObjC.unwrap(d.base64EncodedStringWithOptions(0))); }
+function u32(a, at) { return (a[at] | a[at + 1] << 8 | a[at + 2] << 16 | a[at + 3] << 24) >>> 0; }
+function fcc(n) { return String.fromCharCode(n >>> 24 & 255, n >>> 16 & 255, n >>> 8 & 255, n & 255); }
+var svc = $.IOServiceGetMatchingService(0, $.IOServiceMatching('AppleSMC'));
+if (!svc) return '{}';
+var cd = data([0, 0, 0, 0]);
+var opened = $.IOServiceOpen(svc, $.mach_task_self(), 0, cd.mutableBytes);
+$.IOObjectRelease(svc);
+if (opened !== 0) return '{}';
+var conn = u32(bytes(cd), 0);
+function call(cmd, key, fill) {
+  var a = []; for (var i = 0; i < 80; i++) a.push(0);
+  if (key) for (var k = 0; k < 4; k++) a[3 - k] = key.charCodeAt(k) & 255;
+  a[42] = cmd; if (fill) fill(a);
+  var input = data(a); var output = data(a); var size = data([80, 0, 0, 0, 0, 0, 0, 0]);
+  if ($.IOConnectCallStructMethod(conn, 2, input.mutableBytes, 80, output.mutableBytes, size.mutableBytes) !== 0) return null;
+  var r = bytes(output); return r[40] === 0 ? r : null;
+}
+function read(key) {
+  var info = call(9, key); if (!info) return null;
+  var size = u32(info, 28); var type = fcc(u32(info, 32));
+  var r = call(5, key, function (a) { a[28] = size & 255; }); if (!r) return null;
+  if (type === 'flt ' && size === 4) { var v = new DataView(new ArrayBuffer(4)); for (var q = 0; q < 4; q++) v.setUint8(q, r[48 + q]); return v.getFloat32(0, true); }
+  if (type === 'sp78' && size === 2) return ((r[48] << 8 | r[49]) << 16 >> 16) / 256;
+  if (type === 'ui32' && size === 4) return (r[48] << 24 | r[49] << 16 | r[50] << 8 | r[51]) >>> 0;
+  return null;
+}
+var keys = [];
+try { keys = argv.length > 0 ? JSON.parse(argv[0]) : []; } catch (e) { keys = []; }
+if (argv.length === 0) {
+  var count = read('#KEY') || 0;
+  var wanted = /^(?:T[peg][0-9A-Za-z]{2}|TC0[PDEFH]|TC[0-9]C|TG0[PDH])$/;
+  for (var x = 0; x < count && x < 10000; x++) {
+    var r = call(8, null, function (a) { a[44] = x & 255; a[45] = x >> 8 & 255; a[46] = x >> 16 & 255; });
+    if (!r) continue;
+    var name = fcc(u32(r, 0)); if (wanted.test(name)) keys.push(name);
+  }
+}
+var out = {};
+for (var y = 0; y < keys.length && y < 200; y++) { var value = read(String(keys[y])); if (value !== null && isFinite(value)) out[keys[y]] = Math.round(value * 10) / 10; }
+$.IOServiceClose(conn);
+return JSON.stringify(out);
+}`
 
 const STATE_OF: Record<string, BatteryReading['state']> = {
   charging: 'charging',
@@ -397,6 +528,8 @@ export type HeldSystem = {
   volumes?: Held<VolumeReading[]> | null
   gpu: Held<number> | null
   battery: Held<BatteryReading> | null
+  /** CPU and GPU temperature, where the platform's reader reads them. */
+  temp?: Held<TempReading> | null
 }
 
 /** What is known at `now`: each part with its age (from a second on), or null where there is
@@ -432,7 +565,9 @@ export function systemSnapshot(held: HeldSystem, now: number): MacSystem {
   const gpu: GpuReading | null = held.gpu && gpuAge !== null ? withAge({ percent: held.gpu.value }, gpuAge, 'ageMs') : null
   const batteryAge = age(held.battery, SYSTEM_MAX_AGE.batteryMs)
   const battery = held.battery && batteryAge !== null ? withAge(held.battery.value, batteryAge, 'ageMs') : null
-  return { net, disk, gpu, battery }
+  const tempAge = age(held.temp ?? null, SYSTEM_MAX_AGE.tempMs)
+  const temp = held.temp && tempAge !== null ? withAge(held.temp.value, tempAge, 'ageMs') : null
+  return temp ? { net, disk, gpu, battery, temp } : { net, disk, gpu, battery }
 }
 
 /** Whether a part last tried at `triedAt` is due again (also when the clock went back). */
@@ -464,6 +599,13 @@ export class MacSystemReader {
   private gpuTriedAt = Number.NEGATIVE_INFINITY
   private battery: Held<BatteryReading> | null = null
   private batteryTriedAt = Number.NEGATIVE_INFINITY
+  private temp: Held<TempReading> | null = null
+  private tempTriedAt = Number.NEGATIVE_INFINITY
+  /** The SMC's temperature keys once listed; an empty list when it has none (a virtual machine),
+   *  which is not listed again. Null until a listing has answered. */
+  private tempKeys: string[] | null = null
+  /** Listings that got no answer: after TEMP_LIST_TRIES the SMC is not listed again. */
+  private tempListFailures = 0
   private space: Held<{ total: number; used: number }> | null = null
   private spaceTriedAt = Number.NEGATIVE_INFINITY
   private volumes: Held<VolumeReading[]> | null = null
@@ -510,7 +652,7 @@ export class MacSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'darwin') return null
-    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery }, this.mono())
+    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery, temp: this.temp }, this.mono())
   }
 
   private async readDue(): Promise<void> {
@@ -524,10 +666,25 @@ export class MacSystemReader {
     }
     if (heavy && due(this.diskIoTriedAt, now, SYSTEM_CADENCE.diskIoMs)) jobs.push(this.readDiskIo(now))
     if (heavy && due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs)) jobs.push(this.readGpu(now))
+    if (heavy && this.tempKeys?.length !== 0 && due(this.tempTriedAt, now, SYSTEM_CADENCE.tempMs)) jobs.push(this.readTemp(now))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.readBattery(now))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
     if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.readVolumes(now))
     await Promise.all(jobs)
+  }
+
+  /** The SMC's CPU and GPU temperatures: the keys are listed the first time, then only read. */
+  private async readTemp(now: number): Promise<void> {
+    this.tempTriedAt = now
+    const keys = this.tempKeys
+    const args = ['-l', 'JavaScript', '-e', MAC_TEMP_SCRIPT, ...(keys ? [JSON.stringify(keys)] : [])]
+    const parsed = parseMacTemps(await this.run(OSASCRIPT_PATH, args, MAX_OUTPUT_BYTES, keys ? TIMEOUT_MS : TEMP_LIST_TIMEOUT_MS))
+    if (!parsed) {
+      if (!keys && ++this.tempListFailures >= TEMP_LIST_TRIES) this.tempKeys = []
+      return
+    }
+    if (!keys) this.tempKeys = parsed.keys
+    if (parsed.reading) this.temp = { value: parsed.reading, at: this.mono() }
   }
 
   /** The volumes a person thinks of as this Mac's disks (macVolumePlaces), each with its space. */
@@ -568,9 +725,9 @@ export class MacSystemReader {
     return got.done ? got.value : this.lastName
   }
 
-  private async run(file: string, args: readonly string[], maxBuffer = MAX_OUTPUT_BYTES): Promise<string | null> {
+  private async run(file: string, args: readonly string[], maxBuffer = MAX_OUTPUT_BYTES, timeout = TIMEOUT_MS): Promise<string | null> {
     try {
-      const out = await this.exec(file, args, { timeout: TIMEOUT_MS, maxBuffer })
+      const out = await this.exec(file, args, { timeout, maxBuffer })
       return out.error ? null : out.stdout
     } catch {
       return null

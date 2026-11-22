@@ -6,7 +6,7 @@
 //   node tools/smoke-system.ts
 //
 // A runner has no battery, and no GPU but a software display adapter, so those are printed but
-// never required.
+// never required; nor are temperatures, which a virtual machine seldom has.
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -113,6 +113,7 @@ async function main(): Promise<void> {
   check(isCount(disk?.totalBytes) && isCount(disk?.usedBytes) && disk!.totalBytes! > 2 ** 30 && disk!.usedBytes! <= disk!.totalBytes!, 'disk: space used and total')
   check(isCount(disk?.readBytesPerSec) && isCount(disk?.writeBytesPerSec), 'disk: bytes per second read and written')
   console.log(`     gpu: ${snapshot?.gpu ? `${snapshot.gpu.percent}%` : 'none reported'}; battery: ${snapshot?.battery ? JSON.stringify(snapshot.battery) : 'none reported'}`)
+  console.log(`     temperature: ${snapshot?.temp ? JSON.stringify(snapshot.temp) : 'none reported'}`)
   // What the reader's "is there a real GPU" rule had to go on, for whoever reads this log.
   if (platform === 'win32') console.log(`     display adapters: ${displayAdapters()}`)
 

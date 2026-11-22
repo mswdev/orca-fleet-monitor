@@ -10,6 +10,8 @@
 //   GPU       `gpu` about every 30 s: the "GPU Engine" counters' utilisation between two
 //             requests, the busiest GPU when there are several; none before Windows 10 1709
 //   battery   `bat` about once a minute: power line, charge, charging or not, time remaining
+//   temp      `temp` about every 30 s: the hottest ACPI thermal zone (which may not be the CPU's
+//             own sensor) and the hottest GPU, as Task Manager reads it
 //   memory    `mem` every reading: what Task Manager's memory page shows besides "In use"
 //             (available, committed, cached, paged and non-paged pool)
 //
@@ -21,10 +23,10 @@
 // to 50 ms, on a desktop with an RTX 4090 too, where `gpu` reads about 1,300 engine counters. The
 // GPU figure matched Windows' own counters and nvidia-smi under load there (50% against 50%).
 import { performance } from 'node:perf_hooks'
-import { diskSpaceOf, due, interfaceLabel, MAX_VOLUMES, realStatfs, SYSTEM_CADENCE, systemSnapshot, VOLUME_NAME_MAX, type Held, type StatFs } from './mac-system.ts'
+import { diskSpaceOf, due, interfaceLabel, MAX_VOLUMES, plausibleTemp, realStatfs, SYSTEM_CADENCE, systemSnapshot, VOLUME_NAME_MAX, type Held, type StatFs } from './mac-system.ts'
 
 export { interfaceLabel }
-import type { BatteryReading, MacSystem, NetReading, WinMemory, VolumeReading } from './model.ts'
+import type { BatteryReading, MacSystem, NetReading, TempReading, WinMemory, VolumeReading } from './model.ts'
 import { PowerShellHost } from './win-host.ts'
 
 /** How long PowerShell has to answer one request. Long, because a slow answer costs nothing
@@ -65,6 +67,17 @@ export function parseDiskAnswer(answer: unknown): { read: number; write: number 
 export function parseGpuAnswer(answer: unknown): number | null {
   const p = record(answer)?.p
   return typeof p === 'number' && p >= 0 && p <= 100 ? Math.round(p) : null
+}
+
+/** `temp`'s answer, `{ z, g }`: the hottest thermal zone in kelvin and the hottest GPU in tenths of
+ *  °C, either null. The CPU figure is marked as a zone's (`cpuZone`); null when neither is in range. */
+export function parseTempAnswer(answer: unknown): TempReading | null {
+  const a = record(answer)
+  if (!a) return null
+  const cpu = typeof a.z === 'number' ? plausibleTemp(a.z - 273.15) : null
+  const gpu = typeof a.g === 'number' ? plausibleTemp(a.g / 10) : null
+  if (cpu === null && gpu === null) return null
+  return { cpuC: cpu, gpuC: gpu, ...(cpu !== null ? { cpuZone: true as const } : {}) }
 }
 
 /** Physical memory or a commit limit beyond this is nonsense (Windows' limit is 128 TB). */
@@ -186,6 +199,8 @@ export class WindowsSystemReader {
   private gpu: Held<number> | null = null
   private gpuTriedAt = Number.NEGATIVE_INFINITY
   private gpuAsked = false
+  private temp: Held<TempReading> | null = null
+  private tempTriedAt = Number.NEGATIVE_INFINITY
   private battery: Held<BatteryReading> | null = null
   private batteryTriedAt = Number.NEGATIVE_INFINITY
   private space: Held<{ total: number; used: number }> | null = null
@@ -228,7 +243,7 @@ export class WindowsSystemReader {
   snapshot(): MacSystem | null {
     if (this.platform !== 'win32') return null
     const now = this.mono()
-    const system = systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery }, now)
+    const system = systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery, temp: this.temp }, now)
     const memory = this.memory
     const age = memory ? Math.max(0, Math.round(now - memory.at)) : null
     if (!memory || age === null || age > WIN_MEMORY_MAX_AGE_MS) return system
@@ -245,6 +260,7 @@ export class WindowsSystemReader {
     const jobs: Promise<void>[] = [this.readNet(), this.readMemory()]
     if (heavy && due(this.diskIoTriedAt, now, SYSTEM_CADENCE.diskIoMs)) jobs.push(this.readDiskIo(now))
     if (heavy && due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs)) jobs.push(this.readGpu(now))
+    if (heavy && due(this.tempTriedAt, now, SYSTEM_CADENCE.tempMs)) jobs.push(this.readTemp(now))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.readBattery(now))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
     if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.readVolumes(now))
@@ -317,6 +333,12 @@ export class WindowsSystemReader {
     // Once only: a computer without these counters answers null every time.
     else if (!this.gpuAsked) this.gpuTriedAt = Number.NEGATIVE_INFINITY
     this.gpuAsked = true
+  }
+
+  private async readTemp(now: number): Promise<void> {
+    this.tempTriedAt = now
+    const temp = parseTempAnswer(await this.ask('temp'))
+    if (temp) this.temp = { value: temp, at: this.mono() }
   }
 
   private async readBattery(now: number): Promise<void> {

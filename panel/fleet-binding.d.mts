@@ -208,6 +208,8 @@ export type MachineModel = {
   disk: DiskModel | null
   gpu: GpuModel | null
   battery: BatteryModel | null
+  /** CPU and GPU temperature (1.5): null unless the machine is online and reports one. */
+  temp: TempModel | null
   processes: ProcessSummary
 }
 
@@ -235,6 +237,9 @@ export type DiskModel = {
 export type VolumeModel = { name: string; totalBytes: number; usedBytes: number; usedPct: number; main: boolean }
 export const MAX_VOLUMES: number
 export type GpuModel = { pct: number; ageSec: number | null } & Series
+/** Whole °C. `cpuZone`: the CPU figure is an ACPI thermal zone (Windows). `gpuOff`: the GPU has
+ *  sensors but is at rest with them off, so it has no figure. */
+export type TempModel = { cpuC: number | null; gpuC: number | null; cpuZone: boolean; gpuOff: boolean; ageSec: number | null }
 export type BatteryModel = {
   /** False on a Mac without a battery: then only `source` means anything. */
   present: boolean

@@ -2,6 +2,15 @@
 
 Each release's notes. Releases before 1.4.0 have theirs on the [releases page](https://github.com/mswdev/orca-fleet-monitor/releases).
 
+## Unreleased
+
+### Temperatures
+
+- The CPU card ends with the CPU's and the GPU's temperature, in the same rows as the Memory card's breakdown. Figures are in °C; point at one to read it in °F.
+- Nothing needs administrator rights or an install. A Mac reads its SMC, Linux reads the kernel's hardware sensors and `nvidia-smi`, and Windows reads the ACPI thermal zone and the GPU's own sensor, as Task Manager does. Each is read about every 30 seconds, and not while memory is short.
+- On Windows the CPU row says it is an ACPI thermal zone, which may not be the CPU itself. On Apple silicon a GPU at rest has its sensors off, and its row says "idle".
+- A paired machine sends its temperatures in its beacon. Older versions ignore them, and a machine on an older version shows no temperature rows.
+
 ## 1.4.0
 
 Charts that show what health was doing, a panel that moves smoothly, every disk by name, and which version each machine runs.
