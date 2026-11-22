@@ -4,6 +4,8 @@
 import { fileURLToPath } from 'node:url'
 import { assert, describe, test } from 'orca/testing'
 import {
+  hwmonTemps,
+  isCpuZone,
   isLinuxInterfaceName,
   isRuntimeSuspended,
   LINUX_SPACE_PATHS,
@@ -13,7 +15,9 @@ import {
   NVIDIA_SMI_PATH,
   parseDiskstats,
   parseGpuBusyPercent,
+  parseMilliC,
   parseNvidiaSmi,
+  parseNvidiaSmiTemp,
   parsePowerSupplies,
   parseProcNetDev,
   parseProcNetIpv6Route,
@@ -153,6 +157,34 @@ describe('parsers', () => {
     assert.equal(parseNvidiaSmi('12 %\n'), null, 'not the format asked for')
     assert.equal(parseNvidiaSmi("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.\n"), null)
     assert.equal(parseNvidiaSmi(7), null)
+    assert.equal(parseNvidiaSmi('12, 61\n87, 70\n'), 87, 'with the temperature asked for too')
+    assert.equal(parseNvidiaSmi('[N/A], 61\n'), null)
+  })
+
+  test('nvidia-smi: the hottest GPU', () => {
+    assert.equal(parseNvidiaSmiTemp('12, 61\n87, 70\n'), 70)
+    assert.equal(parseNvidiaSmiTemp('12, [N/A]\n9, 48\n'), 48, 'a GPU that reports none is skipped')
+    assert.equal(parseNvidiaSmiTemp('12\n'), null, 'only the utilisation')
+    assert.equal(parseNvidiaSmiTemp('12, 200\n'), null)
+    assert.equal(parseNvidiaSmiTemp(null), null)
+  })
+
+  test('hwmon: the CPU package or die, the GPU edge; millidegrees in range', () => {
+    assert.equal(parseMilliC('45000\n'), 45)
+    assert.equal(parseMilliC('-5000'), null)
+    assert.equal(parseMilliC('200000'), null)
+    assert.equal(parseMilliC('hot'), null)
+    const core = (label: string | null, c: number) => ({ label, milli: `${c * 1000}\n` })
+    assert.deepEqual(hwmonTemps([{ name: 'coretemp\n', inputs: [core('Package id 0', 58), core('Core 0', 66), core('Core 1', 52)] }]), { cpuC: 58, gpuC: null }, "Intel's package, as its own tools show")
+    assert.deepEqual(hwmonTemps([{ name: 'coretemp', inputs: [core('Core 0', 66), core('Core 1', 52)] }]), { cpuC: 66, gpuC: null }, 'no package: the hottest core')
+    assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tctl', 71), core('Tccd1', 60)] }]), { cpuC: 71, gpuC: null })
+    assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tctl', 81), core('Tdie', 71)] }]), { cpuC: 71, gpuC: null }, 'Tdie before Tctl, which may be offset')
+    assert.deepEqual(hwmonTemps([{ name: 'cpu_thermal', inputs: [core(null, 49)] }]), { cpuC: 49, gpuC: null }, 'a Raspberry Pi')
+    assert.deepEqual(hwmonTemps([{ name: 'amdgpu', inputs: [core('edge', 55), core('junction', 70), core('mem', 60)] }, { name: 'nouveau', inputs: [core(null, 41)] }]), { cpuC: null, gpuC: 55 })
+    assert.deepEqual(hwmonTemps([{ name: 'nvme', inputs: [core('Composite', 40)] }, { name: 'acpitz', inputs: [core(null, 27)] }]), { cpuC: null, gpuC: null }, 'not a CPU or a GPU')
+    assert.equal(isCpuZone('x86_pkg_temp\n'), true)
+    assert.equal(isCpuZone('acpitz\n'), false)
+    assert.equal(isCpuZone(null), false)
     assert.equal(isRuntimeSuspended('suspended\n'), true)
     assert.equal(isRuntimeSuspended('suspending\n'), true)
     assert.equal(isRuntimeSuspended('active\n'), false)
@@ -565,7 +597,7 @@ describe('LinuxSystemReader', () => {
     pc.state.smi = '3\n91\n'
     await pc.reader.refresh()
     assert.deepEqual(pc.state.runs, [[NVIDIA_SMI_PATH, ...NVIDIA_SMI_ARGS]])
-    assert.deepEqual(pc.state.runs[0], ['/usr/bin/nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'])
+    assert.deepEqual(pc.state.runs[0], ['/usr/bin/nvidia-smi', '--query-gpu=utilization.gpu,temperature.gpu', '--format=csv,noheader,nounits'])
     assert.equal(pc.reader.snapshot()!.gpu?.percent, 91, 'the busiest of the AMD card (20) and the NVIDIA ones')
     // nvidia-smi fails: the AMD figure still stands.
     pc.state.smi = null
@@ -574,6 +606,46 @@ describe('LinuxSystemReader', () => {
     await pc.reader.refresh()
     assert.deepEqual(pc.reader.snapshot()!.gpu, { percent: 8 })
     assert.equal(pc.state.runs.length, 2, 'once each time the GPU is due')
+  })
+
+  test('temperatures: hwmon with the GPU, a sleeping GPU passed over, nvidia-smi in the same run', async () => {
+    const pc = laptop()
+    pc.files.set('/sys/class/hwmon/hwmon0/name', 'k10temp\n')
+    pc.files.set('/sys/class/hwmon/hwmon0/temp1_input', '61250\n')
+    pc.files.set('/sys/class/hwmon/hwmon0/temp1_label', 'Tctl\n')
+    pc.files.set('/sys/class/hwmon/hwmon1/name', 'amdgpu\n')
+    pc.files.set('/sys/class/hwmon/hwmon1/temp1_input', '48000\n')
+    pc.files.set('/sys/class/hwmon/hwmon1/temp1_label', 'edge\n')
+    pc.files.set('/sys/class/hwmon/hwmon1/device/power/runtime_status', 'active\n')
+    pc.files.set('/sys/class/hwmon/hwmon2/name', 'amdgpu\n')
+    pc.files.set('/sys/class/hwmon/hwmon2/temp1_input', '90000\n')
+    pc.files.set('/sys/class/hwmon/hwmon2/device/power/runtime_status', 'suspended\n')
+    pc.files.set('/sys/class/hwmon/hwmon3/name', 'nvme\n')
+    pc.files.set('/sys/class/hwmon/hwmon3/temp1_input', '99000\n')
+    await pc.reader.refresh()
+    assert.deepEqual(pc.reader.snapshot()!.temp, { cpuC: 61, gpuC: 48 })
+    assert.equal(pc.readsOf('/sys/class/hwmon/hwmon2/temp1_input'), 0, 'asleep: not woken')
+    assert.equal(pc.readsOf('/sys/class/hwmon/hwmon3/temp1_input'), 0, 'not a CPU or a GPU: not read')
+    // NVIDIA's driver: its temperature comes with its utilisation, in the one run.
+    pc.files.set('/proc/driver/nvidia/version', 'NVRM version: NVIDIA UNIX x86_64 Kernel Module  999.99\n')
+    pc.state.smi = '30, 66\n'
+    pc.state.t = SYSTEM_CADENCE.gpuMs
+    await pc.reader.refresh()
+    assert.equal(pc.state.runs.length, 1)
+    assert.deepEqual(pc.reader.snapshot()!.temp, { cpuC: 61, gpuC: 66 })
+  })
+
+  test("temperatures: a CPU without a hwmon chip has its thermal zone's", async () => {
+    const pc = laptop()
+    pc.files.set('/sys/class/thermal/thermal_zone0/type', 'acpitz\n')
+    pc.files.set('/sys/class/thermal/thermal_zone0/temp', '27800\n')
+    pc.files.set('/sys/class/thermal/thermal_zone1/type', 'x86_pkg_temp\n')
+    pc.files.set('/sys/class/thermal/thermal_zone1/temp', '52000\n')
+    await pc.reader.refresh()
+    assert.deepEqual(pc.reader.snapshot()!.temp, { cpuC: 52, gpuC: null })
+    const bare = laptop()
+    await bare.reader.refresh()
+    assert.equal(bare.reader.snapshot()!.temp, undefined, 'nothing to read: no temperature')
   })
 
   test('GPU: one that is asleep is not woken to be asked', async () => {

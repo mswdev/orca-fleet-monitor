@@ -916,6 +916,10 @@ function systemOf(m, history, now) {
   const disk = s?.disk && typeof s.disk === 'object' ? s.disk : null
   const gpu = s?.gpu && typeof s.gpu === 'object' && finite(s.gpu.percent) ? s.gpu : null
   const bat = s?.battery && typeof s.battery === 'object' && typeof s.battery.present === 'boolean' ? s.battery : null
+  const temp = s?.temp && typeof s.temp === 'object' ? s.temp : null
+  const cpuC = temp ? tempOf(temp.cpuC) : null
+  const gpuC = temp ? tempOf(temp.gpuC) : null
+  const gpuOff = gpuC === null && temp?.gpuOff === true
   const total = disk ? nonNegative(disk.totalBytes) : null
   const used = disk && total !== null && total > 0 ? nonNegative(disk.usedBytes) : null
   return {
@@ -955,9 +959,13 @@ function systemOf(m, history, now) {
           ageSec: ageSecOf(bat.ageMs),
           ...seriesOf(history, 'bat', now)
         }
-      : null
+      : null,
+    temp: cpuC !== null || gpuC !== null || gpuOff ? { cpuC, gpuC, cpuZone: cpuC !== null && temp.cpuZone === true, gpuOff, ageSec: ageSecOf(temp.ageMs) } : null
   }
 }
+
+/** A temperature in °C the panel shows: a whole number from 1 to 125, else null. */
+const tempOf = (value) => (finite(value) && value >= 1 && value <= 125 ? Math.round(value) : null)
 
 /** The most volumes shown for a machine, and the longest name kept for one (src/mac-system.ts). */
 export const MAX_VOLUMES = 8

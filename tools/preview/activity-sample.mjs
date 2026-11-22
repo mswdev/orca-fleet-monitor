@@ -27,7 +27,8 @@ const SERIES = {
   }
 }
 
-/** Each machine's readings, as a 1.2 worker sends them. `battery` is the scene's. */
+/** Each machine's readings, as a 1.2 worker sends them (and 1.5's temperatures). `battery` is the
+ *  scene's. */
 function systemOf(id, scene) {
   const s = SERIES[id]
   if (id === 'mbp') {
@@ -44,6 +45,7 @@ function systemOf(id, scene) {
         ]
       },
       gpu: { percent: s.gpu.at(-1) },
+      temp: { cpuC: 58, gpuC: 47 },
       battery:
         scene === 'on-battery'
           ? { present: true, percent: 18, state: 'discharging', source: 'battery', minutesRemaining: 52 }
@@ -65,6 +67,7 @@ function systemOf(id, scene) {
         ]
       },
       gpu: { percent: s.gpu.at(-1) },
+      temp: { cpuC: 71, gpuC: 66 },
       battery: { present: false, percent: null, state: null, source: 'ac', minutesRemaining: null }
     }
   }
@@ -79,6 +82,7 @@ function systemOf(id, scene) {
         volumes: [{ name: 'Macintosh HD', totalBytes: 916e9, usedBytes: 572e9, main: true }]
       },
       gpu: null,
+      temp: { cpuC: 54, gpuC: null, gpuOff: true },
       battery: { present: false, percent: null, state: null, source: 'ac', minutesRemaining: null }
     }
   }

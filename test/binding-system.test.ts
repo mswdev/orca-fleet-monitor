@@ -45,6 +45,19 @@ describe('a machine\'s network, disk, GPU and battery', () => {
     assert.deepEqual([m.battery?.present, m.battery?.pct, m.battery?.state, m.battery?.source, m.battery?.minutesRemaining, m.battery?.ageSec], [true, 82, 'charging', 'ac', 38, 20])
   })
 
+  test('temperatures: whole °C in range, the zone and powered-down flags, null offline', () => {
+    const sys = (temp: unknown) => ({ ...machine().system, temp })
+    const m = (temp: unknown, over: Record<string, unknown> = {}) => fleetOf(machine({ system: sys(temp), ...over })).machines[0]!.temp
+    assert.deepEqual(m({ cpuC: 61.6, gpuC: 70, ageMs: 10_000 }), { cpuC: 62, gpuC: 70, cpuZone: false, gpuOff: false, ageSec: 10 })
+    assert.deepEqual(m({ cpuC: 41, gpuC: null, cpuZone: true }), { cpuC: 41, gpuC: null, cpuZone: true, gpuOff: false, ageSec: null })
+    assert.deepEqual(m({ cpuC: 53, gpuC: null, gpuOff: true }), { cpuC: 53, gpuC: null, cpuZone: false, gpuOff: true, ageSec: null })
+    assert.deepEqual(m({ cpuC: null, gpuC: 66, cpuZone: true, gpuOff: true }), { cpuC: null, gpuC: 66, cpuZone: false, gpuOff: false, ageSec: null }, 'flags only with what they are about')
+    assert.equal(m({ cpuC: 400, gpuC: '70' }), null, 'out of range or not a number')
+    assert.equal(m('hot'), null)
+    assert.equal(m(undefined), null)
+    assert.equal(m({ cpuC: 60, gpuC: 60 }, { online: false, status: 'offline' }), null)
+  })
+
   test('none for a machine without them, or offline', () => {
     const none = fleetOf(machine({ system: undefined }), machine({ id: 'env-b', online: false, status: 'offline' })).machines
     for (const m of none) assert.deepEqual([m.net, m.disk, m.gpu, m.battery], [null, null, null, null])

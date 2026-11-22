@@ -9,7 +9,7 @@
 import { clipText, COUNT_LIMITS, firstEntries, isPluginVersion, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
 import { isInterfaceName, MAX_VOLUMES, VOLUME_NAME_MAX } from './mac-system.ts'
-import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel, VolumeReading, WinMemory } from './model.ts'
+import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel, TempReading, VolumeReading, WinMemory } from './model.ts'
 
 export const BEACON_PREFIX = 'FLEETMON1 '
 export const BEACON_VERSION = 1
@@ -48,6 +48,8 @@ type Wire = {
   dk?: WireDisk
   gp?: WireGpu
   bt?: WireBattery
+  /** CPU and GPU temperature (1.5). See WireTemp. */
+  tp?: WireTemp
   /** A Windows computer's memory as Task Manager shows it (1.3). See WireWinMemory. */
   wm?: WireWinMemory
   /** 1 when this copy also writes process lines (publishing on; a Mac from 1.2, Linux and Windows
@@ -69,6 +71,9 @@ type WireNet = { i: string; r?: number; t?: number; a?: number }
 type WireDisk = { s?: number; u?: number; sa?: number; r?: number; w?: number; ia?: number; v?: [string, number, number, 0 | 1][] }
 /** `gp`: GPU utilisation % (`u`) and its age (`a`, ms). */
 type WireGpu = { u: number; a?: number }
+/** `tp`: CPU (`c`) and GPU (`g`) temperature in whole °C; `z` 1 when the CPU figure is an ACPI
+ *  thermal zone, `o` 1 when the GPU is at rest with its sensors off; age in ms (`a`). */
+type WireTemp = { c?: number; g?: number; z?: 1; o?: 1; a?: number }
 /** `bt`: a battery (`b` 1) or none (`b` 0); its charge % (`p`); state `c` charging, `d`
  *  discharging, `f` charged, `n` not charging (`st`); power source `a` AC, `b` battery, `u` UPS
  *  (`ps`); minutes remaining (`m`); age in ms (`a`). */
@@ -113,10 +118,10 @@ function decodeVolumes(raw: unknown): VolumeReading[] | null {
   return out.length > 0 ? out : null
 }
 
-function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'wm'> {
+function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'tp' | 'wm'> {
   if (!system) return {}
-  const out: Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'wm'> = {}
-  const { net, disk, gpu, battery, winMemory } = system
+  const out: Pick<Wire, 'nw' | 'dk' | 'gp' | 'bt' | 'tp' | 'wm'> = {}
+  const { net, disk, gpu, battery, temp, winMemory } = system
   if (net && isInterfaceName(net.iface)) out.nw = { i: net.iface, ...opt('r', net.rxBytesPerSec), ...opt('t', net.txBytesPerSec), ...opt('a', net.ageMs) }
   if (disk) {
     const dk: WireDisk = {
@@ -131,6 +136,15 @@ function encodeSystem(system: MacSystem | null | undefined): Pick<Wire, 'nw' | '
     if (Object.keys(dk).length > 0) out.dk = dk
   }
   if (gpu && Number.isFinite(gpu.percent)) out.gp = { u: Math.round(gpu.percent), ...opt('a', gpu.ageMs) }
+  if (temp && (temp.cpuC !== null || temp.gpuC !== null || temp.gpuOff)) {
+    out.tp = {
+      ...opt('c', temp.cpuC),
+      ...opt('g', temp.gpuC),
+      ...(temp.cpuZone && temp.cpuC !== null ? { z: 1 as const } : {}),
+      ...(temp.gpuOff && temp.gpuC === null ? { o: 1 as const } : {}),
+      ...opt('a', temp.ageMs)
+    }
+  }
   if (battery) {
     out.bt = {
       b: battery.present ? 1 : 0,
@@ -230,6 +244,23 @@ function decodeSystem(w: Record<string, unknown>): MacSystem | null {
       ...(age === undefined ? {} : { ageMs: age })
     }
   }
+  let temp: TempReading | null = null
+  const tp = record(w.tp)
+  if (tp) {
+    const cpuC = within(tp.c, 1, 125)
+    const gpuC = within(tp.g, 1, 125)
+    const gpuOff = gpuC === null && tp.o === 1
+    if (cpuC !== null || gpuC !== null || gpuOff) {
+      const age = ageOf(tp.a)
+      temp = {
+        cpuC: cpuC === null ? null : Math.round(cpuC),
+        gpuC: gpuC === null ? null : Math.round(gpuC),
+        ...(cpuC !== null && tp.z === 1 ? { cpuZone: true as const } : {}),
+        ...(gpuOff ? { gpuOff: true as const } : {}),
+        ...(age === undefined ? {} : { ageMs: age })
+      }
+    }
+  }
   let winMemory: WinMemory | null = null
   const wm = record(w.wm)
   const available = wm ? within(wm.a, 0, MAX_MEMORY_BYTES) : null
@@ -247,8 +278,8 @@ function decodeSystem(w: Record<string, unknown>): MacSystem | null {
       ...(age === undefined ? {} : { ageMs: age })
     }
   }
-  if (!(net || disk || gpu || battery || winMemory)) return null
-  return winMemory ? { net, disk, gpu, battery, winMemory } : { net, disk, gpu, battery }
+  if (!(net || disk || gpu || battery || temp || winMemory)) return null
+  return { net, disk, gpu, battery, ...(temp ? { temp } : {}), ...(winMemory ? { winMemory } : {}) }
 }
 
 /** `mm`: bytes, except `ps` (page size), the page rates and `pl`. Only `t` and `u` are always
@@ -448,7 +479,7 @@ export function encodeBeacon(
   // GPU, battery and Windows memory figures, then long free-text fields. The Mac memory figures (about 200
   // characters) stay in every step: they are what health and alerts are judged on.
   const bare = { ...wire, pc: undefined, cg: undefined }
-  const plain = { ...bare, nw: undefined, dk: undefined, gp: undefined, bt: undefined, wm: undefined }
+  const plain = { ...bare, nw: undefined, dk: undefined, gp: undefined, bt: undefined, tp: undefined, wm: undefined }
   const attempts: Wire[] = [wire, bare, plain, { ...plain, h: clip(wire.h, TEXT_LIMIT), m: clip(wire.m, TEXT_LIMIT), rl: clip(wire.rl, 32) }]
   for (const attempt of attempts) {
     const line = BEACON_PREFIX + JSON.stringify(attempt)

@@ -127,3 +127,33 @@ describe('the 1.3 key: Windows memory', () => {
     for (const old of [v100, v110]) assert.equal(old.decodeBeacon(line)!.memTotal, win().memory.total)
   })
 })
+
+describe('the 1.5 key: temperatures', () => {
+  const HOT: MacSystem = { ...SYSTEM, temp: { cpuC: 68, gpuC: 75, ageMs: 10_000 } }
+  const raw = (tp: unknown) => `${BEACON_PREFIX}${JSON.stringify({ ...JSON.parse(encodeBeacon(mac(), meta)!.slice(BEACON_PREFIX.length)), tp })}`
+
+  test('round-trip: both figures, a thermal zone, a GPU at rest, on its own', () => {
+    assert.deepEqual(decodeBeacon(encodeBeacon(localSample({ system: HOT }), meta)!)!.system, HOT)
+    const zone: MacSystem = { ...SYSTEM, temp: { cpuC: 41, gpuC: null, cpuZone: true } }
+    assert.deepEqual(decodeBeacon(encodeBeacon(localSample({ system: zone }), meta)!)!.system, zone)
+    const off: MacSystem = { ...SYSTEM, temp: { cpuC: 53, gpuC: null, gpuOff: true } }
+    assert.deepEqual(decodeBeacon(encodeBeacon(localSample({ system: off }), meta)!)!.system, off)
+    const only: MacSystem = { net: null, disk: null, gpu: null, battery: null, temp: { cpuC: 50, gpuC: null } }
+    assert.deepEqual(decodeBeacon(encodeBeacon(localSample({ system: only }), meta)!)!.system, only)
+    assert.equal('temp' in decodeBeacon(encodeBeacon(mac(), meta)!)!.system!, false, 'absent when not read')
+  })
+
+  test('hostile values are bounded or dropped', () => {
+    assert.equal(decodeBeacon(raw({ c: 300, g: -4 }))!.system!.temp, undefined)
+    assert.equal(decodeBeacon(raw('hot'))!.system!.temp, undefined)
+    assert.deepEqual(decodeBeacon(raw({ c: 61.6, z: 'yes', o: 1, g: 70 }))!.system!.temp, { cpuC: 62, gpuC: 70 }, 'a GPU with a figure is not off; only the literal 1')
+    assert.deepEqual(decodeBeacon(raw({ g: 40, z: 1, a: 'old' }))!.system!.temp, { cpuC: null, gpuC: 40, ageMs: 3_600_000 }, 'no zone without a CPU figure')
+  })
+
+  test('a line too long sheds it with the other system keys, and older versions ignore it', () => {
+    const room = encodeBeacon(localSample(), meta)!.length + 10
+    assert.equal(decodeBeacon(encodeBeacon(localSample({ system: HOT }), meta, room)!)!.system, undefined)
+    const line = encodeBeacon(localSample({ system: HOT }), meta)!
+    for (const old of [v100, v110]) assert.equal(old.decodeBeacon(line)!.memTotal, localSample().memory.total)
+  })
+})

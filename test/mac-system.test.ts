@@ -4,14 +4,18 @@ import type { ExecFile, ExecResult } from '../src/mac-memory.ts'
 import {
   diskSpaceOf,
   isInterfaceName,
+  MAC_TEMP_SCRIPT,
   MacSystemReader,
+  OSASCRIPT_PATH,
   parseDefaultRoute,
+  parseMacTemps,
   parseDiskStats,
   parseGpu,
   parseNetstat,
   parsePmset,
   SYSTEM_CADENCE,
-  SYSTEM_MAX_AGE
+  SYSTEM_MAX_AGE,
+  TEMP_LIST_TRIES
 } from '../src/mac-system.ts'
 
 const NETSTAT_HEAD = 'Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll'
@@ -233,5 +237,88 @@ describe('MacSystemReader', () => {
     const reader = new MacSystemReader({ exec: async () => { throw new Error('spawn EAGAIN') }, mono: () => 0, statfs: () => null, platform: 'darwin' })
     await reader.refresh()
     assert.deepEqual(reader.snapshot(), { net: null, disk: null, gpu: null, battery: null })
+  })
+})
+
+describe('temperatures (the SMC)', () => {
+  // Key names and figures as an M2 Pro gave them: P-cores off at rest (under 10), E-cores warm.
+  const M2_REST = { Tp01: 6.7, Tp05: 4.6, Te05: 51.1, Te06: 53.4, Tg0f: 5.7, Tg0j: 5.7 }
+  const M2_GPU = { Tp01: 67.8, Tp05: 66.3, Te05: 67, Tg0f: 73.8, Tg1h: 75.1 }
+
+  test('the hottest CPU core and GPU sensor; a GPU whose sensors are all off is at rest', () => {
+    assert.deepEqual(parseMacTemps(JSON.stringify(M2_REST))?.reading, { cpuC: 53, gpuC: null, gpuOff: true })
+    assert.deepEqual(parseMacTemps(JSON.stringify(M2_GPU))?.reading, { cpuC: 68, gpuC: 75 })
+    assert.deepEqual(parseMacTemps(JSON.stringify(M2_REST))?.keys, ['Tp01', 'Tp05', 'Te05', 'Te06', 'Tg0f', 'Tg0j'])
+  })
+
+  test("an Intel Mac's keys (sp78), and keys that are not a CPU's or a GPU's", () => {
+    assert.deepEqual(parseMacTemps(JSON.stringify({ TC0P: 48.25, TC1C: 55, TG0P: 44.5, TB0T: 31 }))?.reading, { cpuC: 55, gpuC: 45 })
+    assert.deepEqual(parseMacTemps(JSON.stringify({ TB0T: 31, TCMz: 259.4, TCDX: 60 })), { reading: null, keys: [] }, 'battery and die keys are left out')
+    assert.deepEqual(parseMacTemps(JSON.stringify({ TC0P: 48 }))?.reading, { cpuC: 48, gpuC: null }, 'no GPU keys: not at rest, unknown')
+  })
+
+  test('figures out of shape are left out, never guessed', () => {
+    assert.deepEqual(parseMacTemps(JSON.stringify({ Tp01: 140, Te05: '60', Tg0f: -3 }))?.reading, { cpuC: null, gpuC: null, gpuOff: true })
+    assert.equal(parseMacTemps('{}')?.reading, null)
+    assert.equal(parseMacTemps('not json'), null)
+    assert.equal(parseMacTemps('[1,2]'), null)
+    assert.equal(parseMacTemps('null'), null)
+    assert.equal(parseMacTemps(7), null)
+    assert.equal(parseMacTemps(`{"Tp01":50,"x":"${'a'.repeat(70_000)}"}`), null, 'too long')
+  })
+
+  test('the script holds nothing a shell or a template would change', () => {
+    assert.ok(MAC_TEMP_SCRIPT.startsWith('function run(argv) {'))
+    assert.equal(MAC_TEMP_SCRIPT.includes('${'), false)
+    assert.ok(MAC_TEMP_SCRIPT.includes("IOServiceMatching('AppleSMC')"))
+  })
+
+  function smcMac(answers: (string | null)[]) {
+    const state = { t: 0, heavy: true }
+    const runs: string[][] = []
+    const exec: ExecFile = async (file, args) => {
+      if (file !== OSASCRIPT_PATH) return { error: null, stdout: file.endsWith('route') ? '  interface: en0\n' : '' }
+      runs.push([...args])
+      const answer = answers.length > 1 ? answers.shift()! : answers[0]!
+      return answer === null ? { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), stdout: '' } : { error: null, stdout: `${answer}\n` }
+    }
+    const reader = new MacSystemReader({ exec, mono: () => state.t, statfs: () => null, platform: 'darwin', heavyAllowed: () => state.heavy, volumeName: () => null })
+    return { state, runs, reader }
+  }
+
+  test('the keys are listed once, then only they are read; carried with their age, then dropped', async () => {
+    const mac = smcMac([JSON.stringify(M2_REST), JSON.stringify(M2_GPU)])
+    await mac.reader.refresh()
+    assert.deepEqual(mac.reader.snapshot()!.temp, { cpuC: 53, gpuC: null, gpuOff: true })
+    assert.deepEqual(mac.runs[0], ['-l', 'JavaScript', '-e', MAC_TEMP_SCRIPT], 'listed: no keys given')
+    mac.state.t = 5_000
+    await mac.reader.refresh()
+    assert.equal(mac.runs.length, 1, 'on its cadence')
+    assert.equal(mac.reader.snapshot()!.temp?.ageMs, 5_000)
+    mac.state.t = SYSTEM_CADENCE.tempMs
+    await mac.reader.refresh()
+    assert.deepEqual(mac.runs[1], ['-l', 'JavaScript', '-e', MAC_TEMP_SCRIPT, JSON.stringify(Object.keys(M2_REST))])
+    assert.deepEqual(mac.reader.snapshot()!.temp, { cpuC: 68, gpuC: 75 })
+    mac.state.t = SYSTEM_CADENCE.tempMs + SYSTEM_MAX_AGE.tempMs + 1
+    mac.state.heavy = false
+    await mac.reader.refresh()
+    assert.equal(mac.runs.length, 2, 'not asked while optional work should wait')
+    assert.equal(mac.reader.snapshot()!.temp, undefined, 'too old: gone')
+  })
+
+  test('a Mac with no such keys is not listed again; one that never answers, after a few tries', async () => {
+    const none = smcMac(['{}'])
+    for (const t of [0, SYSTEM_CADENCE.tempMs, 2 * SYSTEM_CADENCE.tempMs]) {
+      none.state.t = t
+      await none.reader.refresh()
+    }
+    assert.equal(none.runs.length, 1)
+    assert.equal(none.reader.snapshot()!.temp, undefined)
+    const stuck = smcMac([null])
+    for (let i = 0; i < TEMP_LIST_TRIES + 2; i++) {
+      stuck.state.t = i * SYSTEM_CADENCE.tempMs
+      await stuck.reader.refresh()
+    }
+    assert.equal(stuck.runs.length, TEMP_LIST_TRIES)
   })
 })

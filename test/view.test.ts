@@ -245,6 +245,24 @@ describe('a machine', () => {
     assert.equal($(v.root, '[data-key="cpu"] .fm-big')?.textContent, '40%', 'the reading itself is still shown')
   })
 
+  test('the CPU card: CPU and GPU temperature rows in °C, °F on hover, notes where a figure needs one', () => {
+    const system = (temp: unknown) => ({ net: null, disk: null, gpu: null, battery: null, temp }) as MachineView['system']
+    const rows = (temp: unknown) => {
+      const v = mount(viewOf([local(), machine({ system: system(temp) })]))
+      v.handle.show('env-a')
+      return $(v.root, '[data-key="cpu"] [data-key="cpu-facts"]')
+    }
+    const both = rows({ cpuC: 62, gpuC: 55 })!
+    assert.deepEqual(both.querySelectorAll('dt').map((n) => n.textContent), ['CPU temperature', 'GPU temperature'])
+    assert.deepEqual(both.querySelectorAll('.fm-temp').map((n) => [n.textContent, n.getAttribute('title')]), [['62 °C', '144 °F'], ['55 °C', '131 °F']])
+    const zone = rows({ cpuC: 41, gpuC: null, cpuZone: true })!
+    assert.deepEqual(zone.querySelectorAll('dt').map((n) => n.textContent), ['CPU temperature'], 'no GPU figure: no GPU row')
+    assert.match(zone.textContent, /ACPI thermal zone/)
+    const off = rows({ cpuC: 53, gpuC: null, gpuOff: true })!
+    assert.match(off.querySelectorAll('dd')[1]!.textContent, /^–idle$/)
+    assert.equal(rows(undefined), null, 'a machine that reports none has no rows')
+  })
+
   test('more than 256 cores: one quiet line says per-core load is not drawn', () => {
     const perCore = Array.from({ length: 300 }, () => 40)
     const v = mount(viewOf([local(), machine({ host: { ...machine().host, cores: 300 }, cpu: { percent: 40, source: 'beacon', perCore, groups: null } })]))

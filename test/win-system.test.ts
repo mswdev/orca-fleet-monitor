@@ -3,7 +3,7 @@
 import { assert, describe, test } from 'orca/testing'
 import { isInterfaceName, SYSTEM_CADENCE, SYSTEM_MAX_AGE } from '../src/mac-system.ts'
 import type { SystemReader } from '../src/sampler.ts'
-import { interfaceLabel, parseBatteryAnswer, parseDiskAnswer, parseGpuAnswer, parseMemAnswer, parseNetAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
+import { interfaceLabel, parseBatteryAnswer, parseDiskAnswer, parseGpuAnswer, parseMemAnswer, parseNetAnswer, parseTempAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
 
 describe('answers', () => {
   test('net: the adapter and its two counters, or nothing', () => {
@@ -104,6 +104,17 @@ describe('answers', () => {
     assert.equal(parseBatteryAnswer('charging'), null)
   })
 
+  test('temp: the hottest thermal zone (kelvin) as a zone, the hottest GPU (tenths of °C)', () => {
+    assert.deepEqual(parseTempAnswer({ z: 334.15, g: 652 }), { cpuC: 61, gpuC: 65, cpuZone: true })
+    assert.deepEqual(parseTempAnswer({ z: null, g: 481 }), { cpuC: null, gpuC: 48 }, 'no thermal zone')
+    assert.deepEqual(parseTempAnswer({ z: 300.15 }), { cpuC: 27, gpuC: null, cpuZone: true }, 'no GPU sensor')
+    assert.equal(parseTempAnswer({ z: 0, g: 0 }), null, 'zeros are no reading')
+    assert.equal(parseTempAnswer({ z: 273.15 + 200, g: 5_000 }), null, 'out of range')
+    assert.equal(parseTempAnswer({ z: '330', g: '600' }), null)
+    assert.equal(parseTempAnswer(null), null)
+    assert.equal(parseTempAnswer([330]), null)
+  })
+
   test('the system drive, C: when the variable is not a drive', () => {
     assert.equal(systemDriveRoot({ SystemDrive: 'D:' }), 'D:\\')
     assert.equal(systemDriveRoot({ SYSTEMDRIVE: 'e:' }), 'e:\\')
@@ -122,6 +133,7 @@ function fakeWindows(options: { heavyAllowed?: () => boolean } = {}) {
     disk: { r: 10_000_000, w: 5_000_000 } as unknown,
     gpu: { p: 20 } as unknown,
     bat: { line: 1, flag: 8, pct: 70, secs: -1 } as unknown,
+    temp: null as unknown,
     fail: new Set<string>()
   }
   const calls: string[] = []
@@ -155,7 +167,7 @@ describe('WindowsSystemReader', () => {
     assert.deepEqual(win.paths, ['D:\\'], 'the system drive')
     assert.equal(first.gpu?.percent, 20)
     assert.deepEqual(first.battery, { present: true, percent: 70, state: 'charging', source: 'ac', minutesRemaining: null })
-    assert.deepEqual(win.calls, ['net', 'mem', 'disk', 'gpu', 'bat', 'vol'], 'the network first (no counters), then the memory')
+    assert.deepEqual(win.calls, ['net', 'mem', 'disk', 'gpu', 'temp', 'bat', 'vol'], 'the network first (no counters), then the memory')
     win.state.t = 5_000
     win.state.net = { n: 'Ethernet 2', rx: 3_500_000, tx: 550_000 }
     await win.reader.refresh()
@@ -281,6 +293,24 @@ describe('WindowsSystemReader', () => {
     assert.equal(win.reader.snapshot()!.net?.rxBytesPerSec, 1_000)
   })
 
+  test('temperatures: asked with the GPU, carried with their age, then dropped', async () => {
+    const win = fakeWindows()
+    win.state.temp = { z: 330.15, g: 700 }
+    await win.reader.refresh()
+    assert.deepEqual(win.reader.snapshot()!.temp, { cpuC: 57, gpuC: 70, cpuZone: true })
+    win.state.t = 5_000
+    await win.reader.refresh()
+    assert.equal(win.count('temp'), 1, 'on its cadence')
+    assert.equal(win.reader.snapshot()!.temp?.ageMs, 5_000)
+    win.state.temp = null
+    win.state.t = SYSTEM_CADENCE.tempMs
+    await win.reader.refresh()
+    assert.equal(win.reader.snapshot()!.temp?.ageMs, SYSTEM_CADENCE.tempMs, 'a failed read carries the last')
+    win.state.t = SYSTEM_MAX_AGE.tempMs + 1
+    await win.reader.refresh()
+    assert.equal(win.reader.snapshot()!.temp, undefined, 'too old: gone')
+  })
+
   test('disk traffic and the GPU wait while optional work should', async () => {
     let heavy = false
     const win = fakeWindows({ heavyAllowed: () => heavy })
@@ -291,7 +321,7 @@ describe('WindowsSystemReader', () => {
     heavy = true
     win.state.t = 5_000
     await win.reader.refresh()
-    assert.deepEqual(win.calls, ['net', 'mem', 'bat', 'vol', 'net', 'mem', 'disk', 'gpu'])
+    assert.deepEqual(win.calls, ['net', 'mem', 'bat', 'vol', 'net', 'mem', 'disk', 'gpu', 'temp'])
   })
 
   test('the memory: read with every reading, carried with its age, then dropped', async () => {

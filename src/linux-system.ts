@@ -18,6 +18,11 @@
 //             second one) is not asked: asking would wake it.
 //   battery   /sys/class/power_supply about once a minute: power source, charge, state, and
 //             time remaining worked out from the battery's own energy and power figures
+//   temp      with the GPU, /sys/class/hwmon: the CPU's sensor (`coretemp`'s package, `k10temp`'s
+//             or `zenpower`'s die, a SoC's `cpu_thermal`), else the CPU's thermal zone in
+//             /sys/class/thermal; the GPU's (`amdgpu`'s edge, `nouveau`, `i915`, `xe`) and
+//             `nvidia-smi`'s `temperature.gpu`, asked in the same run as its utilisation. A GPU
+//             that is asleep is not asked, as above
 //
 // What is read less often than every reading is carried until the next read, with its age; a
 // read that fails carries the last value for a while longer, then the value is dropped. Every
@@ -35,6 +40,7 @@ import { createRunBounded, type ExecFile } from './mac-memory.ts'
 import {
   diskSpaceOf,
   due,
+  plausibleTemp,
   heldVolumes,
   interfaceLabel,
   MAX_VOLUMES,
@@ -50,7 +56,7 @@ import {
   VOLUME_DEADLINE_MS,
   VOLUME_READS_MAX
 } from './mac-system.ts'
-import type { BatteryReading, MacSystem, NetReading, VolumeReading } from './model.ts'
+import type { BatteryReading, MacSystem, NetReading, TempReading, VolumeReading } from './model.ts'
 
 export const PROC_NET_ROUTE_PATH = '/proc/net/route'
 export const PROC_NET_IPV6_ROUTE_PATH = '/proc/net/ipv6_route'
@@ -63,6 +69,8 @@ export const SYS_BLOCK_PATH = '/sys/block'
 export const SYS_DRM_PATH = '/sys/class/drm'
 export const SYS_PCI_DEVICES_PATH = '/sys/bus/pci/devices'
 export const SYS_POWER_SUPPLY_PATH = '/sys/class/power_supply'
+export const SYS_HWMON_PATH = '/sys/class/hwmon'
+export const SYS_THERMAL_PATH = '/sys/class/thermal'
 export const NVIDIA_VERSION_PATH = '/proc/driver/nvidia/version'
 export const NVIDIA_GPUS_PATH = '/proc/driver/nvidia/gpus'
 export const NVIDIA_SMI_PATH = '/usr/bin/nvidia-smi'
@@ -71,7 +79,7 @@ export const ZFS_PATHS = ['/usr/sbin/zfs', '/sbin/zfs', '/usr/local/sbin/zfs'] a
 const ZFS_MAX_BYTES = 16 * 1024
 /** A ZFS pool's name: a letter, then letters, digits, spaces and _ - . : (never an option to zfs). */
 const ZFS_POOL = /^[A-Za-z][A-Za-z0-9_.: -]{0,254}$/
-export const NVIDIA_SMI_ARGS = ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'] as const
+export const NVIDIA_SMI_ARGS = ['--query-gpu=utilization.gpu,temperature.gpu', '--format=csv,noheader,nounits'] as const
 /** The main volume: `/`, except where `/` is a small read-only image (Fedora Atomic and CoreOS
  *  mount a composefs of a few MB there, always full) and the real disk is under `/sysroot` and
  *  `/var`. The first of these with at least SPACE_MIN_BYTES is taken, else the first readable. */
@@ -92,6 +100,9 @@ export const MAX_FILE_BYTES = 1024 * 1024
 const MAX_DISKS = 256
 const MAX_GPUS = 16
 const MAX_SUPPLIES = 32
+/** The most hwmon chips and thermal zones looked at, and temperature inputs read per chip. */
+const MAX_HWMON = 32
+const MAX_HWMON_INPUTS = 16
 
 // --- reading files ---------------------------------------------------------------------------
 
@@ -293,16 +304,96 @@ export function parseGpuBusyPercent(text: unknown): number | null {
   return value <= 100 ? value : null
 }
 
-/** The busiest GPU in `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits`: one
- *  whole number a line. A GPU that reports none prints `[N/A]`, which is skipped. */
+/** `nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits`: one
+ *  line a GPU, `<percent>, <°C>` (an older query had the percent alone). A GPU that reports none
+ *  prints `[N/A]`, which is skipped. */
+const NVIDIA_SMI_LINE = /^\s*(\d{1,3}|\[N\/A\])\s*(?:,\s*(\d{1,3}|\[N\/A\])\s*)?$/
+
+/** The busiest GPU in nvidia-smi's answer (NVIDIA_SMI_LINE). */
 export function parseNvidiaSmi(text: unknown): number | null {
   if (typeof text !== 'string' || text.length > NVIDIA_SMI_MAX_BYTES) return null
   let best: number | null = null
   for (const line of text.split('\n')) {
-    const value = /^\s*(\d{1,3})\s*$/.exec(line)
-    if (value && Number(value[1]) <= 100) best = best === null ? Number(value[1]) : Math.max(best, Number(value[1]))
+    const value = NVIDIA_SMI_LINE.exec(line)?.[1]
+    if (value && /^\d+$/.test(value) && Number(value) <= 100) best = best === null ? Number(value) : Math.max(best, Number(value))
   }
   return best
+}
+
+/** The hottest GPU in nvidia-smi's answer (NVIDIA_SMI_LINE), in °C. */
+export function parseNvidiaSmiTemp(text: unknown): number | null {
+  if (typeof text !== 'string' || text.length > NVIDIA_SMI_MAX_BYTES) return null
+  let best: number | null = null
+  for (const line of text.split('\n')) {
+    const value = NVIDIA_SMI_LINE.exec(line)?.[2]
+    const c = value && /^\d+$/.test(value) ? plausibleTemp(Number(value)) : null
+    if (c !== null) best = best === null ? c : Math.max(best, c)
+  }
+  return best
+}
+
+// --- temperature -----------------------------------------------------------------------------
+
+/** One hwmon chip as read: its driver's `name`, and each temperature input's label (null when it
+ *  has none) and value in millidegrees. */
+export type HwmonChip = { name: string; inputs: { label: string | null; milli: string | null }[] }
+
+/** Chips whose temperatures are the CPU's: Intel's package and cores, AMD's die, a SoC's. */
+const CPU_CHIPS = new Set(['coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'cpu-thermal', 'soc_thermal', 'soc-thermal'])
+/** Chips whose temperatures are a GPU's. NVIDIA's own driver has none: `nvidia-smi` gives it. */
+export const GPU_CHIPS = new Set(['amdgpu', 'radeon', 'nouveau', 'i915', 'xe'])
+/** Thermal zones that are the CPU's, for a computer whose CPU has no hwmon chip. */
+const CPU_ZONES = new Set(['x86_pkg_temp', 'cpu-thermal', 'cpu_thermal', 'soc-thermal', 'soc_thermal', 'cpu0-thermal'])
+
+/** A `temp<N>_input` file's millidegrees, as °C, or null. */
+export function parseMilliC(text: unknown): number | null {
+  if (typeof text !== 'string' || text.length > 16 || !/^-?\d{1,7}\s*$/.test(text)) return null
+  return plausibleTemp(Number(text) / 1000)
+}
+
+/** The hottest of `inputs` whose label `pick` accepts; with no such input, the hottest of all. */
+function hottest(inputs: HwmonChip['inputs'], pick?: (label: string) => boolean): number | null {
+  const of = (list: HwmonChip['inputs']) => list.reduce<number | null>((best, i) => {
+    const c = parseMilliC(i.milli)
+    return c === null ? best : best === null ? c : Math.max(best, c)
+  }, null)
+  if (pick) {
+    const picked = of(inputs.filter((i) => i.label !== null && pick(i.label.trim())))
+    if (picked !== null) return picked
+  }
+  return of(inputs)
+}
+
+/**
+ * The CPU's and the GPU's temperature from the hwmon chips: `coretemp`'s "Package id N" (else its
+ * cores), `k10temp`'s or `zenpower`'s "Tdie" (else "Tctl"), a SoC's sensor; `amdgpu`'s "edge"
+ * (the figure AMD's own tools show), and the other GPU drivers' hottest. The hottest chip of each
+ * kind when there are several (two sockets, two GPUs).
+ */
+export function hwmonTemps(chips: readonly HwmonChip[]): { cpuC: number | null; gpuC: number | null } {
+  let cpu: number | null = null
+  let gpu: number | null = null
+  const max = (a: number | null, b: number | null) => (a === null ? b : b === null ? a : Math.max(a, b))
+  for (const chip of chips) {
+    const name = chip.name.trim()
+    if (CPU_CHIPS.has(name)) {
+      const c =
+        name === 'coretemp'
+          ? hottest(chip.inputs, (l) => /^Package id \d+$/.test(l))
+          : name === 'k10temp' || name === 'zenpower'
+            ? hottest(chip.inputs, (l) => l === 'Tdie') ?? hottest(chip.inputs, (l) => l === 'Tctl')
+            : hottest(chip.inputs)
+      cpu = max(cpu, c)
+    } else if (GPU_CHIPS.has(name)) {
+      gpu = max(gpu, name === 'amdgpu' ? hottest(chip.inputs, (l) => l === 'edge') : hottest(chip.inputs))
+    }
+  }
+  return { cpuC: cpu, gpuC: gpu }
+}
+
+/** Whether a thermal zone's `type` is the CPU's (CPU_ZONES). */
+export function isCpuZone(type: unknown): boolean {
+  return typeof type === 'string' && CPU_ZONES.has(type.trim())
 }
 
 /** A device's `power/runtime_status` when the kernel has put it to sleep, or is doing so. */
@@ -590,6 +681,7 @@ export class LinuxSystemReader {
   private diskIoTriedAt = Number.NEGATIVE_INFINITY
   private gpu: Held<number> | null = null
   private gpuTriedAt = Number.NEGATIVE_INFINITY
+  private temp: Held<TempReading> | null = null
   private battery: Held<BatteryReading> | null = null
   private batteryTriedAt = Number.NEGATIVE_INFINITY
   private space: Held<{ total: number; used: number }> | null = null
@@ -650,7 +742,7 @@ export class LinuxSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'linux') return null
-    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery }, this.mono())
+    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery, temp: this.temp }, this.mono())
   }
 
   private async readDue(): Promise<void> {
@@ -787,9 +879,45 @@ export class LinuxSystemReader {
     this.gpuTriedAt = now
     // One after the other, as every read of a driver's file here is: see `readSupply`.
     const drm = await this.readDrmBusy()
-    const nvidia = await this.readNvidia()
+    const smi = await this.readNvidia()
+    const nvidia = parseNvidiaSmi(smi)
     const percent = drm === null ? nvidia : nvidia === null ? drm : Math.max(drm, nvidia)
     if (percent !== null) this.gpu = { value: percent, at: this.mono() }
+    await this.readTemp(parseNvidiaSmiTemp(smi))
+  }
+
+  /** The CPU's and the GPU's temperature (hwmonTemps), with `nvidiaC` from nvidia-smi. */
+  private async readTemp(nvidiaC: number | null): Promise<void> {
+    const chips: HwmonChip[] = []
+    for (const entry of ((await this.dir(SYS_HWMON_PATH)) ?? []).filter((n) => /^hwmon\d{1,4}$/.test(n)).sort().slice(0, MAX_HWMON)) {
+      const dir = `${SYS_HWMON_PATH}/${entry}`
+      const name = (await this.file(`${dir}/name`))?.trim()
+      if (!name || !(CPU_CHIPS.has(name) || GPU_CHIPS.has(name))) continue
+      // A GPU that is asleep is not asked: reading its sensor would wake it.
+      if (GPU_CHIPS.has(name) && isRuntimeSuspended(await this.file(`${dir}/device/power/runtime_status`))) continue
+      const files = ((await this.dir(dir)) ?? []).filter((f) => /^temp\d{1,2}_input$/.test(f)).sort().slice(0, MAX_HWMON_INPUTS)
+      const inputs: HwmonChip['inputs'] = []
+      for (const file of files) {
+        const label = await this.file(`${dir}/${file.replace(/_input$/, '_label')}`)
+        inputs.push({ label, milli: await this.file(`${dir}/${file}`) })
+      }
+      chips.push({ name, inputs })
+    }
+    let { cpuC, gpuC } = hwmonTemps(chips)
+    if (cpuC === null) cpuC = await this.cpuZoneTemp()
+    if (nvidiaC !== null) gpuC = gpuC === null ? nvidiaC : Math.max(gpuC, nvidiaC)
+    if (cpuC !== null || gpuC !== null) this.temp = { value: { cpuC, gpuC }, at: this.mono() }
+  }
+
+  /** The hottest thermal zone that is the CPU's (isCpuZone), for a CPU without a hwmon chip. */
+  private async cpuZoneTemp(): Promise<number | null> {
+    let best: number | null = null
+    for (const zone of ((await this.dir(SYS_THERMAL_PATH)) ?? []).filter((n) => /^thermal_zone\d{1,3}$/.test(n)).sort().slice(0, MAX_HWMON)) {
+      if (!isCpuZone(await this.file(`${SYS_THERMAL_PATH}/${zone}/type`))) continue
+      const c = parseMilliC(await this.file(`${SYS_THERMAL_PATH}/${zone}/temp`))
+      if (c !== null) best = best === null ? c : Math.max(best, c)
+    }
+    return best
   }
 
   /** The busiest card that gives a `gpu_busy_percent`. A card that is asleep is passed over:
@@ -812,7 +940,7 @@ export class LinuxSystemReader {
 
   /** NVIDIA's own tool, only where its driver is loaded (the driver makes this /proc file), and
    *  not while any NVIDIA GPU is asleep: `nvidia-smi` asks every one, and wakes those. */
-  private async readNvidia(): Promise<number | null> {
+  private async readNvidia(): Promise<string | null> {
     if ((await this.file(NVIDIA_VERSION_PATH)) === null) return null
     const addresses = ((await this.dir(NVIDIA_GPUS_PATH)) ?? []).filter(isPciAddress).slice(0, MAX_GPUS)
     if (addresses.length > 0) {
@@ -820,7 +948,7 @@ export class LinuxSystemReader {
         if (isRuntimeSuspended(await this.file(`${SYS_PCI_DEVICES_PATH}/${address}/power/runtime_status`))) return null
       }
     }
-    return parseNvidiaSmi(await this.run(NVIDIA_SMI_PATH, NVIDIA_SMI_ARGS, NVIDIA_SMI_MAX_BYTES))
+    return this.run(NVIDIA_SMI_PATH, NVIDIA_SMI_ARGS, NVIDIA_SMI_MAX_BYTES)
   }
 
   private async readBattery(now: number): Promise<void> {
