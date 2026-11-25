@@ -22,7 +22,7 @@ import { frameOf } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
 import { FIRST_VERSIONED, HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
 import { createMotion } from './motion.mjs'
-import { ago, agoShort, celsius, duration, fahrenheit, fillAgo, gb, loads, pct, share, size } from './format.mjs'
+import { ago, agoShort, duration, fillAgo, gb, loads, pct, share, size, temperature } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
 export const PAIR_PATH = 'Settings → Remote Orca servers → Add server'
@@ -875,19 +875,20 @@ function chipLabel(m) {
   return m.platform === 'darwin' && /apple/i.test(m.chip ?? '') ? 'Chip' : 'CPU'
 }
 
-/** The CPU's and the GPU's temperature, in °C with °F on hover. A GPU at rest whose sensors are
- *  off (Apple silicon) has its row, with a dash; a figure the machine does not report has none. */
-function tempFacts(m) {
+/** The CPU's and the GPU's temperature, in °C or, with the setting on, °F. A Windows machine's
+ *  is its hottest ACPI thermal zone, which is often not the CPU's, so it says so. A GPU at rest
+ *  whose sensors are off (Apple silicon) has its row, with a dash; a figure the machine does not
+ *  report has none. */
+function tempFacts(m, fahrenheit) {
   const t = m.temp
   if (!t) return []
-  const value = (c) => (c === null ? '–' : h('span', { class: 'fm-temp', title: fahrenheit(c) }, celsius(c)))
   const facts = []
-  if (t.cpuC !== null) facts.push({ k: 'CPU temperature', v: value(t.cpuC), note: t.cpuZone ? 'ACPI thermal zone, may not be the CPU itself' : '' })
-  if (t.gpuC !== null || t.gpuOff) facts.push({ k: 'GPU temperature', v: value(t.gpuC), note: t.gpuOff ? 'idle' : '' })
+  if (t.cpuC !== null) facts.push(t.cpuZone ? { k: 'Thermal zone', v: temperature(t.cpuC, fahrenheit), note: 'ACPI, may not be the CPU' } : { k: 'CPU temperature', v: temperature(t.cpuC, fahrenheit) })
+  if (t.gpuC !== null || t.gpuOff) facts.push({ k: 'GPU temperature', v: temperature(t.gpuC, fahrenheit), note: t.gpuOff ? 'idle' : '' })
   return facts
 }
 
-function systemFacts(m) {
+function systemFacts(m, fahrenheit) {
   const facts = []
   if (m.tier === 'basic') {
     if (m.cores) facts.push({ k: 'Cores', v: String(m.cores) })
@@ -896,7 +897,7 @@ function systemFacts(m) {
     const full = m.load.five !== null && m.load.fifteen !== null
     facts.push({ k: 'Load avg', v: loads(m.load), note: full ? '1m · 5m · 15m' : '1m' })
   }
-  facts.push(...tempFacts(m))
+  facts.push(...tempFacts(m, fahrenheit))
   if (m.uptimeSec !== null) facts.push({ k: 'Uptime', v: duration(m.uptimeSec) })
   if (m.orca) facts.push({ k: 'Orca itself', v: `${share(m.orca.cpuPct)} CPU · ${size(m.orca.memBytes)}` })
   const fm = m.fleetMonitor
@@ -968,7 +969,7 @@ function activitySections(m, act, ui, now, list) {
   return sections.filter(Boolean)
 }
 
-function detail(m, ui, now, act, list) {
+function detail(m, ui, now, act, list, fahrenheit) {
   const sections = []
   const tab = act?.tabs ? ui.tab : 'overview'
   // Out of date here: said first on either tab, with the command that updates it.
@@ -991,7 +992,7 @@ function detail(m, ui, now, act, list) {
     sections.push(cpuSection(m, now), memorySection(m, now, act?.suggest ?? null))
     if (m.workspaces.length > 0) sections.push(workspacesSection(m))
     if (m.install) sections.push(installRow(m, ui))
-    const facts = systemFacts(m)
+    const facts = systemFacts(m, fahrenheit)
     if (facts.length > 0) sections.push(factsSection('System', facts))
     if (act?.notice) sections.push(h('p', { class: 'fm-notice', 'data-key': 'activity-notice' }, act.notice))
   }
@@ -1162,7 +1163,7 @@ export function mountFleetView(
     screen = next
     if (same) motion.measure(root)
     root.dataset.screen = machine ? 'detail' : 'overview'
-    morphChildren(root, machine ? detail(machine, ui, t, act, list) : overview(fleet, ui, t))
+    morphChildren(root, machine ? detail(machine, ui, t, act, list, fleet.fahrenheit) : overview(fleet, ui, t))
     charts.sync(root)
     motion.settle(root, { moved: same })
     syncFields()

@@ -184,6 +184,13 @@
         "placeholder": "Fleet Monitor's red"
       },
       {
+        "key": "fahrenheit",
+        "title": "Temperatures in Fahrenheit",
+        "description": "Show the CPU and GPU temperatures in a machine's System section in °F. Off, they are in °C.",
+        "type": "boolean",
+        "default": false
+      },
+      {
         "key": "cliPath",
         "title": "Orca CLI path",
         "description": "Leave empty to find the CLI that ships with this Orca.",

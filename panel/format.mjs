@@ -20,12 +20,10 @@ export function size(bytes) {
   return bytes >= GIB ? `${gb(bytes)} GB` : `${Math.max(0, Math.round(bytes / MIB))} MB`
 }
 
-/** "62 °C", and the same in Fahrenheit, "144 °F". A dash when unknown. */
-export function celsius(value) {
-  return finite(value) ? `${Math.round(value)} °C` : '–'
-}
-export function fahrenheit(value) {
-  return finite(value) ? `${Math.round((value * 9) / 5 + 32)} °F` : '–'
+/** A temperature given in °C: "62 °C", or in Fahrenheit "144 °F". A dash when unknown. */
+export function temperature(celsius, fahrenheit = false) {
+  if (!finite(celsius)) return '–'
+  return fahrenheit ? `${Math.round((celsius * 9) / 5 + 32)} °F` : `${Math.round(celsius)} °C`
 }
 
 /** "38%", "<1%" for a little above nothing. */

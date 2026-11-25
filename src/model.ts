@@ -104,17 +104,17 @@ export type GpuReading = {
 }
 
 /** The CPU's and the GPU's temperature, in whole °C, each null where it could not be read (1.5).
- *  A Mac: the SMC, the hottest CPU core and the hottest GPU sensor. Linux: hwmon (`coretemp`,
- *  `k10temp`, a SoC's thermal sensor; `amdgpu`, `nouveau`, `i915`, `xe`) and `nvidia-smi`.
- *  Windows: the ACPI thermal zone for the CPU, which may not be the die itself (`cpuZone`), and
- *  the GPU's own sensor as Task Manager reads it (D3DKMT). Only 1 to 125 °C is kept. */
+ *  A Mac: the SMC, the hottest CPU core and the hottest GPU sensor of its chip's keys. Linux:
+ *  hwmon (`coretemp`, `k10temp`, a SoC's zones; `amdgpu`, `nouveau`, `i915`, `xe`) and
+ *  `nvidia-smi`. Windows: the hottest ACPI thermal zone (`cpuZone`), and no GPU. Only
+ *  TEMP_MIN_C to TEMP_MAX_C (src/mac-system.ts) is kept. */
 export type TempReading = {
   cpuC: number | null
   gpuC: number | null
-  /** The CPU figure is an ACPI thermal zone (Windows), not the CPU's own sensor. */
+  /** The CPU figure is an ACPI thermal zone (Windows), which is often not the CPU's own sensor. */
   cpuZone?: true
-  /** The GPU has sensors but they are off because it is at rest: Apple silicon's switch off
-   *  within a second of the GPU going idle, and read again as soon as it works. */
+  /** The GPU has sensors but they are off because it is at rest: an M2 Pro's switch off within a
+   *  second of the GPU going idle (an M1 Max's do not), and read again as soon as it works. */
   gpuOff?: true
   /** How old it is, in ms; it is read about every 30 s. */
   ageMs?: number
@@ -550,6 +550,8 @@ export type FleetSnapshot = {
   historyWindowMs: number
   cli: CliInfo
   thresholds: FleetThresholds
+  /** Temperatures in °F (the person's setting); °C otherwise. */
+  fahrenheit: boolean
   /** Rises whenever history older than a post's recent window changes (a back-fill). */
   historyRev: number
   /** Random id of this worker run; `seq` starts again when it changes. */
@@ -573,6 +575,8 @@ export type FleetUpdate = {
   intervalMs: number
   cli: CliInfo
   thresholds: FleetThresholds
+  /** Temperatures in °F (the person's setting); °C otherwise. */
+  fahrenheit: boolean
   /** A different value from the panel's snapshot means older history changed: re-fetch. */
   historyRev: number
   /** A different run from the panel's snapshot means the worker restarted: re-fetch. */

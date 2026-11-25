@@ -104,13 +104,13 @@ describe('answers', () => {
     assert.equal(parseBatteryAnswer('charging'), null)
   })
 
-  test('temp: the hottest thermal zone (kelvin) as a zone, the hottest GPU (tenths of °C)', () => {
-    assert.deepEqual(parseTempAnswer({ z: 334.15, g: 652 }), { cpuC: 61, gpuC: 65, cpuZone: true })
-    assert.deepEqual(parseTempAnswer({ z: null, g: 481 }), { cpuC: null, gpuC: 48 }, 'no thermal zone')
-    assert.deepEqual(parseTempAnswer({ z: 300.15 }), { cpuC: 27, gpuC: null, cpuZone: true }, 'no GPU sensor')
-    assert.equal(parseTempAnswer({ z: 0, g: 0 }), null, 'zeros are no reading')
-    assert.equal(parseTempAnswer({ z: 273.15 + 200, g: 5_000 }), null, 'out of range')
-    assert.equal(parseTempAnswer({ z: '330', g: '600' }), null)
+  test('temp: the hottest thermal zone (kelvin), as a zone; never a GPU', () => {
+    assert.deepEqual(parseTempAnswer({ z: 334.15 }), { cpuC: 61, gpuC: null, cpuZone: true })
+    assert.deepEqual(parseTempAnswer({ z: 300.15, g: 652 }), { cpuC: 27, gpuC: null, cpuZone: true }, 'a GPU figure is not asked for, nor taken')
+    assert.equal(parseTempAnswer({ z: null }), null, 'no thermal zone')
+    assert.equal(parseTempAnswer({ z: 0 }), null, 'zero kelvin is no reading')
+    assert.equal(parseTempAnswer({ z: 273.15 + 200 }), null, 'out of range')
+    assert.equal(parseTempAnswer({ z: '330' }), null)
     assert.equal(parseTempAnswer(null), null)
     assert.equal(parseTempAnswer([330]), null)
   })
@@ -167,7 +167,7 @@ describe('WindowsSystemReader', () => {
     assert.deepEqual(win.paths, ['D:\\'], 'the system drive')
     assert.equal(first.gpu?.percent, 20)
     assert.deepEqual(first.battery, { present: true, percent: 70, state: 'charging', source: 'ac', minutesRemaining: null })
-    assert.deepEqual(win.calls, ['net', 'mem', 'disk', 'gpu', 'temp', 'bat', 'vol'], 'the network first (no counters), then the memory')
+    assert.deepEqual(win.calls, ['net', 'mem', 'disk', 'gpu', 'bat', 'vol', 'temp'], 'the network first (no counters), then the memory; the thermal zone last')
     win.state.t = 5_000
     win.state.net = { n: 'Ethernet 2', rx: 3_500_000, tx: 550_000 }
     await win.reader.refresh()
@@ -293,11 +293,11 @@ describe('WindowsSystemReader', () => {
     assert.equal(win.reader.snapshot()!.net?.rxBytesPerSec, 1_000)
   })
 
-  test('temperatures: asked with the GPU, carried with their age, then dropped', async () => {
+  test('the thermal zone: asked last, on its cadence, carried with its age, then dropped', async () => {
     const win = fakeWindows()
-    win.state.temp = { z: 330.15, g: 700 }
+    win.state.temp = { z: 330.15 }
     await win.reader.refresh()
-    assert.deepEqual(win.reader.snapshot()!.temp, { cpuC: 57, gpuC: 70, cpuZone: true })
+    assert.deepEqual(win.reader.snapshot()!.temp, { cpuC: 57, gpuC: null, cpuZone: true })
     win.state.t = 5_000
     await win.reader.refresh()
     assert.equal(win.count('temp'), 1, 'on its cadence')

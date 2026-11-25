@@ -39,6 +39,9 @@ describe('the script', () => {
       assert.ok(HOST_SCRIPT.includes(`'${name}'`), name)
     }
     assert.ok(HOST_SCRIPT.includes('[Console]::In.ReadLine()'))
+    // Compiling C# from a hidden PowerShell (Add-Type -TypeDefinition, which runs csc.exe) or
+    // building native calls at run time is what security tools look for; this script does neither.
+    assert.equal(/Add-Type\s+-(?!AssemblyName\b)|TypeDefinition|DllImport|DefinePInvokeMethod|DefineDynamicAssembly/i.test(HOST_SCRIPT), false)
     assert.equal(/Get-Process|Get-WmiObject|Win32_Process|CommandLine|MainWindowTitle|\.Path\b/i.test(HOST_SCRIPT), false, 'nothing that reads a path, a command line or a title')
     // WMI is asked two things, each with a time limit: the names of the display adapters, once, and
     // the local fixed volumes (Win32_Volume, DriveType 3: never a network or removable one), once a

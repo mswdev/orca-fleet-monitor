@@ -10,8 +10,8 @@
 //   GPU       `gpu` about every 30 s: the "GPU Engine" counters' utilisation between two
 //             requests, the busiest GPU when there are several; none before Windows 10 1709
 //   battery   `bat` about once a minute: power line, charge, charging or not, time remaining
-//   temp      `temp` about every 30 s: the hottest ACPI thermal zone (which may not be the CPU's
-//             own sensor) and the hottest GPU, as Task Manager reads it
+//   temp      `temp` about every 30 s: the hottest ACPI thermal zone, which may not be the CPU's
+//             own sensor (see src/win-host.ts for why there is no GPU temperature)
 //   memory    `mem` every reading: what Task Manager's memory page shows besides "In use"
 //             (available, committed, cached, paged and non-paged pool)
 //
@@ -69,15 +69,12 @@ export function parseGpuAnswer(answer: unknown): number | null {
   return typeof p === 'number' && p >= 0 && p <= 100 ? Math.round(p) : null
 }
 
-/** `temp`'s answer, `{ z, g }`: the hottest thermal zone in kelvin and the hottest GPU in tenths of
- *  °C, either null. The CPU figure is marked as a zone's (`cpuZone`); null when neither is in range. */
+/** `temp`'s answer, `{ z }`: the hottest thermal zone, in kelvin, as a zone's figure (`cpuZone`);
+ *  null when out of range. */
 export function parseTempAnswer(answer: unknown): TempReading | null {
   const a = record(answer)
-  if (!a) return null
-  const cpu = typeof a.z === 'number' ? plausibleTemp(a.z - 273.15) : null
-  const gpu = typeof a.g === 'number' ? plausibleTemp(a.g / 10) : null
-  if (cpu === null && gpu === null) return null
-  return { cpuC: cpu, gpuC: gpu, ...(cpu !== null ? { cpuZone: true as const } : {}) }
+  const zone = a && typeof a.z === 'number' ? plausibleTemp(a.z - 273.15) : null
+  return zone === null ? null : { cpuC: zone, gpuC: null, cpuZone: true }
 }
 
 /** Physical memory or a commit limit beyond this is nonsense (Windows' limit is 128 TB). */
@@ -260,10 +257,11 @@ export class WindowsSystemReader {
     const jobs: Promise<void>[] = [this.readNet(), this.readMemory()]
     if (heavy && due(this.diskIoTriedAt, now, SYSTEM_CADENCE.diskIoMs)) jobs.push(this.readDiskIo(now))
     if (heavy && due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs)) jobs.push(this.readGpu(now))
-    if (heavy && due(this.tempTriedAt, now, SYSTEM_CADENCE.tempMs)) jobs.push(this.readTemp(now))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.readBattery(now))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
     if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.readVolumes(now))
+    // Asked last, so no other reading waits behind a thermal zone that is slow to answer.
+    if (heavy && due(this.tempTriedAt, now, SYSTEM_CADENCE.tempMs)) jobs.push(this.readTemp(now))
     await Promise.all(jobs)
   }
 

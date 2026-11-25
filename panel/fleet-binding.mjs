@@ -126,6 +126,7 @@ export function createFleetBinding(orca, options = {}) {
       historyWindowMs: model.historyWindowMs,
       cli: model.cli,
       thresholds: model.thresholds,
+      fahrenheit: model.fahrenheit,
       omitted: model.omitted,
       clockOffsetMs,
       machines: model.order.map((id) => model.machines.get(id))
@@ -157,6 +158,7 @@ export function createFleetBinding(orca, options = {}) {
       historyWindowMs: snapshot.historyWindowMs ?? 30 * 60_000,
       cli: snapshot.cli ?? null,
       thresholds: readThresholds(snapshot.thresholds),
+      fahrenheit: snapshot.fahrenheit === true,
       historyRev: typeof snapshot.historyRev === 'number' ? snapshot.historyRev : null,
       run: typeof snapshot.run === 'string' ? snapshot.run : null,
       omitted: finite(snapshot.omitted) && snapshot.omitted > 0 ? snapshot.omitted : 0,
@@ -180,6 +182,7 @@ export function createFleetBinding(orca, options = {}) {
       intervalMs: update.intervalMs,
       cli: update.cli ?? model.cli,
       thresholds: update.thresholds ? readThresholds(update.thresholds) : model.thresholds,
+      fahrenheit: update.fahrenheit === true,
       order: (update.machines ?? []).map((m) => m.id),
       machines
     }
@@ -906,9 +909,10 @@ export function chartRule(metric, model, thresholds) {
 }
 
 /**
- * A Mac's network, disk, GPU and battery, as the panel shows them; each null where the machine
- * reports none (anything but a Mac running Fleet Monitor 1.2, or this Mac) or it is not online.
- * Rates are bytes per second; `ageSec` is set only on a figure carried from an earlier read.
+ * A machine's network, disk, GPU, battery and temperatures, as the panel shows them; each null
+ * where the machine reports none (one not running Fleet Monitor, or a version older than the part)
+ * or it is not online. Rates are bytes per second; `ageSec` is set only on a figure carried from
+ * an earlier read.
  */
 function systemOf(m, history, now) {
   const s = m.online === true && m.system && typeof m.system === 'object' ? m.system : null
@@ -964,8 +968,11 @@ function systemOf(m, history, now) {
   }
 }
 
-/** A temperature in °C the panel shows: a whole number from 1 to 125, else null. */
-const tempOf = (value) => (finite(value) && value >= 1 && value <= 125 ? Math.round(value) : null)
+/** The lowest and highest temperature shown, in °C (src/mac-system.ts). */
+const TEMP_MIN_C = 1
+const TEMP_MAX_C = 125
+/** A temperature in °C the panel shows: a whole number from TEMP_MIN_C to TEMP_MAX_C, else null. */
+const tempOf = (value) => (finite(value) && value >= TEMP_MIN_C && value <= TEMP_MAX_C ? Math.round(value) : null)
 
 /** The most volumes shown for a machine, and the longest name kept for one (src/mac-system.ts). */
 export const MAX_VOLUMES = 8
@@ -1147,6 +1154,7 @@ export function toFleet(view, now = Date.now()) {
       state: view?.error ? 'error' : 'loading',
       error: view?.error ?? null,
       thresholds: readThresholds(null),
+      fahrenheit: false,
       cliError: null,
       canStar: false,
       version: null,
@@ -1171,6 +1179,7 @@ export function toFleet(view, now = Date.now()) {
     state: 'live',
     error: view.error ?? null,
     thresholds,
+    fahrenheit: view.fahrenheit === true,
     cliError,
     canStar: view.cli?.canStar === true,
     version,

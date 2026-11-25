@@ -245,25 +245,27 @@ describe('a machine', () => {
     assert.equal($(v.root, '[data-key="cpu"] .fm-big')?.textContent, '40%', 'the reading itself is still shown')
   })
 
-  test('System: CPU and GPU temperature rows in °C, °F on hover, notes where a figure needs one', () => {
+  test('System: CPU and GPU temperature rows in °C, or °F with the setting; a thermal zone says what it is', () => {
     const system = (temp: unknown) => ({ net: null, disk: null, gpu: null, battery: null, temp }) as MachineView['system']
-    const rows = (temp: unknown) => {
-      const v = mount(viewOf([local(), machine({ system: system(temp) })]))
+    const rows = (temp: unknown, over: Partial<FleetReadyView> = {}) => {
+      const v = mount(viewOf([local(), machine({ system: system(temp) })], over))
       v.handle.show('env-a')
-      assert.equal($(v.root, '[data-key="cpu"] .fm-temp'), null, 'not in the CPU card')
-      return $(v.root, '[data-key="facts:System"]')
+      return $(v.root, '[data-key="facts:System"]')!
     }
-    const names = (section: FakeElement) => section.querySelectorAll('dt').map((n) => n.textContent)
-    const both = rows({ cpuC: 62, gpuC: 55 })!
-    assert.deepEqual(names(both).filter((n) => n.endsWith('temperature')), ['CPU temperature', 'GPU temperature'])
+    const facts = (section: FakeElement) => section.querySelectorAll('.fm-fact').map((f) => [f.querySelector('dt')!.textContent, f.querySelector('dd')!.textContent])
+    const names = (section: FakeElement) => facts(section).map(([k]) => k)
+    const both = rows({ cpuC: 62, gpuC: 55 })
+    assert.deepEqual(facts(both).filter(([k]) => k!.endsWith('temperature')), [['CPU temperature', '62 °C'], ['GPU temperature', '55 °C']])
     assert.equal(names(both).indexOf('CPU temperature'), names(both).indexOf('Load avg') + 1, 'after the load average')
-    assert.deepEqual(both.querySelectorAll('.fm-temp').map((n) => [n.textContent, n.getAttribute('title')]), [['62 °C', '144 °F'], ['55 °C', '131 °F']])
-    const zone = rows({ cpuC: 41, gpuC: null, cpuZone: true })!
-    assert.deepEqual(names(zone).filter((n) => n.endsWith('temperature')), ['CPU temperature'], 'no GPU figure: no GPU row')
-    assert.match(zone.textContent, /ACPI thermal zone/)
-    const off = rows({ cpuC: 53, gpuC: null, gpuOff: true })!
-    assert.match(off.querySelectorAll('.fm-fact').find((f) => f.textContent.startsWith('GPU temperature'))!.textContent, /–idle$/)
-    assert.equal(names(rows(undefined)!).some((n) => n.endsWith('temperature')), false, 'a machine that reports none has no rows')
+    assert.equal(both.querySelectorAll('[title]').length, 0, 'nothing only a pointer can read')
+    const f = rows({ cpuC: 62, gpuC: 55 }, { fahrenheit: true })
+    assert.deepEqual(facts(f).filter(([k]) => k!.endsWith('temperature')), [['CPU temperature', '144 °F'], ['GPU temperature', '131 °F']])
+    const zone = rows({ cpuC: 41, gpuC: null, cpuZone: true })
+    assert.deepEqual(facts(zone).find(([k]) => k === 'Thermal zone'), ['Thermal zone', '41 °CACPI, may not be the CPU'])
+    assert.equal(names(zone).some((n) => n!.endsWith('temperature')), false, 'not called the CPU, and no GPU figure: no GPU row')
+    const off = rows({ cpuC: 53, gpuC: null, gpuOff: true })
+    assert.deepEqual(facts(off).find(([k]) => k === 'GPU temperature'), ['GPU temperature', '–idle'])
+    assert.equal(names(rows(undefined)).some((n) => /temperature|Thermal/.test(n!)), false, 'a machine that reports none has no rows')
   })
 
   test('more than 256 cores: one quiet line says per-core load is not drawn', () => {

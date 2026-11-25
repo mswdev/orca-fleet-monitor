@@ -113,6 +113,17 @@ describe('createFleetBinding', () => {
     assert.deepEqual(fake.requests, ['fleet.snapshot'])
   })
 
+  test('temperatures in °F only when the worker says so, as each post says', async () => {
+    const fake = fakeOrca({ snapshots: [snapshot(3, 10_000, undefined, { fahrenheit: true })] })
+    const { binding } = bind(fake)
+    await binding.ready
+    assert.equal(readyView(binding.current()).fahrenheit, true)
+    fake.post(update(4, 15_000, {}, { fahrenheit: false }))
+    assert.equal(readyView(binding.current()).fahrenheit, false)
+    fake.post(update(5, 20_000, {}, { fahrenheit: 'yes' }))
+    assert.equal(readyView(binding.current()).fahrenheit, false, 'anything but true is °C')
+  })
+
   test('a snapshot from an older worker without thresholds gets the defaults', async () => {
     const fake = fakeOrca({ snapshots: [snapshot(3, 10_000, undefined, { thresholds: undefined })] })
     const { binding } = bind(fake)
