@@ -5,7 +5,7 @@ import type { ExecFile } from '../src/mac-memory.ts'
 import { isInterfaceName, SYSTEM_CADENCE, SYSTEM_MAX_AGE } from '../src/mac-system.ts'
 import type { SystemReader } from '../src/sampler.ts'
 import { NVIDIA_SMI_ARGS } from '../src/linux-system.ts'
-import { interfaceLabel, NVIDIA_RETRY_MS, NVIDIA_TRIES, nvidiaSmiPaths, parseBatteryAnswer, parseDiskAnswer, parseGpuAnswer, parseMemAnswer, parseNetAnswer, parseTempAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
+import { interfaceLabel, NVIDIA_RETRY_MS, NVIDIA_TRIES, nvidiaSmiEnv, nvidiaSmiPaths, parseBatteryAnswer, parseDiskAnswer, parseGpuAnswer, parseMemAnswer, parseNetAnswer, parseTempAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
 
 describe('answers', () => {
   test('net: the adapter and its two counters, or nothing', () => {
@@ -351,6 +351,22 @@ describe('WindowsSystemReader', () => {
     await refreshAt(zoneless, 0)
     await refreshAt(zoneless, 5_000)
     assert.deepEqual(zoneless.reader.snapshot()!.temp, { cpuC: null, gpuC: 61 }, 'no thermal zone: the GPU alone')
+  })
+
+  test("nvidia-smi gets a ProgramFiles when the worker has none, as Orca's does; one there is kept", async () => {
+    // Orca starts a worker with only a few variables, and NVML does not start without one of these.
+    const win = nvidiaDesktop(['31, 52\n'])
+    await win.reader.refresh()
+    win.state.t = 5_000
+    await win.reader.refresh()
+    assert.equal(win.runs[0]!.env!.ProgramFiles, 'C:\\Program Files')
+    assert.equal(win.runs[0]!.env!.SystemDrive, 'D:', 'the rest as it was')
+    const orca = { PATH: 'C:\\Windows\\system32', SYSTEMDRIVE: 'C:', SystemRoot: 'C:\\WINDOWS', ELECTRON_RUN_AS_NODE: '1' }
+    assert.deepEqual(nvidiaSmiEnv(orca), { ...orca, ProgramFiles: 'C:\\Program Files' })
+    assert.deepEqual(nvidiaSmiEnv({ ...orca, PROGRAMFILES: '' }), { ...orca, ProgramFiles: 'C:\\Program Files' }, 'an empty one is none, and not left beside it')
+    assert.deepEqual(nvidiaSmiEnv({ ...orca, ProgramW6432: 'E:\\Programs' }), { ...orca, ProgramW6432: 'E:\\Programs' })
+    assert.deepEqual(nvidiaSmiEnv({ ...orca, programfiles: 'E:\\Programs' }), { ...orca, programfiles: 'E:\\Programs' }, 'in any case')
+    assert.deepEqual(nvidiaSmiEnv({ ...orca, ProgramFiles: 'E:\\Programs', ProgramW6432: 'F:\\Programs' }).ProgramW6432, 'F:\\Programs', 'what is there is not changed')
   })
 
   test('nvidia-smi is never run on a laptop, nor where the battery is not known', async () => {

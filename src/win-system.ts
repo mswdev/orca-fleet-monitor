@@ -35,7 +35,7 @@ import { diskSpaceOf, due, heldTemp, interfaceLabel, MAX_VOLUMES, plausibleTemp,
 
 export { interfaceLabel }
 import type { BatteryReading, MacSystem, NetReading, TempReading, WinMemory, VolumeReading } from './model.ts'
-import { PowerShellHost, programFiles, systemRoot } from './win-host.ts'
+import { PowerShellHost, programFiles, readEnv, systemRoot } from './win-host.ts'
 
 /** How long PowerShell has to answer one request. Long, because a slow answer costs nothing
  *  (readings are never waited for) while giving up kills PowerShell, and its first use of the
@@ -89,6 +89,21 @@ export function parseTempAnswer(answer: unknown): TempReading | null {
  *  Program Files (older ones). Run by its full path, so nothing on PATH can stand in for it. */
 export function nvidiaSmiPaths(env: NodeJS.ProcessEnv): string[] {
   return [path.win32.join(systemRoot(env), 'System32', 'nvidia-smi.exe'), path.win32.join(programFiles(env), 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe')]
+}
+/**
+ * The environment nvidia-smi runs in: the worker's own, as qprocess has (a Windows program may
+ * not start without SystemRoot), with `ProgramFiles` added when neither it nor `ProgramW6432`
+ * has a value. Orca starts a plugin's worker with only a few variables (PATH, SystemRoot,
+ * SystemDrive and the like), and without either of those NVML does not start: nvidia-smi
+ * prints "Failed to initialize NVML: Unknown Error", run from the worker of a Windows 11
+ * desktop with an RTX 4090, while from a terminal it answers.
+ */
+export function nvidiaSmiEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const own = Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string'))
+  if (readEnv(env, 'ProgramFiles') || readEnv(env, 'ProgramW6432')) return own
+  // Without a copy of the name in another case, which would leave two.
+  for (const key of Object.keys(own)) if (key.toUpperCase() === 'PROGRAMFILES') delete own[key]
+  return { ...own, ProgramFiles: programFiles(env) }
 }
 /** nvidia-smi's own runner, apart from every other reader's. */
 export const nvidiaRunBounded: ExecFile = createRunBounded()
@@ -265,8 +280,7 @@ export class WindowsSystemReader {
     this.exec = options.exec ?? nvidiaRunBounded
     const env = options.env ?? process.env
     this.nvidiaPaths = nvidiaSmiPaths(env)
-    // Its own environment, as qprocess has: a Windows program may not start without SystemRoot.
-    this.childEnv = Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string'))
+    this.childEnv = nvidiaSmiEnv(env)
   }
 
   /** Reads what is due. A refresh still running is joined, not started again. */

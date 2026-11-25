@@ -277,6 +277,16 @@ describe('temperatures (the SMC)', () => {
     assert.deepEqual(parseMacTemps(JSON.stringify({ Tp01: 50 }), M2), { cpuC: 50, gpuC: null }, 'no GPU key answered: not at rest, unknown')
   })
 
+  test("an M2 Max at rest, every core's key off: the CPU from its Tf0 keys, never while a core reads", () => {
+    // As an M2 Max (Mac14,6, macOS 27.2) gave them at rest and with every core busy.
+    const rest = { Tp1h: 6.7, Tp1t: 4.6, Tp1p: 6.7, Tp1l: 4.6, Tp01: 6.7, Tp05: 4.6, Tp09: 6.7, Tp0D: 4.6, Tp0X: 6.7, Tp0b: 4.6, Tp0f: 6.7, Tp0j: 4.6, Tf04: 35.5, Tf08: 34.8, Tf09: 35.1, Tf0A: 35, Tf0B: 35.1, Tf0E: 35.5, Tg0f: 39.9, Tg0j: 39.6 }
+    const busy = { ...rest, Tp1h: 52.2, Tp1t: 49.3, Tp01: 52.6, Tp09: 53.1, Tp0f: 53.1, Tf04: 52.6, Tf08: 52, Tf09: 52.2, Tf0E: 57, Tg0f: 45.5, Tg0j: 46.2 }
+    assert.deepEqual(parseMacTemps(JSON.stringify(rest), M2), { cpuC: 36, gpuC: 40 })
+    assert.deepEqual(parseMacTemps(JSON.stringify(busy), M2), { cpuC: 53, gpuC: 46 }, 'the cores, not the spares')
+    assert.deepEqual(parseMacTemps(JSON.stringify(M2_REST), M2), { cpuC: 53, gpuC: null, gpuOff: true }, "an M2 Pro's warm E-cores are still its figure")
+    assert.ok(smcKeyList(M2).includes('Tf04'))
+  })
+
   test("only the chip's own keys count: an M1 Max's Tp0I is not one of its cores", () => {
     // As this M1 Max gave them, at rest: its table's keys, and others it has that start Tp or Tg.
     const m1Max = { Tp01: 41.6, Tp02: 50.9, Tp05: 42.4, Tp06: 52.1, Tp09: 40.7, Tp0D: 39.9, Tp0H: 40.8, Tp0I: 50.4, Tp0T: 40, Tp0b: 37.5, Tg04: 27.8, Tg05: 35.6, Tg0D: 34.2, Tg0L: 36, Tg0T: 35.8 }

@@ -193,8 +193,13 @@ export const SMC_KEYS: Readonly<Record<string, SmcKeys>> = Object.freeze({
     cpu: ['Tp09', 'Tp0T', 'Tp01', 'Tp05', 'Tp0D', 'Tp0H', 'Tp0L', 'Tp0P', 'Tp0X', 'Tp0b'],
     gpu: ['Tg05', 'Tg0D', 'Tg0L', 'Tg0T']
   },
+  // An M2 Max's cores (Mac14,6, macOS 27.2) all read under SMC_SENSOR_OFF_C while it is quiet,
+  // E-cores too, and a core's figure only while it works; its Tf0 keys read the whole time and
+  // follow the cores (35 °C at rest, 52 under load on every core, with the cores at 49 to 53).
+  // So these are the spares. They were checked on that one Mac only.
   m2: {
     cpu: ['Tp1h', 'Tp1t', 'Tp1p', 'Tp1l', 'Tp01', 'Tp05', 'Tp09', 'Tp0D', 'Tp0X', 'Tp0b', 'Tp0f', 'Tp0j'],
+    cpuSpare: ['Tf04', 'Tf08', 'Tf09', 'Tf0A', 'Tf0B', 'Tf0E'],
     gpu: ['Tg0f', 'Tg0j']
   },
   m3: {
