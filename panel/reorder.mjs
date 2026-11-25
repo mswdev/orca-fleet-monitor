@@ -19,9 +19,12 @@ export const DRAG_PX = 5
 /** How long a finger rests on a card before it lifts, and how far it may stray meanwhile. */
 export const TOUCH_HOLD_MS = 350
 export const TOUCH_SLOP_PX = 10
-/** How close to the top or bottom of the panel a dragged card scrolls it, and how fast at most. */
+/** How close to the top or bottom of the panel a dragged card scrolls it, and how fast at most:
+ *  per millisecond, so a 120 Hz display scrolls no faster than a 60 Hz one (about 840 px/s). */
 const EDGE_PX = 48
-const SCROLL_MAX_PX = 14
+const SCROLL_PX_PER_MS = 14 / 16.7
+/** The room a card moved from the keyboard keeps from the header and from the panel's foot. */
+export const REVEAL_PX = 8
 /** How long a dropped card takes to settle into its place. */
 export const DROP_MS = 180
 
@@ -112,6 +115,29 @@ const num = (value) => (Number.isFinite(value) ? value : 0)
  *  not change: the grid is the cards' offset parent. */
 function box(el) {
   return { x: num(el.offsetLeft), y: num(el.offsetTop), w: num(el.offsetWidth), h: num(el.offsetHeight) }
+}
+
+/** Where an element is in the panel's window, or 0s where that cannot be told (no layout). */
+function rectOf(el) {
+  const r = typeof el?.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null
+  return { top: num(r?.top), bottom: num(r?.bottom), left: num(r?.left) }
+}
+
+/**
+ * Scrolls the panel just enough that `card` (moved from the keyboard) is in view, clear of the
+ * sticky header. Measured from the card's place in the layout, not from where a slide has it now.
+ */
+export function revealCard(root, card, win = globalThis.window) {
+  const height = num(win?.innerHeight)
+  if (!card || height <= 0 || typeof win?.scrollBy !== 'function') return
+  const above = rectOf(root.querySelector('.fm-top')).bottom
+  const top = rectOf(root.querySelector('.fm-grid')).top + box(card).y
+  const bottom = top + box(card).h
+  let by = 0
+  if (top < above + REVEAL_PX) by = top - above - REVEAL_PX
+  // Its top stays in view however tall it is.
+  else if (bottom > height - REVEAL_PX) by = Math.min(bottom - height + REVEAL_PX, top - above - REVEAL_PX)
+  if (by !== 0) win.scrollBy({ top: by, behavior: 'instant' })
 }
 
 /**
@@ -229,6 +255,9 @@ export function createCardDrag({
       return
     }
     const { id, pointerId, offset } = drag
+    // Where the card is on screen now: its place in the layout, and the pointer's offset from it.
+    const lifted = cardOf(id)
+    const from = lifted ? box(lifted) : null
     drag = null
     scrolling = false
     // Until the next press: the click the release makes is the only one in between.
@@ -240,31 +269,43 @@ export function createCardDrag({
       // Released already.
     }
     end(commit)
-    // The draw just took the card's transform away: it settles from under the pointer into its place.
+    // The draw just took the card's transform away and put it in its place: dropped, the one it
+    // took; called off, the one it had. It settles there from where it was on screen.
     const card = cardOf(id)
-    if (card && typeof card.animate === 'function' && motion() && (offset.x !== 0 || offset.y !== 0)) {
-      card.animate([{ transform: `translate(${offset.x}px, ${offset.y}px)`, zIndex: 1 }, { transform: 'none', zIndex: 1 }], {
+    const to = card ? box(card) : null
+    const dx = from && to ? from.x + offset.x - to.x : 0
+    const dy = from && to ? from.y + offset.y - to.y : 0
+    if (card && typeof card.animate === 'function' && motion() && (dx !== 0 || dy !== 0)) {
+      card.animate([{ transform: `translate(${dx}px, ${dy}px)`, zIndex: 1 }, { transform: 'none', zIndex: 1 }], {
         duration: DROP_MS,
         easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)'
       })
     }
   }
 
-  /** Near the top or bottom of the panel, a dragged card scrolls it, faster the closer it is. */
-  function edgeScroll() {
+  /** The frame time edgeScroll last ran at, for a step that follows time rather than frames. */
+  let scrolledAt = null
+
+  /** Near the top or bottom of the panel, a dragged card scrolls it, faster the closer it is.
+   *  `at` is the frame's time; the first step, from a pointer move, has none. */
+  function edgeScroll(at) {
     if (!drag || typeof frame !== 'function' || typeof win?.scrollBy !== 'function') {
       scrolling = false
+      scrolledAt = null
       return
     }
+    const elapsed = Number.isFinite(at) && scrolledAt !== null ? Math.max(0, Math.min(50, at - scrolledAt)) : 16.7
+    scrolledAt = Number.isFinite(at) ? at : null
+    const most = SCROLL_PX_PER_MS * elapsed
     const height = num(win.innerHeight)
-    const top = root.querySelector('.fm-top')
-    const topEdge = (typeof top?.getBoundingClientRect === 'function' ? top.getBoundingClientRect().bottom : 0) + EDGE_PX
+    const topEdge = rectOf(root.querySelector('.fm-top')).bottom + EDGE_PX
     const bottomEdge = height - EDGE_PX
     let by = 0
-    if (drag.y < topEdge) by = -Math.min(SCROLL_MAX_PX, Math.ceil(((topEdge - drag.y) / EDGE_PX) * SCROLL_MAX_PX))
-    else if (height > 0 && drag.y > bottomEdge) by = Math.min(SCROLL_MAX_PX, Math.ceil(((drag.y - bottomEdge) / EDGE_PX) * SCROLL_MAX_PX))
+    if (drag.y < topEdge) by = -Math.ceil(Math.min(1, (topEdge - drag.y) / EDGE_PX) * most)
+    else if (height > 0 && drag.y > bottomEdge) by = Math.ceil(Math.min(1, (drag.y - bottomEdge) / EDGE_PX) * most)
     if (by === 0) {
       scrolling = false
+      scrolledAt = null
       return
     }
     const before = win.scrollY
@@ -272,6 +313,7 @@ export function createCardDrag({
     if (win.scrollY === before) {
       // At the end already.
       scrolling = false
+      scrolledAt = null
       return
     }
     track()
@@ -294,8 +336,14 @@ export function createCardDrag({
   }
 
   function onPointerMove(event) {
+    // A mouse moving with no button held: the release was missed (it happened outside the panel).
+    const released = event.pointerType === 'mouse' && event.buttons === 0
     if (drag) {
       if (event.pointerId !== drag.pointerId) return
+      if (released) {
+        finish(true)
+        return
+      }
       drag.x = event.clientX
       drag.y = event.clientY
       track()
@@ -306,6 +354,10 @@ export function createCardDrag({
       return
     }
     if (!press || event.pointerId !== press.pointerId) return
+    if (released) {
+      press = null
+      return
+    }
     const far = Math.hypot(event.clientX - press.x, event.clientY - press.y)
     if (press.touch) {
       // Moved before the hold: a swipe, which scrolls.
