@@ -4,6 +4,12 @@ Each release's notes. Releases before 1.4.0 have theirs on the [releases page](h
 
 ## Unreleased
 
+### Your own order
+
+- Drag a machine's card on the overview to a new place. There is nothing to turn on, and a click still opens the card. On a touch screen, hold a card for a moment before you drag it, so a swipe still scrolls. Near the top or bottom of the panel, a dragged card scrolls it, and Escape puts the card back where it was.
+- With the keyboard, Alt (Option on a Mac) and an arrow key move the focused card one place, and screen readers hear where it went.
+- The order is kept in the panel's own storage on each computer, so it survives closing the panel, restarting Orca and updating Fleet Monitor. Machines you pair later come after the ones you placed. Until you move a card, the order is the same as before: this computer first, then the others by name. Fleet Monitor asks for no new access to keep it.
+
 ### Temperatures
 
 - A machine's System section has the CPU's and the GPU's temperature, after its load average, in °C. A new setting, **Temperatures in Fahrenheit**, shows them in °F.

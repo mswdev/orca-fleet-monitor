@@ -1,5 +1,6 @@
 // Types for view.mjs.
 import type { FleetBinding, FleetModel } from './fleet-binding.mjs'
+import type { OrderStore } from './reorder.mjs'
 
 export const PAIR_PATH: string
 export const REPOSITORY_URL: string
@@ -20,6 +21,8 @@ export type FleetViewOptions = {
   clock?: () => number
   /** True when the person asked for reduced motion (or it cannot be told): nothing moves. */
   reducedMotion?: () => boolean
+  /** Where the overview's order of cards is kept; the frame's localStorage when not given. */
+  order?: OrderStore
 }
 
 /** The span every chart shows, in ms. */
