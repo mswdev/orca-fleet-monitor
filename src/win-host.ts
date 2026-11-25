@@ -39,11 +39,10 @@
 //   bat    the power line, the battery's charge and flags, and the seconds it has left
 //          (System.Windows.Forms.SystemInformation.PowerStatus)
 //   temp   the hottest ACPI thermal zone, in kelvin, from the "Thermal Zone Information"
-//          counters (often the motherboard's zone, not the CPU's own sensor, which Windows does
-//          not give without elevation), and the hottest GPU's own sensor in tenths of °C, from
-//          D3DKMTQueryAdapterInfo's KMTQAITYPE_ADAPTERPERFDATA (Windows 10 2004 and later), the
-//          figure Task Manager shows. That is a few lines of C# compiled once by Add-Type; where
-//          it cannot be (a locked-down machine), the GPU is not asked again
+//          counters: often the motherboard's zone, not the CPU's own sensor, which Windows does
+//          not give without elevation. The GPU's own sensor, which Task Manager shows, is only
+//          reached through native code (D3DKMTQueryAdapterInfo), which would mean compiling C#
+//          from this PowerShell: security tools take that for an attack, so it is not read
 //   proc   every process from one read of the "Process" counters: pid, parent pid, name,
 //          cumulative CPU time, private working set and start time
 //
@@ -99,7 +98,6 @@ $global:fmGpu = $null
 $global:fmHasGpu = $null
 $global:fmReset = [DateTime]::MinValue
 $global:fmForms = $false
-$global:fmD3d = $null
 
 function FmJson($value) {
   ConvertTo-Json -InputObject $value -Compress -Depth 4
@@ -247,52 +245,8 @@ function FmTemp {
       }
     }
   } catch { $z = $null }
-  if ($null -eq $global:fmD3d) {
-    $global:fmD3d = $false
-    try {
-      $src = 'using System; using System.Runtime.InteropServices;
-public static class FmD3d {
-  [StructLayout(LayoutKind.Sequential)] struct E { public uint N; public IntPtr A; }
-  [StructLayout(LayoutKind.Sequential)] struct I { public uint H; public uint L; public int Hi; public uint S; public int P; }
-  [StructLayout(LayoutKind.Sequential)] struct Q { public uint H; public int T; public IntPtr D; public uint Z; }
-  [StructLayout(LayoutKind.Sequential)] struct C { public uint H; }
-  [DllImport(~gdi32.dll~)] static extern int D3DKMTEnumAdapters2(ref E e);
-  [DllImport(~gdi32.dll~)] static extern int D3DKMTQueryAdapterInfo(ref Q q);
-  [DllImport(~gdi32.dll~)] static extern int D3DKMTCloseAdapter(ref C c);
-  public static int Hottest() {
-    E e = new E();
-    if (D3DKMTEnumAdapters2(ref e) != 0 || e.N == 0 || e.N > 64) return -1;
-    int size = Marshal.SizeOf(typeof(I));
-    IntPtr list = Marshal.AllocHGlobal(size * (int)e.N);
-    IntPtr perf = Marshal.AllocHGlobal(64);
-    int best = -1;
-    try {
-      e.A = list;
-      if (D3DKMTEnumAdapters2(ref e) != 0) return -1;
-      for (int i = 0; i < e.N; i++) {
-        I a = (I)Marshal.PtrToStructure(new IntPtr(list.ToInt64() + i * size), typeof(I));
-        for (int b = 0; b < 64; b++) Marshal.WriteByte(perf, b, 0);
-        Q q = new Q(); q.H = a.H; q.T = 62; q.D = perf; q.Z = 64;
-        if (D3DKMTQueryAdapterInfo(ref q) == 0) { int t = Marshal.ReadInt32(perf, 56); if (t > best) best = t; }
-        C c = new C(); c.H = a.H; D3DKMTCloseAdapter(ref c);
-      }
-    } finally { Marshal.FreeHGlobal(list); Marshal.FreeHGlobal(perf); }
-    return best;
-  }
-}'
-      Add-Type -TypeDefinition $src.Replace('~', $q) -Language CSharp
-      $global:fmD3d = $true
-    } catch { }
-  }
-  $g = $null
-  if ($global:fmD3d) {
-    try {
-      $t = [FmD3d]::Hottest()
-      if ($t -gt 0) { $g = $t }
-    } catch { }
-  }
-  if ($null -eq $z -and $null -eq $g) { return $null }
-  FmJson @{ z = $z; g = $g }
+  if ($null -eq $z) { return $null }
+  FmJson @{ z = $z }
 }
 
 function FmProc {

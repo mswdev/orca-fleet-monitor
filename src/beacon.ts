@@ -8,7 +8,7 @@
 // The process list travels in lines of its own (src/process-line.ts), which beacon readers skip.
 import { clipText, COUNT_LIMITS, firstEntries, isPluginVersion, lastEntries } from './bounds.ts'
 import { groupsFit } from './core-groups.ts'
-import { isInterfaceName, MAX_VOLUMES, VOLUME_NAME_MAX } from './mac-system.ts'
+import { isInterfaceName, MAX_VOLUMES, TEMP_MAX_C, TEMP_MIN_C, VOLUME_NAME_MAX } from './mac-system.ts'
 import type { BatteryReading, BeaconRecord, CoreGroup, DiskReading, GpuReading, LocalSample, MacMemory, MacSystem, NetReading, PressureLevel, TempReading, VolumeReading, WinMemory } from './model.ts'
 
 export const BEACON_PREFIX = 'FLEETMON1 '
@@ -247,8 +247,8 @@ function decodeSystem(w: Record<string, unknown>): MacSystem | null {
   let temp: TempReading | null = null
   const tp = record(w.tp)
   if (tp) {
-    const cpuC = within(tp.c, 1, 125)
-    const gpuC = within(tp.g, 1, 125)
+    const cpuC = within(tp.c, TEMP_MIN_C, TEMP_MAX_C)
+    const gpuC = within(tp.g, TEMP_MIN_C, TEMP_MAX_C)
     const gpuOff = gpuC === null && tp.o === 1
     if (cpuC !== null || gpuC !== null || gpuOff) {
       const age = ageOf(tp.a)
@@ -476,8 +476,9 @@ export function encodeBeacon(
     ...('version' in meta ? { fv: isPluginVersion(meta.version) ? meta.version : '' } : {})
   }
   // Degrade in steps: per-core values (and the groups over them) first, then the network, disk,
-  // GPU, battery and Windows memory figures, then long free-text fields. The Mac memory figures (about 200
-  // characters) stay in every step: they are what health and alerts are judged on.
+  // GPU, battery, temperature and Windows memory figures, then long free-text fields. The Mac
+  // memory figures (about 200 characters) stay in every step: they are what health and alerts are
+  // judged on.
   const bare = { ...wire, pc: undefined, cg: undefined }
   const plain = { ...bare, nw: undefined, dk: undefined, gp: undefined, bt: undefined, tp: undefined, wm: undefined }
   const attempts: Wire[] = [wire, bare, plain, { ...plain, h: clip(wire.h, TEXT_LIMIT), m: clip(wire.m, TEXT_LIMIT), rl: clip(wire.rl, 32) }]

@@ -64,6 +64,27 @@ describe('PanelBridge', () => {
     assert.equal(snap.mode, 'fast')
     assert.equal(snap.machines[0]?.history.t.length, 5)
     assert.equal(snap.cli.source, 'bundled')
+    assert.equal(snap.fahrenheit, false, 'temperatures in °C when the worker is not told otherwise')
+  })
+
+  test('the Fahrenheit setting goes with every snapshot and post, as it is now', () => {
+    const time = new FakeTime()
+    const entries = [{ state: machine('local'), history: ringWith(time, 5, 5_000) }]
+    const posts: FleetUpdate[] = []
+    let fahrenheit = true
+    const bridge = new PanelBridge({
+      source: source(time, entries, { value: 'fast' }),
+      post: (p) => posts.push(p),
+      now: time.now,
+      cli: () => ({ path: null, source: null, error: null }),
+      fahrenheit: () => fahrenheit,
+      setTimeout: time.setTimeout,
+      clearTimeout: time.clearTimeout
+    })
+    assert.equal(bridge.snapshot().fahrenheit, true)
+    fahrenheit = false
+    assert.equal(bridge.flush()?.fahrenheit, false)
+    assert.equal(posts[0]?.fahrenheit, false)
   })
 
   test('a snapshot over the size cap thins history instead of failing', () => {
@@ -421,6 +442,12 @@ describe('readSettings (1.1)', () => {
     const set = readSettings({ ramUsedBusyPercent: 150, memoryAlerts: false })
     assert.deepEqual([set.memoryRules.ramUsedBusyPercent, set.memoryAlerts], [100, false])
     assert.equal(readSettings({ ramUsedBusyPercent: 'x' }).memoryRules.ramUsedBusyPercent, 90)
+  })
+
+  test('temperatures in °C unless Fahrenheit is turned on (1.5)', () => {
+    assert.equal(readSettings({}).fahrenheit, false)
+    assert.equal(readSettings({ fahrenheit: true }).fahrenheit, true)
+    assert.equal(readSettings({ fahrenheit: 'yes' }).fahrenheit, false)
   })
 
   test('the manifest declares both settings, and the notifications capability', () => {

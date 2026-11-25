@@ -159,6 +159,9 @@ describe('parsers', () => {
     assert.equal(parseNvidiaSmi(7), null)
     assert.equal(parseNvidiaSmi('12, 61\n87, 70\n'), 87, 'with the temperature asked for too')
     assert.equal(parseNvidiaSmi('[N/A], 61\n'), null)
+    assert.equal(parseNvidiaSmi('45, [Not Supported]\n'), 45, 'a GPU that gives no temperature still gives its utilisation')
+    assert.equal(parseNvidiaSmi('[Not Supported], 50\n'), null)
+    assert.equal(parseNvidiaSmi('45, 50, 3\n'), null, 'not the format asked for')
   })
 
   test('nvidia-smi: the hottest GPU', () => {
@@ -167,6 +170,8 @@ describe('parsers', () => {
     assert.equal(parseNvidiaSmiTemp('12\n'), null, 'only the utilisation')
     assert.equal(parseNvidiaSmiTemp('12, 200\n'), null)
     assert.equal(parseNvidiaSmiTemp(null), null)
+    assert.equal(parseNvidiaSmiTemp('[Not Supported], 50\n'), 50, 'a GPU that gives no utilisation still gives its temperature')
+    assert.equal(parseNvidiaSmiTemp('45, [Not Supported]\n'), null)
   })
 
   test('hwmon: the CPU package or die, the GPU edge; millidegrees in range', () => {
@@ -180,10 +185,19 @@ describe('parsers', () => {
     assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tctl', 71), core('Tccd1', 60)] }]), { cpuC: 71, gpuC: null })
     assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tctl', 81), core('Tdie', 71)] }]), { cpuC: 71, gpuC: null }, 'Tdie before Tctl, which may be offset')
     assert.deepEqual(hwmonTemps([{ name: 'cpu_thermal', inputs: [core(null, 49)] }]), { cpuC: 49, gpuC: null }, 'a Raspberry Pi')
+    assert.deepEqual(hwmonTemps([{ name: 'cpu_thermal', inputs: [core(null, 12)] }]), { cpuC: 12, gpuC: null }, 'a cold one: only an Apple sensor under 10 °C is off')
+    assert.deepEqual(
+      hwmonTemps(['soc_thermal', 'bigcore0_thermal', 'bigcore2_thermal', 'littlecore_thermal', 'center_thermal', 'gpu_thermal', 'npu_thermal'].map((name, i) => ({ name, inputs: [core(null, 40 + i)] }))),
+      { cpuC: 43, gpuC: 45 },
+      "a Rockchip RK3588's zones: its cores' and its GPU's, not the NPU's or the centre's"
+    )
     assert.deepEqual(hwmonTemps([{ name: 'amdgpu', inputs: [core('edge', 55), core('junction', 70), core('mem', 60)] }, { name: 'nouveau', inputs: [core(null, 41)] }]), { cpuC: null, gpuC: 55 })
     assert.deepEqual(hwmonTemps([{ name: 'nvme', inputs: [core('Composite', 40)] }, { name: 'acpitz', inputs: [core(null, 27)] }]), { cpuC: null, gpuC: null }, 'not a CPU or a GPU')
     assert.equal(isCpuZone('x86_pkg_temp\n'), true)
     assert.equal(isCpuZone('acpitz\n'), false)
+    assert.equal(isCpuZone('cpu-thermal\n'), true)
+    assert.equal(isCpuZone('bigcore0-thermal'), true)
+    assert.equal(isCpuZone('gpu-thermal'), false)
     assert.equal(isCpuZone(null), false)
     assert.equal(isRuntimeSuspended('suspended\n'), true)
     assert.equal(isRuntimeSuspended('suspending\n'), true)
@@ -633,6 +647,39 @@ describe('LinuxSystemReader', () => {
     await pc.reader.refresh()
     assert.equal(pc.state.runs.length, 1)
     assert.deepEqual(pc.reader.snapshot()!.temp, { cpuC: 61, gpuC: 66 })
+  })
+
+  test('temperatures: a sensor that never answers holds up only the temperatures, not the GPU', async () => {
+    const pc = laptop()
+    pc.files.set('/sys/class/hwmon/hwmon0/name', 'coretemp\n')
+    pc.files.set('/sys/class/hwmon/hwmon0/temp1_input', '50000\n')
+    let hangs = 0
+    const reader = new LinuxSystemReader({
+      readFile: (path) => {
+        if (path === '/sys/class/hwmon/hwmon0/temp1_input') {
+          hangs += 1
+          return new Promise<string | null>(() => {})
+        }
+        return Promise.resolve(pc.files.get(path) ?? null)
+      },
+      readDir: async (path) => {
+        const names = new Set<string>()
+        for (const file of pc.files.keys()) if (file.startsWith(`${path}/`)) names.add(file.slice(path.length + 1).split('/')[0]!)
+        return names.size > 0 ? [...names] : null
+      },
+      mono: () => pc.state.t,
+      statfs: () => pc.state.space,
+      platform: 'linux'
+    })
+    void reader.refresh()
+    await flush(20)
+    assert.equal(hangs, 1)
+    assert.equal(reader.snapshot()?.gpu?.percent, 20)
+    pc.files.set('/sys/class/drm/card0/device/gpu_busy_percent', '70\n')
+    pc.state.t = REFRESH_DEADLINE_MS + SYSTEM_CADENCE.gpuMs
+    await reader.refresh()
+    assert.equal(reader.snapshot()?.gpu?.percent, 70, 'read again on its cadence')
+    assert.equal(hangs, 1, 'and the sensor is left alone while its read has not returned')
   })
 
   test("temperatures: a CPU without a hwmon chip has its thermal zone's", async () => {

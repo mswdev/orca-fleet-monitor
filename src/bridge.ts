@@ -144,6 +144,8 @@ export type BridgeDeps = {
   cli: () => CliInfo
   /** The person's CPU and memory thresholds, and RAM in use's; the defaults when not given. */
   thresholds?: () => FleetThresholds
+  /** Whether the person reads temperatures in °F; °C when not given. */
+  fahrenheit?: () => boolean
   /** This worker run's id, so a panel can tell a restart (seq starting over) from old posts. */
   run?: string
   setTimeout: (fn: () => void, ms: number) => unknown
@@ -183,6 +185,7 @@ export class PanelBridge {
       historyWindowMs: HISTORY_WINDOW_MS,
       cli: plainJson(this.deps.cli()) as unknown as CliInfo,
       thresholds: plainJson(this.thresholds()) as unknown as FleetThresholds,
+      fahrenheit: this.deps.fahrenheit?.() === true,
       historyRev: this.deps.source.historyRevision?.() ?? 0,
       run: this.deps.run ?? ''
     }
@@ -258,6 +261,7 @@ export class PanelBridge {
       intervalMs: this.deps.source.intervalMs(),
       cli: plainJson(this.deps.cli()) as unknown as CliInfo,
       thresholds: plainJson(this.thresholds()) as unknown as FleetThresholds,
+      fahrenheit: this.deps.fahrenheit?.() === true,
       historyRev: this.deps.source.historyRevision?.() ?? 0,
       run: this.deps.run ?? '',
       recentMs: this.recentWindowMs()

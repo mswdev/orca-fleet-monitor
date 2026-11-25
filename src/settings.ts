@@ -16,6 +16,8 @@ export type FleetSettings = {
   backgroundMonitoring: boolean
   /** A desktop notification when a machine's memory reaches strained or critical. */
   memoryAlerts: boolean
+  /** Temperatures in °F in the panel, instead of °C. */
+  fahrenheit: boolean
 }
 
 export const DEFAULT_SETTINGS: FleetSettings = {
@@ -26,7 +28,8 @@ export const DEFAULT_SETTINGS: FleetSettings = {
   cliPath: null,
   beacon: true,
   backgroundMonitoring: true,
-  memoryAlerts: true
+  memoryAlerts: true,
+  fahrenheit: false
 }
 
 const LIMITS = {
@@ -66,6 +69,7 @@ export function readSettings(raw: Record<string, unknown> | null | undefined): F
     cliPath,
     beacon: r.beacon !== false,
     backgroundMonitoring: r.backgroundMonitoring !== false,
-    memoryAlerts: r.memoryAlerts !== false
+    memoryAlerts: r.memoryAlerts !== false,
+    fahrenheit: r.fahrenheit === true
   }
 }
