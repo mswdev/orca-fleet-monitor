@@ -63,7 +63,7 @@ orca plugin install mswdev.fleet-monitor
   <img src="media/readme/demo-dark.gif" align="right" width="300" alt="The panel in use: the overview updates, a click on one machine opens its detail, Activity shows its network, disk and GPU readings and its processes, Overview brings the charts back, and Back returns to the overview.">
 </picture>
 
-The panel opens on an overview with one card per machine. Click a card for that machine's detail.
+The panel opens on an overview with one card per machine. Click a card for that machine's detail. Drag a card to put the machines in your own order, which the panel remembers on that computer. On a touch screen, hold a card for a moment first. With the keyboard, Alt (Option on a Mac) and an arrow key move the focused card.
 
 - Each card has the machine's health, its CPU and memory, a 30-minute sparkline of each, and how long ago its newest reading came, counting up every second until the next one arrives.
 - The detail has CPU and memory charts of the last 30 minutes. Each part of a line is drawn in the colour of the level it was at, faint bands mark the thresholds that health is judged on, a soft band behind the line shows each minute's lowest and highest reading, and the peak is marked where it happened. Point at a chart, or tab to it and use the arrow keys, to read any minute. The detail also has the load on every core (P-cores and E-cores apart on Apple silicon), the five busiest workspaces, load averages, uptime, the chip, and what Orca itself is using.

@@ -22,6 +22,7 @@ import { frameOf } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
 import { FIRST_VERSIONED, HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
 import { createMotion } from './motion.mjs'
+import { createCardDrag, createOrderStore, inOrder, mergeOrder, moved } from './reorder.mjs'
 import { ago, agoShort, duration, fillAgo, gb, loads, pct, share, size, temperature } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
@@ -304,8 +305,19 @@ function skeletonMetrics() {
   return h('div', { class: 'fm-skel-row' }, column('30px'), column('44px'))
 }
 
-function card(m, now) {
-  const props = { type: 'button', 'data-key': `card:${m.id}`, 'data-flip': '', 'data-action': 'open', 'data-id': m.id, 'aria-label': cardAria(m, now) }
+/** `drag`: whether this card is the one lifted, and whether there are others to move it among
+ *  (a lifted card follows the pointer, so it never slides like the rest). */
+function card(m, now, drag = { lifted: false, movable: false }) {
+  const props = {
+    type: 'button',
+    'data-key': `card:${m.id}`,
+    'data-flip': drag.lifted ? null : '',
+    'data-dragging': drag.lifted ? '' : null,
+    'data-action': 'open',
+    'data-id': m.id,
+    'aria-label': cardAria(m, now),
+    'aria-keyshortcuts': drag.movable ? 'Alt+ArrowUp Alt+ArrowDown' : null
+  }
   if (m.status === 'connecting') {
     return h(
       'button',
@@ -417,7 +429,12 @@ function overview(fleet, ui, now) {
     nodes.push(errorBlock(fleet))
     return nodes
   }
-  nodes.push(h('div', { class: 'fm-grid', 'data-key': 'grid' }, fleet.machines.map((m) => card(m, now))))
+  // In the person's order: the one being dragged, else the one kept (reorder.mjs).
+  const movable = fleet.machines.length > 1
+  const machines = inOrder(fleet.machines, ui.drag?.order ?? ui.order)
+  nodes.push(h('div', { class: 'fm-grid', 'data-key': 'grid' }, machines.map((m) => card(m, now, { lifted: ui.drag?.id === m.id, movable }))))
+  // Where a moved card went, for screen readers; present before any move, so the change is heard.
+  nodes.push(h('p', { class: 'fm-sr', role: 'status', 'aria-live': 'polite', 'data-key': 'order-status' }, ui.orderSpoken))
   if (fleet.remotes === 0) nodes.push(fleet.cliError ? cliProblemBlock(fleet) : emptyBlock())
   else if (fleet.cliError) {
     nodes.push(h('p', { class: 'fm-notice', role: 'status', 'data-key': 'cli-error' }, `Paired machines cannot be listed or read: ${fleet.cliError}`))
@@ -1028,7 +1045,8 @@ export function mountFleetView(
     openExternal = null,
     frame = typeof globalThis.requestAnimationFrame === 'function' ? (fn) => globalThis.requestAnimationFrame(fn) : null,
     clock = () => (typeof globalThis.performance?.now === 'function' ? globalThis.performance.now() : Date.now()),
-    reducedMotion = () => typeof globalThis.matchMedia !== 'function' || globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches
+    reducedMotion = () => typeof globalThis.matchMedia !== 'function' || globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    order: orderStore = createOrderStore()
   } = {}
 ) {
   const doc = root.ownerDocument
@@ -1071,8 +1089,16 @@ export function mountFleetView(
     /** Machine id → the newest answer binding.watchProcesses gave for it. */
     lists: new Map(),
     /** The process list being watched: { id, stop }, or null. */
-    watch: null
+    watch: null,
+    /** The overview's order as kept, by machine id; empty until a card is first moved. */
+    order: orderStore.load() ?? [],
+    /** A card being dragged: { id, from, order }, the order when it lifted and as it stands. */
+    drag: null,
+    /** Where the last moved card went, said once. */
+    orderSpoken: ''
   }
+  /** Drags the overview's cards; made before the first draw, which it follows. */
+  let cardDrag = null
   let announceToken = 0
   let view = binding.current()
   /** This frame's clock moved onto the worker's, which history and "last seen" times use. */
@@ -1168,6 +1194,7 @@ export function mountFleetView(
     motion.settle(root, { moved: same })
     syncFields()
     watch(machine, act)
+    cardDrag?.sync()
   }
 
   /**
@@ -1243,6 +1270,8 @@ export function mountFleetView(
   /** `moveFocus` is for a person's click or key: focus follows to the new screen's control, and the
    *  screens slide. A call from code (the preview) changes at once. */
   function open(id, moveFocus = true) {
+    cardDrag?.cancel()
+    ui.orderSpoken = ''
     ui.overviewScroll = window.scrollY
     ui.nav = { view: 'detail', id }
     resetActivity()
@@ -1337,7 +1366,72 @@ export function mountFleetView(
     )
   }
 
+  /** The overview's ids as they stand. */
+  const shownIds = () => inOrder(fleet.machines, ui.order).map((m) => m.id)
+
+  /** "Build Box, place 2 of 5". */
+  function placeSpoken(id, ids) {
+    const name = fleet.machines.find((m) => m.id === id)?.name ?? 'Machine'
+    return `${name}, place ${ids.indexOf(id) + 1} of ${ids.length}`
+  }
+
+  /** Keeps `ids` as the overview's order, said for screen readers. */
+  function keepOrder(id, ids) {
+    ui.order = mergeOrder(ids, ui.order)
+    orderStore.save(ui.order)
+    ui.orderSpoken = placeSpoken(id, ids)
+  }
+
+  /** Alt and an arrow key: the focused card one place earlier (up, left) or later (down, right). */
+  function moveCard(id, by) {
+    const ids = shownIds()
+    const at = ids.indexOf(id)
+    const to = Math.max(0, Math.min(ids.length - 1, at + by))
+    if (at < 0 || to === at) return
+    keepOrder(id, moved(ids, id, to))
+    draw()
+    // Moving a node can drop the focus held in it: it stays on the card.
+    focusSoon(`[data-action="open"][data-id="${CSS.escape(id)}"]`)
+  }
+
+  cardDrag = createCardDrag({
+    root,
+    doc,
+    later,
+    frame,
+    motion: () => motionOn() && !hidden(),
+    canDrag: () => ui.nav.view === 'overview' && fleet.state === 'live' && fleet.machines.length > 1,
+    begin(id) {
+      const ids = shownIds()
+      ui.drag = { id, from: ids, order: ids }
+      draw()
+    },
+    move(ids) {
+      if (!ui.drag) return
+      ui.drag.order = ids
+      draw()
+    },
+    end(commit) {
+      const drag = ui.drag
+      ui.drag = null
+      // Kept only when it changed: a card put back where it was leaves the order as it was.
+      if (commit && drag && drag.order.join('\n') !== drag.from.join('\n')) keepOrder(drag.id, drag.order)
+      // Called off from inside a draw (its card is gone): drawn again once that one is done.
+      if (drawing) redraw = true
+      else draw()
+    }
+  })
+
+  // Another Fleet Monitor panel (another window) moved a card.
+  const stopOrderWatch =
+    orderStore.onChange?.(() => {
+      ui.order = orderStore.load() ?? []
+      if (!ui.drag) draw()
+    }) ?? (() => {})
+
   root.addEventListener('click', (event) => {
+    // The release that ends a drag is not a press of the card.
+    if (cardDrag.consumeClick(event)) return
     const target = event.target instanceof Element ? event.target.closest('[data-action]') : null
     if (!target || !root.contains(target) || target.hasAttribute('disabled') || target.getAttribute('aria-disabled') === 'true') return
     const id = target.getAttribute('data-id') ?? ''
@@ -1501,7 +1595,21 @@ export function mountFleetView(
 
   doc.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      // A drag first: Escape puts the card back where it was.
+      if (cardDrag.cancel()) {
+        event.preventDefault?.()
+        return
+      }
       onEscape(event)
+      return
+    }
+    if (ui.nav.view === 'overview') {
+      const by = { ArrowUp: -1, ArrowLeft: -1, ArrowDown: 1, ArrowRight: 1 }[event.key]
+      const card = event.target instanceof Element && root.contains(event.target) ? event.target.closest('.fm-grid [data-action="open"][data-id]') : null
+      if (by && card && event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && !cardDrag.dragging()) {
+        event.preventDefault?.()
+        moveCard(card.getAttribute('data-id'), by)
+      }
       return
     }
     if (ui.nav.view !== 'detail') return
@@ -1545,6 +1653,8 @@ export function mountFleetView(
       stop(ticker)
       ui.watch?.stop()
       ui.watch = null
+      cardDrag.dispose()
+      stopOrderWatch()
       unsubscribe()
     }
   }

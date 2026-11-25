@@ -1,5 +1,6 @@
 // Motion besides the charts (chart-view.mjs): a figure counts to its new reading rather than
-// jumping, and a row that changes place (a workspace or a process re-sorted) slides there.
+// jumping, and a row that changes place (a workspace or a process re-sorted, a machine's card
+// moved in the overview's grid) slides there.
 //
 // Both work around morphing: measure() runs before a draw and settle() after it. Morphing writes
 // every figure's final text; a figure still counting is written over on the next frame, so a
@@ -20,7 +21,7 @@ export function createMotion({ frame = null, clock = () => Date.now(), motion = 
   /** Figures counting: element → { from, to, t0 }. */
   const counting = new Map()
   let scheduled = false
-  /** Rows' places before this draw: data-key → top. */
+  /** Rows' places before this draw: data-key → { left, top }. */
   let before = null
 
   const canMove = () => typeof frame === 'function' && motion() && !hidden()
@@ -72,7 +73,8 @@ export function createMotion({ frame = null, clock = () => Date.now(), motion = 
         const key = el.getAttribute('data-key')
         if (key === null || typeof el.getBoundingClientRect !== 'function') continue
         before ??= new Map()
-        before.set(key, el.getBoundingClientRect().top)
+        const { left, top } = el.getBoundingClientRect()
+        before.set(key, { left, top })
       }
     },
     /** After a draw: figures count from what was on screen, and rows slide from where they were.
@@ -110,9 +112,13 @@ export function createMotion({ frame = null, clock = () => Date.now(), motion = 
       for (const el of root.querySelectorAll('[data-flip]')) {
         const from = places.get(el.getAttribute('data-key'))
         if (from === undefined || typeof el.animate !== 'function') continue
-        const dy = from - el.getBoundingClientRect().top
-        if (Math.abs(dy) < 1) continue
-        el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: SLIDE_MS, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
+        const now = el.getBoundingClientRect()
+        const dx = from.left - now.left
+        const dy = from.top - now.top
+        if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue
+        // A row in a list moves only up or down; a card in a grid may change column too.
+        const transform = Math.abs(dx) < 1 ? `translateY(${dy}px)` : `translate(${dx}px, ${dy}px)`
+        el.animate([{ transform }, { transform: 'none' }], { duration: SLIDE_MS, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' })
       }
     },
     /** Figures counting, for tests. */

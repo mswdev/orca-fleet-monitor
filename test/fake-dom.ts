@@ -5,7 +5,25 @@
 // element that becomes disabled, or is removed, hands focus back to the body.
 
 type Listener = (event: FakeEvent) => void
-export type FakeEvent = { type: string; target: FakeNode; key?: string; defaultPrevented?: boolean; preventDefault?: () => void }
+export type FakeEvent = {
+  type: string
+  target: FakeNode
+  key?: string
+  defaultPrevented?: boolean
+  preventDefault?: () => void
+  /** Pointer and key events: what the panel reads of them. */
+  altKey?: boolean
+  metaKey?: boolean
+  ctrlKey?: boolean
+  shiftKey?: boolean
+  clientX?: number
+  clientY?: number
+  pointerId?: number
+  pointerType?: string
+  button?: number
+  isPrimary?: boolean
+  detail?: number
+}
 
 export class FakeNode {
   nodeType: number
@@ -97,6 +115,21 @@ export class FakeElement extends FakeNode {
   readonly namespaceURI: string | null
   private attrs = new Map<string, string>()
   value = ''
+  /** No layout: every place is 0 unless a test gives the document a `layout`. */
+  get offsetLeft(): number {
+    return this.ownerDocument.layout?.(this)?.left ?? 0
+  }
+  get offsetTop(): number {
+    return this.ownerDocument.layout?.(this)?.top ?? 0
+  }
+  get offsetWidth(): number {
+    return this.ownerDocument.layout?.(this)?.width ?? 0
+  }
+  get offsetHeight(): number {
+    return this.ownerDocument.layout?.(this)?.height ?? 0
+  }
+  /** The pointer captured here, if any. */
+  captured: number | null = null
   readonly style: Record<string, unknown> & { setProperty(name: string, value: string): void; getPropertyValue(name: string): string; removeProperty(name: string): string }
   readonly dataset: Record<string, string>
 
@@ -217,6 +250,14 @@ export class FakeElement extends FakeNode {
 
   click(): void {
     this.dispatchEvent({ type: 'click', target: this })
+  }
+
+  setPointerCapture(pointerId: number): void {
+    this.captured = pointerId
+  }
+
+  releasePointerCapture(pointerId: number): void {
+    if (this.captured === pointerId) this.captured = null
   }
 
   matches(selector: string): boolean {
@@ -341,6 +382,8 @@ export class FakeDocument extends FakeNode {
   readonly created: string[] = []
   copyWorks = true
   copied: string[] = []
+  /** A test's stand-in for layout: an element's place within its offset parent. */
+  layout: ((element: FakeElement) => { left: number; top: number; width: number; height: number } | null) | null = null
 
   constructor() {
     super(null as unknown as FakeDocument, 9, '#document')
