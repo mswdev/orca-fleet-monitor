@@ -10,6 +10,8 @@ Each release's notes. Releases before 1.4.0 have theirs on the [releases page](h
 - Nothing needs administrator rights or an install. A Mac reads the SMC keys its chip has, from the M1 to the M6, the A18 Pro and Intel; Linux reads the kernel's hardware sensors and `nvidia-smi`. Each is read about every 30 seconds, and on a Mac not while memory pressure is critical.
 - Windows gives the CPU's own temperature only with administrator rights, so a Windows machine has a **Thermal zone** row instead: its hottest ACPI thermal zone, which is often the motherboard's. A Windows desktop with an NVIDIA GPU has the GPU's temperature from `nvidia-smi`; a laptop's NVIDIA GPU is not asked, as asking would wake it from sleep.
 - A GPU that switches its sensors off when idle, as an M2 Pro's does, has a row that says "idle".
+- An M2's CPU row stays while the Mac is quiet. An M2 Max's cores switch their sensors off then, E-cores too, so its CPU figure comes from sensors beside the cores that read the whole time.
+- A Windows desktop's NVIDIA GPU has its temperature when Fleet Monitor runs in Orca. Orca starts a plugin with only a few environment variables, and `nvidia-smi` could not start NVIDIA's driver library without `ProgramFiles`, so the row was missing; it is now given one.
 - A paired machine sends its temperatures in its beacon. Older versions ignore them, and a machine on an older version shows no temperature rows.
 
 ## 1.4.0

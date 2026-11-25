@@ -312,7 +312,7 @@ const DEFAULT_SYSTEM_ROOT = 'C:\\Windows'
 
 /** A Windows variable, whatever case its name is in: Windows ignores the case, but an
  *  environment copied into a plain object does not. */
-function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+export function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const key = Object.keys(env).find((k) => k.toUpperCase() === name.toUpperCase())
   return key === undefined ? undefined : env[key]
 }
