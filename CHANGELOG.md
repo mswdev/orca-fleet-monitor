@@ -2,7 +2,9 @@
 
 Each release's notes. Releases before 1.4.0 have theirs on the [releases page](https://github.com/mswdev/orca-fleet-monitor/releases).
 
-## Unreleased
+## 1.5.0
+
+Your own order of machines on the overview, and the CPU's and the GPU's temperatures.
 
 ### Your own order
 
@@ -19,6 +21,12 @@ Each release's notes. Releases before 1.4.0 have theirs on the [releases page](h
 - An M2's CPU row stays while the Mac is quiet. An M2 Max's cores switch their sensors off then, E-cores too, so its CPU figure comes from sensors beside the cores that read the whole time.
 - A Windows desktop's NVIDIA GPU has its temperature when Fleet Monitor runs in Orca. Orca starts a plugin with only a few environment variables, and `nvidia-smi` could not start NVIDIA's driver library without `ProgramFiles`, so the row was missing; it is now given one.
 - A paired machine sends its temperatures in its beacon. Older versions ignore them, and a machine on an older version shows no temperature rows.
+
+### Updating
+
+Update each machine from **Settings → Plugins** in Orca on that machine. From a terminal on it, a copy installed from the catalog updates with `orca plugin update mswdev.fleet-monitor --environment local` (`orca-ide` instead of `orca` on Linux). 1.5.0 asks for no new access, so an update keeps its approval. A machine's temperatures need 1.5.0 both on that machine and on the computer showing it. The order of the cards is kept by each computer that shows them.
+
+890 tests.
 
 ## 1.4.0
 
