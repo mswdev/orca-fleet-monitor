@@ -1,9 +1,11 @@
 // A Windows computer's network, disk, GPU and battery (src/win-system.ts), with invented answers
 // from a fake PowerShell host.
 import { assert, describe, test } from 'orca/testing'
+import type { ExecFile } from '../src/mac-memory.ts'
 import { isInterfaceName, SYSTEM_CADENCE, SYSTEM_MAX_AGE } from '../src/mac-system.ts'
 import type { SystemReader } from '../src/sampler.ts'
-import { interfaceLabel, parseBatteryAnswer, parseDiskAnswer, parseGpuAnswer, parseMemAnswer, parseNetAnswer, parseTempAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
+import { NVIDIA_SMI_ARGS } from '../src/linux-system.ts'
+import { interfaceLabel, NVIDIA_RETRY_MS, NVIDIA_TRIES, nvidiaSmiPaths, parseBatteryAnswer, parseDiskAnswer, parseGpuAnswer, parseMemAnswer, parseNetAnswer, parseTempAnswer, systemDriveRoot, WindowsSystemReader } from '../src/win-system.ts'
 
 describe('answers', () => {
   test('net: the adapter and its two counters, or nothing', () => {
@@ -127,7 +129,7 @@ describe('answers', () => {
 
 /** A scripted Windows computer: what PowerShell answers to each command now, and a clock that
  *  only moves when told. */
-function fakeWindows(options: { heavyAllowed?: () => boolean } = {}) {
+function fakeWindows(options: { heavyAllowed?: () => boolean; exec?: ExecFile } = {}) {
   const state = {
     t: 0,
     net: { n: 'Ethernet 2', rx: 1_000_000, tx: 50_000 } as unknown,
@@ -151,7 +153,9 @@ function fakeWindows(options: { heavyAllowed?: () => boolean } = {}) {
     paths.push(path)
     return { bsize: 4096, blocks: 250_000_000, bavail: 100_000_000 }
   }
-  const reader = new WindowsSystemReader({ host, mono: () => state.t, statfs, platform: 'win32', env: { SystemDrive: 'D:' }, ...options })
+  // No nvidia-smi unless a test gives one.
+  const missing: ExecFile = async () => ({ error: Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), stdout: '' })
+  const reader = new WindowsSystemReader({ host, mono: () => state.t, statfs, platform: 'win32', env: { SystemDrive: 'D:' }, exec: missing, ...options })
   const count = (command: string) => calls.filter((c) => c === command).length
   return { state, calls, timeouts, paths, reader, count }
 }
@@ -310,6 +314,77 @@ describe('WindowsSystemReader', () => {
     win.state.t = SYSTEM_MAX_AGE.tempMs + 1
     await win.reader.refresh()
     assert.equal(win.reader.snapshot()!.temp, undefined, 'too old: gone')
+  })
+
+  /** A desktop (no battery) whose nvidia-smi answers `answers` in turn, the last one ever after;
+   *  null is a run that fails, 'missing' one that cannot start. */
+  function nvidiaDesktop(answers: (string | null | 'missing')[], options: { battery?: unknown } = {}) {
+    const runs: { file: string; args: readonly string[]; env: Record<string, string> | undefined }[] = []
+    const exec: ExecFile = async (file, args, opts) => {
+      runs.push({ file, args, env: opts.env })
+      const answer = answers.length > 1 ? answers.shift()! : answers[0]!
+      if (answer === 'missing') return { error: Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), stdout: '' }
+      return answer === null ? { error: Object.assign(new Error('failed'), { code: 9 }), stdout: '' } : { error: null, stdout: answer }
+    }
+    const win = fakeWindows({ exec })
+    win.state.bat = 'battery' in options ? options.battery : { line: 1, flag: 128, pct: 100, secs: -1 }
+    return { ...win, runs }
+  }
+  const refreshAt = async (win: ReturnType<typeof fakeWindows>, t: number) => {
+    win.state.t = t
+    await win.reader.refresh()
+  }
+
+  test("nvidia-smi on a computer with no battery: the hottest NVIDIA GPU, by its full path, with the zone's row as it was", async () => {
+    const win = nvidiaDesktop(['31, 52\r\n8, 47\r\n'])
+    win.state.temp = { z: 301 }
+    await refreshAt(win, 0)
+    assert.equal(win.runs.length, 0, 'not before the battery has been read')
+    await refreshAt(win, 5_000)
+    assert.deepEqual(win.reader.snapshot()!.temp, { cpuC: 28, gpuC: 52, cpuZone: true, ageMs: 5_000 })
+    assert.equal(win.runs[0]!.file, 'C:\\Windows\\System32\\nvidia-smi.exe')
+    assert.deepEqual(win.runs[0]!.args, NVIDIA_SMI_ARGS)
+    assert.equal(win.calls.filter((c) => c.includes('nvidia')).length, 0, 'never through PowerShell')
+    await refreshAt(win, 10_000)
+    assert.equal(win.runs.length, 1, 'on its cadence')
+    const zoneless = nvidiaDesktop(['40, 61\n'])
+    await refreshAt(zoneless, 0)
+    await refreshAt(zoneless, 5_000)
+    assert.deepEqual(zoneless.reader.snapshot()!.temp, { cpuC: null, gpuC: 61 }, 'no thermal zone: the GPU alone')
+  })
+
+  test('nvidia-smi is never run on a laptop, nor where the battery is not known', async () => {
+    for (const battery of [{ line: 1, flag: 8, pct: 70, secs: -1 }, { line: 255, flag: 255, pct: 100, secs: -1 }, null]) {
+      const win = nvidiaDesktop(['40, 61\n'], { battery })
+      for (let i = 0; i < 4; i++) await refreshAt(win, i * SYSTEM_CADENCE.batteryMs)
+      assert.equal(win.runs.length, 0, JSON.stringify(battery))
+    }
+  })
+
+  test('nvidia-smi: the Program Files copy where System32 has none; with neither, never again', async () => {
+    assert.deepEqual(nvidiaSmiPaths({ SystemRoot: 'D:\\Win', ProgramW6432: 'E:\\Programs' }), ['D:\\Win\\System32\\nvidia-smi.exe', 'E:\\Programs\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe'])
+    const old = nvidiaDesktop(['missing', '20, 45\n'])
+    await refreshAt(old, 0)
+    await refreshAt(old, 5_000)
+    assert.deepEqual(old.runs.map((r) => r.file), ['C:\\Windows\\System32\\nvidia-smi.exe', 'C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe'])
+    assert.equal(old.reader.snapshot()!.temp?.gpuC, 45)
+    const none = nvidiaDesktop(['missing'])
+    for (let i = 0; i < 5; i++) await refreshAt(none, i * SYSTEM_CADENCE.tempMs + 5_000)
+    assert.equal(none.runs.length, 2, 'each place tried once')
+  })
+
+  test('nvidia-smi that fails carries the last figure, and is asked less often after a few in a row', async () => {
+    const win = nvidiaDesktop(['30, 55\n', null, null, null, null, '30, 58\n'])
+    await refreshAt(win, 0)
+    await refreshAt(win, 5_000)
+    await refreshAt(win, 5_000 + SYSTEM_CADENCE.tempMs)
+    assert.equal(win.reader.snapshot()!.temp?.gpuC, 55, 'carried')
+    for (let i = 2; i <= NVIDIA_TRIES + 2; i++) await refreshAt(win, 5_000 + i * SYSTEM_CADENCE.tempMs)
+    assert.equal(win.runs.length, 1 + NVIDIA_TRIES, 'after a few in a row, not on every cadence')
+    assert.equal(win.reader.snapshot()!.temp, undefined, 'too old: gone')
+    await refreshAt(win, 5_000 + NVIDIA_TRIES * SYSTEM_CADENCE.tempMs + NVIDIA_RETRY_MS)
+    await refreshAt(win, 5_000 + NVIDIA_TRIES * SYSTEM_CADENCE.tempMs + 2 * NVIDIA_RETRY_MS)
+    assert.equal(win.reader.snapshot()!.temp?.gpuC, 58, 'read again when it answers')
   })
 
   test('disk traffic and the GPU wait while optional work should', async () => {

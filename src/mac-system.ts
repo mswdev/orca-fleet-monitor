@@ -652,6 +652,25 @@ export function systemSnapshot(held: HeldSystem, now: number): MacSystem {
   return temp ? { net, disk, gpu, battery, temp } : { net, disk, gpu, battery }
 }
 
+/**
+ * The temperatures at `now`, from a platform's own sensors (`sensors`) and nvidia-smi's (`nvidia`,
+ * read apart, with the GPU on Linux and on its own on Windows), each left out once older than
+ * SYSTEM_MAX_AGE.tempMs; the GPU the hotter of the two, the CPU (and whether it is a thermal
+ * zone's) the sensors'. As old as the older of the reads it takes a figure from.
+ */
+export function heldTemp(sensors: Held<TempReading> | null, nvidia: Held<number | null> | null, now: number): Held<TempReading> | null {
+  const young = <T>(part: Held<T> | null): Held<T> | null => (part && Math.max(0, now - part.at) <= SYSTEM_MAX_AGE.tempMs ? part : null)
+  const s = young(sensors)
+  const n = young(nvidia)
+  const cpuC = s?.value.cpuC ?? null
+  const sensorGpu = s?.value.gpuC ?? null
+  const nvidiaC = n?.value ?? null
+  const gpuC = sensorGpu === null ? nvidiaC : nvidiaC === null ? sensorGpu : Math.max(sensorGpu, nvidiaC)
+  if (cpuC === null && gpuC === null) return null
+  const from = [cpuC !== null || sensorGpu !== null ? s : null, nvidiaC !== null ? n : null].flatMap((p) => (p ? [p.at] : []))
+  return { value: { cpuC, gpuC, ...(cpuC !== null && s?.value.cpuZone ? { cpuZone: true as const } : {}) }, at: Math.min(...from) }
+}
+
 /** Whether a part last tried at `triedAt` is due again (also when the clock went back). */
 export function due(triedAt: number, now: number, interval: number): boolean {
   return now - triedAt >= interval || now < triedAt
