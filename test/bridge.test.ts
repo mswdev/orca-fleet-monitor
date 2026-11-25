@@ -87,6 +87,26 @@ describe('PanelBridge', () => {
     assert.equal(posts[0]?.fahrenheit, false)
   })
 
+  test('the Show Star on GitHub setting goes with every snapshot and post; shown when not given', () => {
+    const time = new FakeTime()
+    const entries = [{ state: machine('local'), history: ringWith(time, 5, 5_000) }]
+    const posts: FleetUpdate[] = []
+    let starLink = false
+    const deps = {
+      source: source(time, entries, { value: 'fast' }),
+      post: (p: FleetUpdate) => posts.push(p),
+      now: time.now,
+      cli: () => ({ path: null, source: null, error: null }),
+      setTimeout: time.setTimeout,
+      clearTimeout: time.clearTimeout
+    }
+    assert.equal(new PanelBridge(deps).snapshot().starLink, true)
+    const bridge = new PanelBridge({ ...deps, starLink: () => starLink })
+    assert.equal(bridge.snapshot().starLink, false)
+    starLink = true
+    assert.equal(bridge.flush()?.starLink, true)
+  })
+
   test('a snapshot over the size cap thins history instead of failing', () => {
     const time = new FakeTime()
     const entries = [{ state: machine('local'), history: ringWith(time, 1_000, 1_000) }]
@@ -353,6 +373,9 @@ describe('readSettings', () => {
     assert.deepEqual(s.health, DEFAULT_HEALTH)
     assert.equal(s.cliPath, null)
     assert.equal(s.beacon, true)
+    assert.equal(s.starLink, true)
+    assert.equal(readSettings({ starLink: false }).starLink, false)
+    assert.equal(readSettings({ starLink: 'no' }).starLink, true, 'only false turns it off')
   })
 
   test('clamps, orders and trims', () => {
@@ -460,6 +483,6 @@ describe('readSettings (1.1)', () => {
     assert.deepEqual(setting('ramUsedBusyPercent') && [setting('ramUsedBusyPercent')!.type, setting('ramUsedBusyPercent')!.default, setting('ramUsedBusyPercent')!.minimum, setting('ramUsedBusyPercent')!.maximum], ['integer', 90, 1, 100])
     assert.deepEqual(setting('memoryAlerts') && [setting('memoryAlerts')!.type, setting('memoryAlerts')!.default], ['boolean', true])
     assert.deepEqual(manifest.capabilities.map((c) => c.kind), ['settings:own', 'notifications:show'])
-    assert.equal(manifest.version, '1.5.0')
+    assert.equal(manifest.version, '1.5.1')
   })
 })

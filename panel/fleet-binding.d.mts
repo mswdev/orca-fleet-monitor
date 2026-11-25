@@ -25,6 +25,8 @@ export type FleetReadyView = {
   thresholds: FleetThresholds
   /** Temperatures in °F (the person's setting); °C when false or absent. */
   fahrenheit?: boolean
+  /** The overview's "Star on GitHub" link; shown when true or absent. */
+  starLink?: boolean
   /** Machines the worker left out to fit its answer cap. */
   omitted?: number
   /** The worker's clock minus this frame's, from the newest answer or post. */
@@ -326,6 +328,8 @@ export type FleetModel = {
   thresholds: FleetThresholds
   /** Temperatures in °F (the person's setting); °C otherwise. */
   fahrenheit: boolean
+  /** The overview's "Star on GitHub" link (the person's setting). */
+  starLink: boolean
   /** The CLI cannot be found or run, or listing paired machines with it failed. */
   cliError: string | null
   /** What a person types for Orca's CLI here. */

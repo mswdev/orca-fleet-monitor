@@ -127,6 +127,7 @@ export function createFleetBinding(orca, options = {}) {
       cli: model.cli,
       thresholds: model.thresholds,
       fahrenheit: model.fahrenheit,
+      starLink: model.starLink,
       omitted: model.omitted,
       clockOffsetMs,
       machines: model.order.map((id) => model.machines.get(id))
@@ -159,6 +160,7 @@ export function createFleetBinding(orca, options = {}) {
       cli: snapshot.cli ?? null,
       thresholds: readThresholds(snapshot.thresholds),
       fahrenheit: snapshot.fahrenheit === true,
+      starLink: snapshot.starLink !== false,
       historyRev: typeof snapshot.historyRev === 'number' ? snapshot.historyRev : null,
       run: typeof snapshot.run === 'string' ? snapshot.run : null,
       omitted: finite(snapshot.omitted) && snapshot.omitted > 0 ? snapshot.omitted : 0,
@@ -183,6 +185,7 @@ export function createFleetBinding(orca, options = {}) {
       cli: update.cli ?? model.cli,
       thresholds: update.thresholds ? readThresholds(update.thresholds) : model.thresholds,
       fahrenheit: update.fahrenheit === true,
+      starLink: update.starLink !== false,
       order: (update.machines ?? []).map((m) => m.id),
       machines
     }
@@ -1155,6 +1158,7 @@ export function toFleet(view, now = Date.now()) {
       error: view?.error ?? null,
       thresholds: readThresholds(null),
       fahrenheit: false,
+      starLink: true,
       cliError: null,
       canStar: false,
       version: null,
@@ -1180,6 +1184,7 @@ export function toFleet(view, now = Date.now()) {
     error: view.error ?? null,
     thresholds,
     fahrenheit: view.fahrenheit === true,
+    starLink: view.starLink !== false,
     cliError,
     canStar: view.cli?.canStar === true,
     version,

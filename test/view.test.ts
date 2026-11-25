@@ -798,6 +798,18 @@ describe('the "Star on GitHub" link', () => {
     assert.equal($(odd.root, '[data-key="foot"]'), null, 'anything but a plain version is not shown')
   })
 
+  test('the Show Star on GitHub setting turned off hides the link; the version stays', () => {
+    const offered = frame(true)
+    const off = viewOf([local()], { cli: { path: '/x/orca', source: 'bundled', error: null, version: '1.5.1' } as never, starLink: false })
+    const v = mount(off, externalOpener(offered.orca))
+    assert.equal($(v.root, '[data-action="star"]'), null)
+    assert.equal($(v.root, '[data-key="version"]')?.textContent, 'v1.5.1')
+    dom.restore()
+    dom = installFakeDom()
+    const quiet = mount(viewOf([local()], { starLink: false }), externalOpener(offered.orca))
+    assert.equal($(quiet.root, '[data-key="foot"]'), null, 'nothing left to show: no foot')
+  })
+
   test('sits at the foot of the overview, not on a machine’s detail', async () => {
     const v = mount(viewOf([local(), machine()]), externalOpener(frame(true).orca))
     const nodes = v.root.childNodes as FakeElement[]

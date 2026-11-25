@@ -293,6 +293,7 @@ export async function startFleetMonitor(orca: WorkerOrca, deps: MonitorDeps): Pr
     cli: cliInfo,
     thresholds: () => ({ ...settings.health, ramUsedBusy: settings.memoryRules.ramUsedBusyPercent }),
     fahrenheit: () => settings.fahrenheit,
+    starLink: () => settings.starLink,
     run: runId,
     setTimeout: deps.setTimeout,
     clearTimeout: deps.clearTimeout

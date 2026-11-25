@@ -553,6 +553,8 @@ export type FleetSnapshot = {
   thresholds: FleetThresholds
   /** Temperatures in °F (the person's setting); °C otherwise. */
   fahrenheit: boolean
+  /** The overview's "Star on GitHub" link (the person's setting). */
+  starLink: boolean
   /** Rises whenever history older than a post's recent window changes (a back-fill). */
   historyRev: number
   /** Random id of this worker run; `seq` starts again when it changes. */
@@ -578,6 +580,8 @@ export type FleetUpdate = {
   thresholds: FleetThresholds
   /** Temperatures in °F (the person's setting); °C otherwise. */
   fahrenheit: boolean
+  /** The overview's "Star on GitHub" link (the person's setting). */
+  starLink: boolean
   /** A different value from the panel's snapshot means older history changed: re-fetch. */
   historyRev: number
   /** A different run from the panel's snapshot means the worker restarted: re-fetch. */
