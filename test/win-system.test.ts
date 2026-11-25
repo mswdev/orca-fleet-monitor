@@ -105,8 +105,9 @@ describe('answers', () => {
   })
 
   test('temp: the hottest thermal zone (kelvin), as a zone; never a GPU', () => {
-    assert.deepEqual(parseTempAnswer({ z: 334.15 }), { cpuC: 61, gpuC: null, cpuZone: true })
-    assert.deepEqual(parseTempAnswer({ z: 300.15, g: 652 }), { cpuC: 27, gpuC: null, cpuZone: true }, 'a GPU figure is not asked for, nor taken')
+    // The counter's raw value is whole kelvin.
+    assert.deepEqual(parseTempAnswer({ z: 334 }), { cpuC: 61, gpuC: null, cpuZone: true })
+    assert.deepEqual(parseTempAnswer({ z: 301, g: 652 }), { cpuC: 28, gpuC: null, cpuZone: true }, 'a GPU figure is not asked for, nor taken')
     assert.equal(parseTempAnswer({ z: null }), null, 'no thermal zone')
     assert.equal(parseTempAnswer({ z: 0 }), null, 'zero kelvin is no reading')
     assert.equal(parseTempAnswer({ z: 273.15 + 200 }), null, 'out of range')
@@ -295,7 +296,7 @@ describe('WindowsSystemReader', () => {
 
   test('the thermal zone: asked last, on its cadence, carried with its age, then dropped', async () => {
     const win = fakeWindows()
-    win.state.temp = { z: 330.15 }
+    win.state.temp = { z: 330 }
     await win.reader.refresh()
     assert.deepEqual(win.reader.snapshot()!.temp, { cpuC: 57, gpuC: null, cpuZone: true })
     win.state.t = 5_000

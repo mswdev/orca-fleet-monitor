@@ -152,9 +152,9 @@ export type WinMemory = {
   /** How old these figures are, in ms, when carried over a failed read; absent when fresh. */
   ageMs?: number
 }
-/** A machine's network, disk, GPU and battery readings (the name is from 1.2, when only a Mac
- *  had them; Linux and Windows have since 1.3). Each part is null when it could not be read or
- *  the machine has no such thing. */
+/** A machine's network, disk, GPU, battery and temperature readings (the name is from 1.2, when
+ *  only a Mac had them; Linux and Windows have since 1.3, temperatures since 1.5). Each part is
+ *  null when it could not be read or the machine has no such thing. */
 export type MacSystem = {
   net: NetReading | null
   disk: DiskReading | null

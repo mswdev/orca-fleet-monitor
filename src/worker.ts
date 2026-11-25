@@ -66,9 +66,10 @@ export function realDeps(): MonitorDeps {
     return handle
   }
   // On a Mac, each sample also reads memory as Activity Monitor counts it (one vm_stat, one sysctl).
-  // On a Mac, Linux and Windows it reads network, disk, GPU and battery on their own cadences, and
-  // the process list when asked: each platform has its own readers (src/mac-system.ts and
-  // src/processes.ts, src/linux-*.ts, src/win-*.ts). Any other platform has neither.
+  // On a Mac, Linux and Windows it reads network, disk, GPU, battery and temperatures on their own
+  // cadences, and the process list when asked: each platform has its own readers
+  // (src/mac-system.ts and src/processes.ts, src/linux-*.ts, src/win-*.ts). Any other platform has
+  // neither.
   const platform = os.platform()
   const mac = platform === 'darwin'
   const memory = mac ? new MacMemoryReader({ osTotal: () => os.totalmem() }) : null

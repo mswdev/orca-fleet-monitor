@@ -14,15 +14,16 @@ export const MAC_MEMORY_MAX_AGE_MS = 12_000
 /** A read that has not answered after this long is given up on, so the next sample starts a fresh
  *  one (each command has a 2 s timeout of its own; src/monitor.ts waits at most 3 s). */
 export const PREPARE_DEADLINE_MS = 2_750
-/** How long `prepare()` waits for the network, disk, GPU and battery reads, so that a sample
- *  carries this tick's reading and not the one before. They are quick (a file or a small command);
- *  past this they are left to finish on their own, and the sample takes what was read last. */
+/** How long `prepare()` waits for the network, disk, GPU, battery and temperature reads, so that
+ *  a sample carries this tick's reading and not the one before. They are quick (a file or a small
+ *  command); past this they are left to finish on their own, and the sample takes what was read
+ *  last. */
 export const SYSTEM_WAIT_MS = 250
 
 /** Reads a Mac's memory; src/mac-memory.ts's MacMemoryReader. */
 export type MemoryReader = { read(): Promise<MacMemory | null> }
-/** Reads network, disk, GPU and battery: src/mac-system.ts's MacSystemReader, src/linux-system.ts's
- *  LinuxSystemReader or src/win-system.ts's WindowsSystemReader. `refresh`
+/** Reads network, disk, GPU, battery and temperatures: src/mac-system.ts's MacSystemReader,
+ *  src/linux-system.ts's LinuxSystemReader or src/win-system.ts's WindowsSystemReader. `refresh`
  *  runs what is due, `snapshot` gives what is known now with its ages. */
 export type SystemReader = { refresh(): Promise<void>; snapshot(): MacSystem | null }
 
@@ -137,9 +138,9 @@ export class LocalSampler {
   private generation = 0
 
   /** `memory` reads a Mac's memory (null elsewhere); `mono` is a monotonic clock in ms; `timers`
-   *  are for the reads' deadlines (test seams); `system` reads network, disk, GPU and battery
-   *  (null on a platform without a reader), started with each prepare() and waited for
-   *  SYSTEM_WAIT_MS at most. */
+   *  are for the reads' deadlines (test seams); `system` reads network, disk, GPU, battery and
+   *  temperatures (null on a platform without a reader), started with each prepare() and waited
+   *  for SYSTEM_WAIT_MS at most. */
   constructor(
     source: OsSource = realOs,
     memory: MemoryReader | null = null,
