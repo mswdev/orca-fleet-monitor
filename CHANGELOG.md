@@ -6,9 +6,10 @@ Each release's notes. Releases before 1.4.0 have theirs on the [releases page](h
 
 ### Temperatures
 
-- A machine's System section has the CPU's and the GPU's temperature, after its load average. Figures are in °C; point at one to read it in °F.
-- Nothing needs administrator rights or an install. A Mac reads its SMC, Linux reads the kernel's hardware sensors and `nvidia-smi`, and Windows reads the ACPI thermal zone and the GPU's own sensor, as Task Manager does. Each is read about every 30 seconds, and not while memory is short.
-- On Windows the CPU row says it is an ACPI thermal zone, which may not be the CPU itself. On Apple silicon a GPU at rest has its sensors off, and its row says "idle".
+- A machine's System section has the CPU's and the GPU's temperature, after its load average, in °C. A new setting, **Temperatures in Fahrenheit**, shows them in °F.
+- Nothing needs administrator rights or an install. A Mac reads the SMC keys its chip has, from the M1 to the M6, the A18 Pro and Intel; Linux reads the kernel's hardware sensors and `nvidia-smi`. Each is read about every 30 seconds, and not while memory is short.
+- Windows gives a program without administrator rights no CPU or GPU temperature, so a Windows machine has a **Thermal zone** row instead: its hottest ACPI thermal zone, which is often the motherboard's.
+- A GPU that switches its sensors off when idle, as an M2 Pro's does, has a row that says "idle".
 - A paired machine sends its temperatures in its beacon. Older versions ignore them, and a machine on an older version shows no temperature rows.
 
 ## 1.4.0

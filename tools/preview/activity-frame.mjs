@@ -2,7 +2,8 @@
 // it in one of the 1.2 states, the way a person would get there: open a machine, click Activity,
 // type a search, pick a sort, open a row.
 //
-// Query: state=<one of STATES>, or machine=<id> [tab=activity] [install=open]; theme=light|dark
+// Query: state=<one of STATES>, or machine=<id> [tab=activity] [install=open]; theme=light|dark;
+// fahrenheit=1 for the Temperatures in Fahrenheit setting
 import { applyHealthContrast } from '../../panel/contrast.mjs'
 import { createFleetBinding } from '../../panel/fleet-binding.mjs'
 import { mountFleetView } from '../../panel/view.mjs'
@@ -23,7 +24,7 @@ const state = STATES[params.get('state') ?? ''] ?? {
 }
 // One clock for the page, so a process's start time (and so its row) is the same in every list.
 const base = Date.now()
-const snapshot = sampleActivitySnapshot(base, state.scene ?? '')
+const snapshot = { ...sampleActivitySnapshot(base, state.scene ?? ''), fahrenheit: params.get('fahrenheit') === '1' }
 /** A stand-in for the frame's `window.orca`, answering as the worker does; the real binding
  *  (fleet-binding.mjs) runs over it, so the preview goes through toFleet and watchProcesses. */
 const orca = {
