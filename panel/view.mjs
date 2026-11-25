@@ -459,7 +459,8 @@ function overview(fleet, ui, now) {
  */
 function starFoot(fleet, ui) {
   const version = fleet.version ? h('span', { class: 'fm-version', 'data-key': 'version', title: `Fleet Monitor ${fleet.version}` }, `v${fleet.version}`) : null
-  const star = starLink(ui)
+  // The person can turn the link off in settings (Show Star on GitHub); the version stays.
+  const star = fleet.starLink === false ? null : starLink(ui)
   if (!star && !version) return null
   // The link on the left, the version on the right; the link's part announces its changing words.
   return h(

@@ -2,6 +2,13 @@
 
 Each release's notes. Releases before 1.4.0 have theirs on the [releases page](https://github.com/mswdev/orca-fleet-monitor/releases).
 
+## 1.5.1
+
+- A new setting, **Show Star on GitHub**, hides the Star on GitHub link at the foot of the panel when you turn it off. The version number stays.
+- 1.5.1 asks for no new access, so an update keeps its approval.
+
+893 tests.
+
 ## 1.5.0
 
 Your own order of machines on the overview, and the CPU's and the GPU's temperatures.

@@ -18,6 +18,8 @@ export type FleetSettings = {
   memoryAlerts: boolean
   /** Temperatures in °F in the panel, instead of °C. */
   fahrenheit: boolean
+  /** The "Star on GitHub" link at the foot of the overview. */
+  starLink: boolean
 }
 
 export const DEFAULT_SETTINGS: FleetSettings = {
@@ -29,7 +31,8 @@ export const DEFAULT_SETTINGS: FleetSettings = {
   beacon: true,
   backgroundMonitoring: true,
   memoryAlerts: true,
-  fahrenheit: false
+  fahrenheit: false,
+  starLink: true
 }
 
 const LIMITS = {
@@ -70,6 +73,7 @@ export function readSettings(raw: Record<string, unknown> | null | undefined): F
     beacon: r.beacon !== false,
     backgroundMonitoring: r.backgroundMonitoring !== false,
     memoryAlerts: r.memoryAlerts !== false,
-    fahrenheit: r.fahrenheit === true
+    fahrenheit: r.fahrenheit === true,
+    starLink: r.starLink !== false
   }
 }

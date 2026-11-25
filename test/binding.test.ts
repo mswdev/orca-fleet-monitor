@@ -124,6 +124,17 @@ describe('createFleetBinding', () => {
     assert.equal(readyView(binding.current()).fahrenheit, false, 'anything but true is °C')
   })
 
+  test('the Star on GitHub link is shown unless a post says it is turned off', async () => {
+    const fake = fakeOrca({ snapshots: [snapshot(3, 10_000)] })
+    const { binding } = bind(fake)
+    await binding.ready
+    assert.equal(readyView(binding.current()).starLink, true, 'an older worker says nothing: shown')
+    fake.post(update(4, 15_000, {}, { starLink: false }))
+    assert.equal(readyView(binding.current()).starLink, false)
+    fake.post(update(5, 20_000, {}, { starLink: true }))
+    assert.equal(readyView(binding.current()).starLink, true)
+  })
+
   test('a snapshot from an older worker without thresholds gets the defaults', async () => {
     const fake = fakeOrca({ snapshots: [snapshot(3, 10_000, undefined, { thresholds: undefined })] })
     const { binding } = bind(fake)
