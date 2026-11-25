@@ -4,6 +4,7 @@
 import { fileURLToPath } from 'node:url'
 import { assert, describe, test } from 'orca/testing'
 import {
+  heldTemp,
   hwmonTemps,
   isCpuZone,
   isLinuxInterfaceName,
@@ -184,6 +185,8 @@ describe('parsers', () => {
     assert.deepEqual(hwmonTemps([{ name: 'coretemp', inputs: [core('Core 0', 66), core('Core 1', 52)] }]), { cpuC: 66, gpuC: null }, 'no package: the hottest core')
     assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tctl', 71), core('Tccd1', 60)] }]), { cpuC: 71, gpuC: null })
     assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tctl', 81), core('Tdie', 71)] }]), { cpuC: 71, gpuC: null }, 'Tdie before Tctl, which may be offset')
+    assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tctl', 60), core('Tccd1', 75)] }]), { cpuC: 60, gpuC: null }, 'Tctl before a CCD, as AMD\'s own tools show it')
+    assert.deepEqual(hwmonTemps([{ name: 'k10temp', inputs: [core('Tccd1', 63), core('Tccd2', 66)] }]), { cpuC: 66, gpuC: null }, 'neither: the hottest')
     assert.deepEqual(hwmonTemps([{ name: 'cpu_thermal', inputs: [core(null, 49)] }]), { cpuC: 49, gpuC: null }, 'a Raspberry Pi')
     assert.deepEqual(hwmonTemps([{ name: 'cpu_thermal', inputs: [core(null, 12)] }]), { cpuC: 12, gpuC: null }, 'a cold one: only an Apple sensor under 10 °C is off')
     assert.deepEqual(
@@ -680,6 +683,39 @@ describe('LinuxSystemReader', () => {
     await reader.refresh()
     assert.equal(reader.snapshot()?.gpu?.percent, 70, 'read again on its cadence')
     assert.equal(hangs, 1, 'and the sensor is left alone while its read has not returned')
+  })
+
+  test('temperatures: a GPU read that never returns holds up only the GPU, not the temperatures', async () => {
+    const pc = laptop()
+    pc.files.set('/sys/class/hwmon/hwmon0/name', 'coretemp\n')
+    pc.files.set('/sys/class/hwmon/hwmon0/temp1_input', '50000\n')
+    const reader = new LinuxSystemReader({
+      readFile: (path) => (path === '/sys/class/drm/card0/device/gpu_busy_percent' ? new Promise<string | null>(() => {}) : Promise.resolve(pc.files.get(path) ?? null)),
+      readDir: async (path) => {
+        const names = new Set<string>()
+        for (const file of pc.files.keys()) if (file.startsWith(`${path}/`)) names.add(file.slice(path.length + 1).split('/')[0]!)
+        return names.size > 0 ? [...names] : null
+      },
+      mono: () => pc.state.t,
+      statfs: () => pc.state.space,
+      platform: 'linux'
+    })
+    void reader.refresh()
+    await flush(20)
+    assert.deepEqual(reader.snapshot()?.temp, { cpuC: 50, gpuC: null })
+    pc.files.set('/sys/class/hwmon/hwmon0/temp1_input', '64000\n')
+    pc.state.t = REFRESH_DEADLINE_MS + SYSTEM_CADENCE.tempMs
+    await reader.refresh()
+    assert.deepEqual(reader.snapshot()?.temp, { cpuC: 64, gpuC: null }, 'read again on its cadence')
+  })
+
+  test('temperatures: the sensors and nvidia-smi, each dropped once too old, as old as the older used', () => {
+    const sensors = { value: { cpuC: 55, gpuC: 40 }, at: 10_000 }
+    assert.deepEqual(heldTemp(sensors, { value: 61, at: 4_000 }, 12_000), { value: { cpuC: 55, gpuC: 61 }, at: 4_000 })
+    assert.deepEqual(heldTemp(sensors, { value: null, at: 4_000 }, 12_000), { value: { cpuC: 55, gpuC: 40 }, at: 10_000 }, 'nvidia-smi with no figure is not counted')
+    assert.deepEqual(heldTemp(null, { value: 61, at: 4_000 }, 12_000), { value: { cpuC: null, gpuC: 61 }, at: 4_000 })
+    assert.deepEqual(heldTemp(sensors, { value: 61, at: 0 }, SYSTEM_MAX_AGE.tempMs + 1), { value: { cpuC: 55, gpuC: 40 }, at: 10_000 }, 'too old: left out')
+    assert.equal(heldTemp(null, null, 0), null)
   })
 
   test("temperatures: a CPU without a hwmon chip has its thermal zone's", async () => {

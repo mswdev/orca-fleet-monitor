@@ -67,7 +67,7 @@ The panel opens on an overview with one card per machine. Click a card for that 
 
 - Each card has the machine's health, its CPU and memory, a 30-minute sparkline of each, and how long ago its newest reading came, counting up every second until the next one arrives.
 - The detail has CPU and memory charts of the last 30 minutes. Each part of a line is drawn in the colour of the level it was at, faint bands mark the thresholds that health is judged on, a soft band behind the line shows each minute's lowest and highest reading, and the peak is marked where it happened. Point at a chart, or tab to it and use the arrow keys, to read any minute. The detail also has the load on every core (P-cores and E-cores apart on Apple silicon), the five busiest workspaces, load averages, uptime, the chip, and what Orca itself is using.
-- On a machine running Fleet Monitor, the System section has the CPU's and the GPU's temperature, in °C, or in °F with **Temperatures in Fahrenheit** on. They are read without administrator rights and with nothing to install: on a Mac from its SMC, on Linux from the kernel's hardware sensors and `nvidia-smi`. Windows gives neither without administrator rights, so a Windows machine has its hottest ACPI thermal zone instead, labelled as one. A figure a machine does not report has no row. [Requirements and limits](#requirements-and-limits) has what each platform gives.
+- On a machine running Fleet Monitor, the System section has the CPU's and the GPU's temperature, in °C, or in °F with **Temperatures in Fahrenheit** on. They are read without administrator rights and with nothing to install: on a Mac from its SMC, on Linux from the kernel's hardware sensors and `nvidia-smi`. Windows gives the CPU's own sensor only with administrator rights and the GPU's only to native code, so a Windows machine has its hottest ACPI thermal zone instead, labelled as one. A figure a machine does not report has no row. [Requirements and limits](#requirements-and-limits) has what each platform gives.
 - On a Mac running Fleet Monitor, memory is real RAM usage with its breakdown, swap and the kernel's pressure level. On a Windows computer running it, memory has the figures from Task Manager's memory page. [Memory](#memory) has the details.
 - On any machine running Fleet Monitor, the detail has two tabs. **Overview** is everything above. **Activity** has network, disk, GPU and battery readings and the machine's processes, to search and sort. [Activity](#activity) has the details.
 - While a machine's memory is strained or critical, its Memory card names the process using the most memory and how much it uses, when that is at least 5% of the machine's RAM. A machine short of memory can pause reading its processes; the card then gives the last figure it has, for up to 15 minutes, and says how old it is.
@@ -110,6 +110,7 @@ A paired server appears at the basic level as soon as Orca reaches it. Install F
 | Per-core load, P-cores and E-cores | No | Yes |
 | Memory | What Orca reports: memory used, or for a Mac its memory-pressure percentage, labelled "memory pressure" | RAM used out of the total. On a Mac, also its breakdown, swap and the kernel's pressure level. On Windows, also available, committed, cached and the two pools |
 | Network, disk, GPU and battery | No | Yes, each where the machine reports it |
+| CPU and GPU temperature | No | Yes, each where the machine reports it |
 | Processes | No | Every process on this computer, the busiest 60 or so on a paired server |
 | Busiest workspaces | Yes | Yes |
 | Orca's own CPU and memory | Yes | Yes |
@@ -378,7 +379,7 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$TMPDIR" ELECTRON_RUN_AS_NODE=1 \
 
 ### Running the readers on a real machine
 
-`tools/smoke-system.ts` runs this computer's real network, disk, GPU, battery and process readers for about 25 seconds, outside Orca, and prints what they read. It exits with an error when a reading every machine has is missing or out of shape. CI runs it on Linux, Windows and macOS machines, because the unit tests only feed the parsers recorded text:
+`tools/smoke-system.ts` runs this computer's real network, disk, GPU, battery, temperature and process readers for about 25 seconds, outside Orca, and prints what they read. It exits with an error when a reading every machine has is missing or out of shape. CI runs it on Linux, Windows and macOS machines, because the unit tests only feed the parsers recorded text:
 
 ```sh
 node tools/smoke-system.ts

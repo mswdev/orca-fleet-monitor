@@ -1,5 +1,5 @@
-// A Linux computer's network, disk, GPU and battery, from files the kernel serves, read without
-// privileges and without a shell:
+// A Linux computer's network, disk, GPU, battery and temperatures, from files the kernel serves,
+// read without privileges and without a shell:
 //
 //   network   /proc/net/dev every reading (5 s), for the interface the default route goes out of
 //             (/proc/net/route, or /proc/net/ipv6_route where there is no IPv4 default; about
@@ -18,11 +18,11 @@
 //             second one) is not asked: asking would wake it.
 //   battery   /sys/class/power_supply about once a minute: power source, charge, state, and
 //             time remaining worked out from the battery's own energy and power figures
-//   temp      /sys/class/hwmon about every 30 s: the CPU's sensor (`coretemp`'s package, `k10temp`'s
-//             or `zenpower`'s die, a SoC's CPU zones), else the CPU's thermal zone in
-//             /sys/class/thermal; the GPU's (`amdgpu`'s edge, `nouveau`, `i915`, `xe`, a SoC's
-//             GPU zone) and `nvidia-smi`'s `temperature.gpu`, asked in the run that reads its
-//             utilisation. A GPU that is asleep is not asked, as above
+//   temp      /sys/class/hwmon about every 30 s: the CPU's sensor (`coretemp`'s package,
+//             `k10temp`'s or `zenpower`'s die, a SoC's CPU zones), else the CPU's thermal zone
+//             in /sys/class/thermal; the GPU's (`amdgpu`'s edge, `nouveau`, `i915`, `xe`, a
+//             SoC's GPU zone) and `nvidia-smi`'s `temperature.gpu`, asked in the run that reads
+//             its utilisation. A GPU that is asleep is not asked, as above
 //
 // What is read less often than every reading is carried until the next read, with its age; a
 // read that fails carries the last value for a while longer, then the value is dropped. Every
@@ -102,7 +102,7 @@ const MAX_DISKS = 256
 const MAX_GPUS = 16
 const MAX_SUPPLIES = 32
 /** The most hwmon chips and thermal zones looked at, and temperature inputs read per chip. */
-const MAX_HWMON = 32
+const MAX_HWMON = 128
 const MAX_HWMON_INPUTS = 16
 
 // --- reading files ---------------------------------------------------------------------------
@@ -358,17 +358,15 @@ export function parseMilliC(text: unknown): number | null {
   return plausibleTemp(Number(text) / 1000)
 }
 
-/** The hottest of `inputs` whose label `pick` accepts; with no such input, the hottest of all. */
+/** The hottest of `inputs`, or of those whose label `pick` accepts; null when none reads. */
 function hottest(inputs: HwmonChip['inputs'], pick?: (label: string) => boolean): number | null {
-  const of = (list: HwmonChip['inputs']) => list.reduce<number | null>((best, i) => {
+  let best: number | null = null
+  for (const i of inputs) {
+    if (pick && (i.label === null || !pick(i.label.trim()))) continue
     const c = parseMilliC(i.milli)
-    return c === null ? best : best === null ? c : Math.max(best, c)
-  }, null)
-  if (pick) {
-    const picked = of(inputs.filter((i) => i.label !== null && pick(i.label.trim())))
-    if (picked !== null) return picked
+    if (c !== null) best = best === null ? c : Math.max(best, c)
   }
-  return of(inputs)
+  return best
 }
 
 /**
@@ -388,14 +386,32 @@ export function hwmonTemps(chips: readonly HwmonChip[]): { cpuC: number | null; 
         name === 'coretemp'
           ? hottest(chip.inputs, (l) => /^Package id \d+$/.test(l))
           : name === 'k10temp' || name === 'zenpower'
-            ? hottest(chip.inputs, (l) => l === 'Tdie') ?? hottest(chip.inputs, (l) => l === 'Tctl')
-            : hottest(chip.inputs)
-      cpu = max(cpu, c)
+            ? (hottest(chip.inputs, (l) => l === 'Tdie') ?? hottest(chip.inputs, (l) => l === 'Tctl'))
+            : null
+      cpu = max(cpu, c ?? hottest(chip.inputs))
     } else if (isGpuChip(name)) {
-      gpu = max(gpu, name === 'amdgpu' ? hottest(chip.inputs, (l) => l === 'edge') : hottest(chip.inputs))
+      gpu = max(gpu, (name === 'amdgpu' ? hottest(chip.inputs, (l) => l === 'edge') : null) ?? hottest(chip.inputs))
     }
   }
   return { cpuC: cpu, gpuC: gpu }
+}
+
+/**
+ * The temperatures at `now`, from the sensors' read and nvidia-smi's (the GPU part's), each left
+ * out once older than SYSTEM_MAX_AGE.tempMs; the GPU the hotter of the two. As old as the older
+ * of the reads it takes a figure from.
+ */
+export function heldTemp(sensors: Held<{ cpuC: number | null; gpuC: number | null }> | null, nvidia: Held<number | null> | null, now: number): Held<TempReading> | null {
+  const young = <T>(part: Held<T> | null): Held<T> | null => (part && Math.max(0, now - part.at) <= SYSTEM_MAX_AGE.tempMs ? part : null)
+  const s = young(sensors)
+  const n = young(nvidia)
+  const cpuC = s?.value.cpuC ?? null
+  const sensorGpu = s?.value.gpuC ?? null
+  const nvidiaC = n?.value ?? null
+  const gpuC = sensorGpu === null ? nvidiaC : nvidiaC === null ? sensorGpu : Math.max(sensorGpu, nvidiaC)
+  if (cpuC === null && gpuC === null) return null
+  const from = [cpuC !== null || sensorGpu !== null ? s : null, nvidiaC !== null ? n : null].flatMap((p) => (p ? [p.at] : []))
+  return { value: { cpuC, gpuC }, at: Math.min(...from) }
 }
 
 /** Whether a thermal zone's `type` is the CPU's: Intel's package (`x86_pkg_temp`) or a SoC's. */
@@ -667,10 +683,10 @@ export type LinuxSystemOptions = {
 }
 
 /**
- * Reads a Linux computer's network, disk, GPU and battery, each on its own cadence (the same as
- * a Mac's: src/mac-system.ts). `refresh()` reads what is due (with every reading), side by side;
- * `snapshot()` gives what is known now, with ages. Never throws; on any other platform it reads
- * nothing and `snapshot()` is null.
+ * Reads a Linux computer's network, disk, GPU, battery and temperatures, each on its own cadence
+ * (the same as a Mac's: src/mac-system.ts). `refresh()` reads what is due (with every reading),
+ * side by side; `snapshot()` gives what is known now, with ages. Never throws; on any other
+ * platform it reads nothing and `snapshot()` is null.
  */
 export class LinuxSystemReader {
   private readonly readFile: ReadFile
@@ -680,7 +696,8 @@ export class LinuxSystemReader {
   private readonly statfs: StatFs
   private readonly platform: string
   /** False while optional work should wait: the GPU read (the only one that may start a child
-   *  process) is skipped then, and what it last read is carried until it is too old. */
+   *  process) and the temperatures are skipped then, and what they last read is carried until it
+   *  is too old. */
   private readonly heavyAllowed: () => boolean
   private iface: { name: string; at: number } | null = null
   private netCounters: { iface: string; rx: number; tx: number; at: number } | null = null
@@ -690,9 +707,10 @@ export class LinuxSystemReader {
   private diskIoTriedAt = Number.NEGATIVE_INFINITY
   private gpu: Held<number> | null = null
   private gpuTriedAt = Number.NEGATIVE_INFINITY
-  private temp: Held<TempReading> | null = null
+  /** The hwmon chips' and thermal zones' figures, from the temperature part. */
+  private sensorTemp: Held<{ cpuC: number | null; gpuC: number | null }> | null = null
   private tempTriedAt = Number.NEGATIVE_INFINITY
-  /** nvidia-smi's hottest GPU from the last GPU read, which asks it in the same run. */
+  /** nvidia-smi's hottest GPU, from the GPU part, which asks it in the run for its utilisation. */
   private nvidiaTemp: Held<number | null> | null = null
   private battery: Held<BatteryReading> | null = null
   private batteryTriedAt = Number.NEGATIVE_INFINITY
@@ -754,7 +772,7 @@ export class LinuxSystemReader {
   /** What is known now: each part with its age, or null where there is nothing young enough. */
   snapshot(): MacSystem | null {
     if (this.platform !== 'linux') return null
-    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery, temp: this.temp }, this.mono())
+    return systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery, temp: heldTemp(this.sensorTemp, this.nvidiaTemp, this.mono()) }, this.mono())
   }
 
   private async readDue(): Promise<void> {
@@ -763,11 +781,10 @@ export class LinuxSystemReader {
     const route = !this.iface || now - this.iface.at >= SYSTEM_CADENCE.routeMs || now < this.iface.at
     jobs.push(this.part('net', () => (route ? this.readRoute().then(() => this.readNet()) : this.readNet())))
     if (due(this.diskIoTriedAt, now, SYSTEM_CADENCE.diskIoMs)) jobs.push(this.part('disk', () => this.readDiskIo(now)))
-    const gpu = due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs) && this.heavy() ? this.part('gpu', () => this.readGpu(now)) : null
-    jobs.push(gpu)
-    // Its own part, so a sensor that never answers holds up no other reading; it waits for a GPU
-    // read started with it, for nvidia-smi's figure.
-    if (due(this.tempTriedAt, now, SYSTEM_CADENCE.tempMs) && this.heavy()) jobs.push(this.part('temp', () => this.readTemp(now, gpu)))
+    if (due(this.gpuTriedAt, now, SYSTEM_CADENCE.gpuMs) && this.heavy()) jobs.push(this.part('gpu', () => this.readGpu(now)))
+    // Its own part, so a sensor that never answers holds up no other reading, and no other holds
+    // it up: nvidia-smi's figure comes from the GPU part, and the two meet in snapshot().
+    if (due(this.tempTriedAt, now, SYSTEM_CADENCE.tempMs) && this.heavy()) jobs.push(this.part('temp', () => this.readTemp(now)))
     if (due(this.batteryTriedAt, now, SYSTEM_CADENCE.batteryMs)) jobs.push(this.part('battery', () => this.readBattery(now)))
     if (due(this.spaceTriedAt, now, SYSTEM_CADENCE.spaceMs)) this.readSpace(now)
     if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.part('volumes', () => this.readVolumes(now)))
@@ -902,9 +919,9 @@ export class LinuxSystemReader {
     this.nvidiaTemp = { value: parseNvidiaSmiTemp(smi), at: this.mono() }
   }
 
-  /** The CPU's and the GPU's temperature (hwmonTemps), with nvidia-smi's from the GPU read `gpu`
-   *  started with this one, or the last one while it is young enough. */
-  private async readTemp(now: number, gpu: Promise<void> | null): Promise<void> {
+  /** The CPU's and the GPU's temperature from the hwmon chips (hwmonTemps), else the CPU's
+   *  thermal zone. */
+  private async readTemp(now: number): Promise<void> {
     this.tempTriedAt = now
     const chips: HwmonChip[] = []
     for (const entry of ((await this.dir(SYS_HWMON_PATH)) ?? []).filter((n) => /^hwmon\d{1,4}$/.test(n)).sort().slice(0, MAX_HWMON)) {
@@ -921,13 +938,9 @@ export class LinuxSystemReader {
       }
       chips.push({ name, inputs })
     }
-    let { cpuC, gpuC } = hwmonTemps(chips)
-    if (cpuC === null) cpuC = await this.cpuZoneTemp()
-    await gpu
-    const held = this.nvidiaTemp
-    const nvidiaC = held && this.mono() - held.at <= SYSTEM_MAX_AGE.tempMs ? held.value : null
-    if (nvidiaC !== null) gpuC = gpuC === null ? nvidiaC : Math.max(gpuC, nvidiaC)
-    if (cpuC !== null || gpuC !== null) this.temp = { value: { cpuC, gpuC }, at: this.mono() }
+    const { cpuC, gpuC } = hwmonTemps(chips)
+    const cpu = cpuC ?? (await this.cpuZoneTemp())
+    if (cpu !== null || gpuC !== null) this.sensorTemp = { value: { cpuC: cpu, gpuC }, at: this.mono() }
   }
 
   /** The hottest thermal zone that is the CPU's (isCpuZone), for a CPU without a hwmon chip. */

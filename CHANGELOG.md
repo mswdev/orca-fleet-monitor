@@ -7,8 +7,8 @@ Each release's notes. Releases before 1.4.0 have theirs on the [releases page](h
 ### Temperatures
 
 - A machine's System section has the CPU's and the GPU's temperature, after its load average, in °C. A new setting, **Temperatures in Fahrenheit**, shows them in °F.
-- Nothing needs administrator rights or an install. A Mac reads the SMC keys its chip has, from the M1 to the M6, the A18 Pro and Intel; Linux reads the kernel's hardware sensors and `nvidia-smi`. Each is read about every 30 seconds, and not while memory is short.
-- Windows gives a program without administrator rights no CPU or GPU temperature, so a Windows machine has a **Thermal zone** row instead: its hottest ACPI thermal zone, which is often the motherboard's.
+- Nothing needs administrator rights or an install. A Mac reads the SMC keys its chip has, from the M1 to the M6, the A18 Pro and Intel; Linux reads the kernel's hardware sensors and `nvidia-smi`. Each is read about every 30 seconds, and on a Mac not while memory pressure is critical.
+- Windows gives the CPU's own temperature only with administrator rights and the GPU's only to native code, so a Windows machine has a **Thermal zone** row instead: its hottest ACPI thermal zone, which is often the motherboard's.
 - A GPU that switches its sensors off when idle, as an M2 Pro's does, has a row that says "idle".
 - A paired machine sends its temperatures in its beacon. Older versions ignore them, and a machine on an older version shows no temperature rows.
 

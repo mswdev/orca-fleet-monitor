@@ -1,5 +1,6 @@
-// A Windows computer's network, disk, GPU and battery, read without elevation. All but the disk's
-// space are asked of the one resident PowerShell (src/win-host.ts), which reads them from .NET:
+// A Windows computer's network, disk, GPU, battery and thermal zone, read without elevation. All
+// but the disk's space are asked of the one resident PowerShell (src/win-host.ts), which reads
+// them from .NET:
 //
 //   network   `net` every reading (5 s), for the adapter that is up and has a default gateway:
 //             bytes in and out per second from the adapter's cumulative 64-bit counters
@@ -173,11 +174,11 @@ export function systemDriveRoot(env: NodeJS.ProcessEnv): string {
 
 
 /**
- * Reads a Windows computer's network, disk, GPU and battery, each on its own cadence. `refresh()`
- * asks PowerShell for what is due (with every reading); `snapshot()` gives what is known now,
- * with ages. Never throws; on any other platform it asks nothing and `snapshot()` is null. The
- * PowerShell host is shared with the process list (src/win-processes.ts), so it is handed in and
- * never stopped here.
+ * Reads a Windows computer's network, disk, GPU, battery and thermal zone, each on its own
+ * cadence. `refresh()` asks PowerShell for what is due (with every reading); `snapshot()` gives
+ * what is known now, with ages. Never throws; on any other platform it asks nothing and
+ * `snapshot()` is null. The PowerShell host is shared with the process list
+ * (src/win-processes.ts), so it is handed in and never stopped here.
  */
 export class WindowsSystemReader {
   private readonly host: Pick<PowerShellHost, 'request'>
@@ -185,8 +186,8 @@ export class WindowsSystemReader {
   private readonly statfs: StatFs
   private readonly platform: string
   private readonly spacePath: string
-  /** False while optional work should wait: disk traffic and the GPU are not asked for then, and
-   *  what they last read is carried until it is too old. */
+  /** False while optional work should wait: disk traffic, the GPU and the thermal zone are not
+   *  asked for then, and what they last read is carried until it is too old. */
   private readonly heavyAllowed: () => boolean
   private netCounters: { name: string; rx: number; tx: number; at: number } | null = null
   private net: Held<NetReading> | null = null
