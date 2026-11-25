@@ -22,6 +22,7 @@ export type FakeEvent = {
   pointerType?: string
   button?: number
   isPrimary?: boolean
+  buttons?: number
   detail?: number
 }
 

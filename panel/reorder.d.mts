@@ -4,6 +4,7 @@ export const DRAG_PX: number
 export const TOUCH_HOLD_MS: number
 export const TOUCH_SLOP_PX: number
 export const DROP_MS: number
+export const REVEAL_PX: number
 
 export function inOrder<T extends { id: string }>(machines: T[], order: string[] | null | undefined): T[]
 export function moved(ids: string[], id: string, to: number): string[]
@@ -18,6 +19,8 @@ export type OrderStore = {
 }
 
 export function createOrderStore(storage?: Pick<Storage, 'getItem' | 'setItem'> | null): Required<OrderStore>
+
+export function revealCard(root: ParentNode, card: Element | null, win?: Window | null): void
 
 type Box = { offsetLeft: number; offsetTop: number; offsetWidth: number; offsetHeight: number }
 export function targetIndex<T extends Box>(cards: T[], dragged: T, point: { x: number; y: number }): number

@@ -22,7 +22,7 @@ import { frameOf } from './charts.mjs'
 import { copyText, h, morphChildren, s, selectText } from './dom.mjs'
 import { FIRST_VERSIONED, HISTORY_SLOTS, INSTALL_SOURCE, MAX_CORES_DRAWN, SLOT_MS, toFleet } from './fleet-binding.mjs'
 import { createMotion } from './motion.mjs'
-import { createCardDrag, createOrderStore, inOrder, mergeOrder, moved } from './reorder.mjs'
+import { createCardDrag, createOrderStore, inOrder, mergeOrder, moved, revealCard } from './reorder.mjs'
 import { ago, agoShort, duration, fillAgo, gb, loads, pct, share, size, temperature } from './format.mjs'
 
 /** Where Orca pairs another machine. There is no host call that opens it, so the panel says where. */
@@ -316,7 +316,7 @@ function card(m, now, drag = { lifted: false, movable: false }) {
     'data-action': 'open',
     'data-id': m.id,
     'aria-label': cardAria(m, now),
-    'aria-keyshortcuts': drag.movable ? 'Alt+ArrowUp Alt+ArrowDown' : null
+    'aria-keyshortcuts': drag.movable ? 'Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight' : null
   }
   if (m.status === 'connecting') {
     return h(
@@ -1375,11 +1375,20 @@ export function mountFleetView(
     return `${name}, place ${ids.indexOf(id) + 1} of ${ids.length}`
   }
 
-  /** Keeps `ids` as the overview's order, said for screen readers. */
+  /** Keeps `ids` as the overview's order, said for screen readers as it now stands (a machine may
+   *  have come or gone while a card was dragged). */
   function keepOrder(id, ids) {
     ui.order = mergeOrder(ids, ui.order)
     orderStore.save(ui.order)
-    ui.orderSpoken = placeSpoken(id, ids)
+    ui.orderSpoken = placeSpoken(id, shownIds())
+  }
+
+  /** A draw that moves cards, with the page held where it was: Chromium scrolls it when a focused
+   *  card is moved (the CSS turns its scroll anchoring off in the grid too). */
+  function drawInPlace() {
+    const y = window.scrollY
+    draw()
+    if (window.scrollY !== y) window.scrollTo(0, y)
   }
 
   /** Alt and an arrow key: the focused card one place earlier (up, left) or later (down, right). */
@@ -1389,9 +1398,11 @@ export function mountFleetView(
     const to = Math.max(0, Math.min(ids.length - 1, at + by))
     if (at < 0 || to === at) return
     keepOrder(id, moved(ids, id, to))
-    draw()
-    // Moving a node can drop the focus held in it: it stays on the card.
-    focusSoon(`[data-action="open"][data-id="${CSS.escape(id)}"]`)
+    drawInPlace()
+    // Moving a node can drop the focus held in it: it stays on the card, which stays in view.
+    const selector = `[data-action="open"][data-id="${CSS.escape(id)}"]`
+    focusSoon(selector)
+    revealCard(root, root.querySelector(selector))
   }
 
   cardDrag = createCardDrag({
@@ -1404,12 +1415,12 @@ export function mountFleetView(
     begin(id) {
       const ids = shownIds()
       ui.drag = { id, from: ids, order: ids }
-      draw()
+      drawInPlace()
     },
     move(ids) {
       if (!ui.drag) return
       ui.drag.order = ids
-      draw()
+      drawInPlace()
     },
     end(commit) {
       const drag = ui.drag
@@ -1418,7 +1429,7 @@ export function mountFleetView(
       if (commit && drag && drag.order.join('\n') !== drag.from.join('\n')) keepOrder(drag.id, drag.order)
       // Called off from inside a draw (its card is gone): drawn again once that one is done.
       if (drawing) redraw = true
-      else draw()
+      else drawInPlace()
     }
   })
 

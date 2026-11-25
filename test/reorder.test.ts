@@ -262,7 +262,7 @@ describe('dragging a card', () => {
     const v = mount(viewOf(FLEET))
     assert.deepEqual(ids(v.root), ['local', 'env-a', 'env-b', 'env-c'])
     assert.deepEqual(v.store.saves, [])
-    assert.equal(cards(v.root)[0]!.getAttribute('aria-keyshortcuts'), 'Alt+ArrowUp Alt+ArrowDown')
+    assert.equal(cards(v.root)[0]!.getAttribute('aria-keyshortcuts'), 'Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight')
   })
 
   test('a mouse drags a card to a new place, which is kept; the release does not open it', () => {
@@ -515,7 +515,11 @@ describe('around a drag', () => {
     const frames: (() => void)[] = []
     const v = mount(viewOf(FLEET), memoryStore(), { frame: (fn) => frames.push(fn) })
     drag(v.root, 'local', { x: 150, y: 290 }, { release: false })
-    assert.ok(scrolls.length > 0 && scrolls.every((by) => by > 0), 'down, the closer the faster')
+    // 38 px into the bottom 48: about 0.8 of the most, 14 px a 60 Hz frame.
+    assert.deepEqual(scrolls, [12], 'down, the closer the faster')
+    ;(frames.shift() as (at?: number) => void)(1_000)
+    ;(frames.shift() as (at?: number) => void)(1_008)
+    assert.deepEqual(scrolls, [12, 12, 6], 'by time, not by frame: half as far in a frame half as long')
     for (let i = 0; i < 20 && frames.length > 0; i += 1) frames.shift()!()
     assert.equal(win.scrollY, 40)
     assert.equal(frames.length, 0, 'at the end it stops asking for frames')
@@ -563,5 +567,109 @@ describe('around a drag', () => {
     assert.equal(v.store.changed, null)
     drag(v.root, 'local', { x: 150, y: 400 })
     assert.deepEqual(v.store.saves, [], 'nothing drags once it is gone')
+  })
+})
+
+describe('fixes from the review of the first version', () => {
+  type FakeWindow = Record<string, unknown> & { scrollY: number }
+  const win = () => (globalThis as unknown as { window: FakeWindow }).window
+
+  test('a card that changes place never moves the page (Chromium scrolls to a moved, focused card)', () => {
+    column()
+    const w = win()
+    w.scrollY = 50
+    w.scrollTo = (_x: number, y: number) => {
+      w.scrollY = y
+    }
+    const proto = Object.getPrototypeOf(dom.root) as { insertBefore: (node: unknown, ref: unknown) => unknown }
+    const insert = proto.insertBefore
+    proto.insertBefore = function (this: FakeElement, node: unknown, ref: unknown) {
+      // What the browser does when a focused card is moved, or a card anchoring the scroll moves.
+      if ((node as FakeElement).getAttribute?.('data-action') === 'open' && (node as FakeElement).parentNode === this) w.scrollY += 44
+      return insert.call(this, node, ref)
+    }
+    try {
+      const v = mount(viewOf(FLEET))
+      const card = cardOf(v.root, 'env-a')
+      card.focus()
+      card.dispatchEvent({ type: 'keydown', target: card, key: 'ArrowDown', altKey: true, preventDefault: () => {} })
+      assert.deepEqual(ids(v.root), ['local', 'env-b', 'env-a', 'env-c'])
+      assert.equal(w.scrollY, 50, 'from the keyboard')
+      drag(v.root, 'env-c', { x: 150, y: 20 })
+      assert.deepEqual(ids(v.root)[0], 'env-c')
+      assert.equal(w.scrollY, 50, 'by drag')
+    } finally {
+      proto.insertBefore = insert
+    }
+  })
+
+  test('a card moved from the keyboard is scrolled into view, clear of the header', () => {
+    column()
+    const w = win()
+    const scrolls: number[] = []
+    w.innerHeight = 300
+    w.scrollBy = ({ top }: { top: number }) => void scrolls.push(top)
+    const v = mount(viewOf(FLEET))
+    const card = cardOf(v.root, 'env-b')
+    card.focus()
+    card.dispatchEvent({ type: 'keydown', target: card, key: 'ArrowDown', altKey: true, preventDefault: () => {} })
+    // Now last: 330–430 in a 300 px panel, with 8 px to spare.
+    assert.deepEqual(scrolls, [138])
+    // Scrolled down 300, the grid starts above the panel: the first place is under the header.
+    const grid = v.root.querySelector('.fm-grid') as FakeElement & { getBoundingClientRect?: () => unknown }
+    const header = v.root.querySelector('.fm-top') as FakeElement & { getBoundingClientRect?: () => unknown }
+    grid.getBoundingClientRect = () => ({ top: -300, bottom: 130, left: 0 })
+    header.getBoundingClientRect = () => ({ top: 0, bottom: 51, left: 0 })
+    const first = cardOf(v.root, 'env-a')
+    first.dispatchEvent({ type: 'keydown', target: first, key: 'ArrowUp', altKey: true, preventDefault: () => {} })
+    assert.deepEqual(ids(v.root)[0], 'env-a')
+    assert.deepEqual(scrolls, [138, -359], 'up to 8 px under the header')
+  })
+
+  test('a drag called off settles back from where the card was on screen, not from its old place', () => {
+    column()
+    const proto = Object.getPrototypeOf(dom.root) as Record<string, unknown>
+    const settles: string[] = []
+    proto.animate = function (this: FakeElement, keyframes: { transform: string }[]) {
+      settles.push(keyframes[0]!.transform)
+      return {}
+    }
+    try {
+      const v = mount(viewOf(FLEET), memoryStore(), { frame: () => 0, reducedMotion: () => false })
+      // Lifted to the third place (220), 20 px below it under the pointer, then Escape: home is 0.
+      drag(v.root, 'local', { x: 150, y: 290 }, { release: false })
+      assert.deepEqual(ids(v.root), ['env-a', 'env-b', 'local', 'env-c'])
+      v.root.dispatchEvent({ type: 'keydown', target: v.root, key: 'Escape', preventDefault: () => {} })
+      assert.deepEqual(settles, ['translate(0px, 240px)'])
+    } finally {
+      delete proto.animate
+    }
+  })
+
+  test('a mouse that moves with no button held has let go: a press is dropped, a drag ends there', () => {
+    column()
+    const v = mount(viewOf(FLEET))
+    const card = cardOf(v.root, 'local')
+    pointer(card, 'pointerdown', { x: 150, y: 50, buttons: 1 })
+    pointer(v.root, 'pointermove', { x: 150, y: 300, buttons: 0 })
+    assert.equal(card.hasAttribute('data-dragging'), false)
+    drag(v.root, 'local', { x: 150, y: 290 }, { release: false })
+    assert.equal(card.hasAttribute('data-dragging'), true)
+    pointer(v.root, 'pointermove', { x: 150, y: 290, buttons: 0 })
+    assert.equal(card.hasAttribute('data-dragging'), false)
+    assert.deepEqual(v.store.saves, [['env-a', 'env-b', 'local', 'env-c']])
+    pointer(card, 'pointerdown', { x: 150, y: 250, pointerType: 'touch', buttons: 0 })
+    pointer(v.root, 'pointermove', { x: 150, y: 252, pointerType: 'touch', buttons: 0 })
+    v.runTimers()
+    assert.equal(card.hasAttribute('data-dragging'), true, 'a finger reports no buttons while it holds')
+  })
+
+  test('the place said is counted among the cards as they stand when it is dropped', () => {
+    column()
+    const v = mount(viewOf(FLEET))
+    drag(v.root, 'local', { x: 150, y: 290 }, { release: false })
+    v.push(viewOf(FLEET.filter((m) => m.id !== 'env-c'), { seq: 2 }))
+    pointer(v.root, 'pointerup', { x: 150, y: 290 })
+    assert.equal(v.root.querySelector('[data-key="order-status"]')!.textContent, 'This desk, place 3 of 3')
   })
 })

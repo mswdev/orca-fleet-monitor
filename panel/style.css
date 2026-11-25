@@ -317,10 +317,12 @@ body {
   border-color: var(--fm-muted-fg);
 }
 /* A card is dragged to a new place (reorder.mjs): the grid is the cards' offset parent, so their
- * places are measured from it. The lifted card follows the pointer above the others, and below the
+ * places are measured from it, and no card in it anchors the page's scroll (a card changing place
+ * would scroll the page). The lifted card follows the pointer above the others, and below the
  * sticky header. A finger's long press lifts it rather than calling up the system's menu. */
 .fm-grid {
   position: relative;
+  overflow-anchor: none;
 }
 .fm-grid .fm-card {
   -webkit-touch-callout: none;
