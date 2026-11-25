@@ -12,7 +12,11 @@
 //             requests, the busiest GPU when there are several; none before Windows 10 1709
 //   battery   `bat` about once a minute: power line, charge, charging or not, time remaining
 //   temp      `temp` about every 30 s: the hottest ACPI thermal zone, which may not be the CPU's
-//             own sensor (see src/win-host.ts for why there is no GPU temperature)
+//             own sensor; and, on a computer with no battery, nvidia-smi.exe about every 30 s, run
+//             by itself rather than through PowerShell: the hottest NVIDIA GPU. A laptop's is not
+//             asked: its NVIDIA GPU sleeps while the integrated one works, and nvidia-smi would
+//             wake it, which Windows gives no plain way to tell beforehand. Other GPUs' sensors
+//             are only reached through native code (see src/win-host.ts)
 //   memory    `mem` every reading: what Task Manager's memory page shows besides "In use"
 //             (available, committed, cached, paged and non-paged pool)
 //
@@ -23,12 +27,15 @@
 // Cost (src/win-host.ts has the figures): once PowerShell is running, a refresh is answered in 10
 // to 50 ms, on a desktop with an RTX 4090 too, where `gpu` reads about 1,300 engine counters. The
 // GPU figure matched Windows' own counters and nvidia-smi under load there (50% against 50%).
+import path from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { diskSpaceOf, due, interfaceLabel, MAX_VOLUMES, plausibleTemp, realStatfs, SYSTEM_CADENCE, systemSnapshot, VOLUME_NAME_MAX, type Held, type StatFs } from './mac-system.ts'
+import { NVIDIA_SMI_ARGS, NVIDIA_SMI_MAX_BYTES, parseNvidiaSmiTemp } from './linux-system.ts'
+import { createRunBounded, type ExecFile, type ExecResult } from './mac-memory.ts'
+import { diskSpaceOf, due, heldTemp, interfaceLabel, MAX_VOLUMES, plausibleTemp, realStatfs, SYSTEM_CADENCE, systemSnapshot, VOLUME_NAME_MAX, type Held, type StatFs } from './mac-system.ts'
 
 export { interfaceLabel }
 import type { BatteryReading, MacSystem, NetReading, TempReading, WinMemory, VolumeReading } from './model.ts'
-import { PowerShellHost } from './win-host.ts'
+import { PowerShellHost, programFiles, systemRoot } from './win-host.ts'
 
 /** How long PowerShell has to answer one request. Long, because a slow answer costs nothing
  *  (readings are never waited for) while giving up kills PowerShell, and its first use of the
@@ -76,6 +83,27 @@ export function parseTempAnswer(answer: unknown): TempReading | null {
   const a = record(answer)
   const zone = a && typeof a.z === 'number' ? plausibleTemp(a.z - 273.15) : null
   return zone === null ? null : { cpuC: zone, gpuC: null, cpuZone: true }
+}
+
+/** Where NVIDIA's driver puts nvidia-smi.exe: System32 (drivers since 2019), else NVSMI under
+ *  Program Files (older ones). Run by its full path, so nothing on PATH can stand in for it. */
+export function nvidiaSmiPaths(env: NodeJS.ProcessEnv): string[] {
+  return [path.win32.join(systemRoot(env), 'System32', 'nvidia-smi.exe'), path.win32.join(programFiles(env), 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe')]
+}
+/** nvidia-smi's own runner, apart from every other reader's. */
+export const nvidiaRunBounded: ExecFile = createRunBounded()
+/** nvidia-smi starts its driver library each run: a few hundred ms, more the first time. */
+const NVIDIA_SMI_TIMEOUT_MS = 5_000
+/** Runs in a row that gave no temperature before nvidia-smi is asked only every
+ *  NVIDIA_RETRY_MS (a driver that cannot reach its GPU, or a run that times out). */
+export const NVIDIA_TRIES = 3
+export const NVIDIA_RETRY_MS = 10 * 60_000
+
+/** Whether nvidia-smi could not be started from `file` at all: it is not there (no NVIDIA
+ *  driver), or not this user's to run. */
+function isMissing(error: ExecResult['error']): boolean {
+  const code = error?.code
+  return code === 'ENOENT' || code === 'EACCES' || code === 'EPERM'
 }
 
 /** Physical memory or a commit limit beyond this is nonsense (Windows' limit is 128 TB). */
@@ -199,6 +227,14 @@ export class WindowsSystemReader {
   private gpuAsked = false
   private temp: Held<TempReading> | null = null
   private tempTriedAt = Number.NEGATIVE_INFINITY
+  /** nvidia-smi's hottest GPU (a computer with no battery only), the places it may be that are
+   *  still worth trying, and its runs in a row that gave no temperature. */
+  private nvidiaTemp: Held<number | null> | null = null
+  private nvidiaTriedAt = Number.NEGATIVE_INFINITY
+  private nvidiaPaths: string[]
+  private nvidiaFailures = 0
+  private readonly exec: ExecFile
+  private readonly childEnv: Record<string, string>
   private battery: Held<BatteryReading> | null = null
   private batteryTriedAt = Number.NEGATIVE_INFINITY
   private space: Held<{ total: number; used: number }> | null = null
@@ -216,6 +252,8 @@ export class WindowsSystemReader {
       platform?: string
       env?: NodeJS.ProcessEnv
       heavyAllowed?: () => boolean
+      /** Runs nvidia-smi (a test seam). */
+      exec?: ExecFile
     } = {}
   ) {
     this.platform = options.platform ?? process.platform
@@ -224,6 +262,11 @@ export class WindowsSystemReader {
     this.statfs = options.statfs ?? realStatfs
     this.spacePath = systemDriveRoot(options.env ?? process.env)
     this.heavyAllowed = options.heavyAllowed ?? (() => true)
+    this.exec = options.exec ?? nvidiaRunBounded
+    const env = options.env ?? process.env
+    this.nvidiaPaths = nvidiaSmiPaths(env)
+    // Its own environment, as qprocess has: a Windows program may not start without SystemRoot.
+    this.childEnv = Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string'))
   }
 
   /** Reads what is due. A refresh still running is joined, not started again. */
@@ -241,7 +284,7 @@ export class WindowsSystemReader {
   snapshot(): MacSystem | null {
     if (this.platform !== 'win32') return null
     const now = this.mono()
-    const system = systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery, temp: this.temp }, now)
+    const system = systemSnapshot({ net: this.net, diskIo: this.diskIo, space: this.space, volumes: this.volumes, gpu: this.gpu, battery: this.battery, temp: heldTemp(this.temp, this.nvidiaTemp, now) }, now)
     const memory = this.memory
     const age = memory ? Math.max(0, Math.round(now - memory.at)) : null
     if (!memory || age === null || age > WIN_MEMORY_MAX_AGE_MS) return system
@@ -263,6 +306,10 @@ export class WindowsSystemReader {
     if (due(this.volumesTriedAt, now, SYSTEM_CADENCE.spaceMs)) jobs.push(this.readVolumes(now))
     // Asked last, so no other reading waits behind a thermal zone that is slow to answer.
     if (heavy && due(this.tempTriedAt, now, SYSTEM_CADENCE.tempMs)) jobs.push(this.readTemp(now))
+    // Not through PowerShell, so it holds up none of its answers; only on a computer known to
+    // have no battery, whose NVIDIA GPU never sleeps for the integrated one.
+    const nvidiaEvery = this.nvidiaFailures >= NVIDIA_TRIES ? NVIDIA_RETRY_MS : SYSTEM_CADENCE.tempMs
+    if (heavy && this.battery?.value.present === false && this.nvidiaPaths.length > 0 && due(this.nvidiaTriedAt, now, nvidiaEvery)) jobs.push(this.readNvidia(now))
     await Promise.all(jobs)
   }
 
@@ -338,6 +385,24 @@ export class WindowsSystemReader {
     this.tempTriedAt = now
     const temp = parseTempAnswer(await this.ask('temp'))
     if (temp) this.temp = { value: temp, at: this.mono() }
+  }
+
+  /** The hottest NVIDIA GPU, from the first place nvidia-smi is. One that is not there is not
+   *  tried again; with none left, nvidia-smi is never run. */
+  private async readNvidia(now: number): Promise<void> {
+    this.nvidiaTriedAt = now
+    while (this.nvidiaPaths.length > 0) {
+      const out = await this.exec(this.nvidiaPaths[0]!, NVIDIA_SMI_ARGS, { timeout: NVIDIA_SMI_TIMEOUT_MS, maxBuffer: NVIDIA_SMI_MAX_BYTES, env: this.childEnv })
+      if (isMissing(out.error)) {
+        this.nvidiaPaths.shift()
+        continue
+      }
+      const c = out.error ? null : parseNvidiaSmiTemp(out.stdout)
+      this.nvidiaFailures = c === null ? this.nvidiaFailures + 1 : 0
+      // A run that gives nothing carries the last figure until it is too old.
+      if (c !== null) this.nvidiaTemp = { value: c, at: this.mono() }
+      return
+    }
   }
 
   private async readBattery(now: number): Promise<void> {

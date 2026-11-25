@@ -40,6 +40,7 @@ import { createRunBounded, type ExecFile } from './mac-memory.ts'
 import {
   diskSpaceOf,
   due,
+  heldTemp,
   heldVolumes,
   interfaceLabel,
   MAX_VOLUMES,
@@ -92,7 +93,7 @@ export const REFRESH_DEADLINE_MS = 5_000
 /** `nvidia-smi` wakes the driver first on a server without persistence mode, which takes seconds. */
 const TIMEOUT_MS = 5_000
 /** `nvidia-smi` prints one short line for each GPU. */
-const NVIDIA_SMI_MAX_BYTES = 4 * 1024
+export const NVIDIA_SMI_MAX_BYTES = 4 * 1024
 /** This reader's own bounded runner, apart from the memory reads' (src/mac-memory.ts). */
 export const linuxSystemRunBounded: ExecFile = createRunBounded()
 /** The most a file read here may hold. The kernel's own are a few KB; /etc/passwd
@@ -396,24 +397,6 @@ export function hwmonTemps(chips: readonly HwmonChip[]): { cpuC: number | null; 
   return { cpuC: cpu, gpuC: gpu }
 }
 
-/**
- * The temperatures at `now`, from the sensors' read and nvidia-smi's (the GPU part's), each left
- * out once older than SYSTEM_MAX_AGE.tempMs; the GPU the hotter of the two. As old as the older
- * of the reads it takes a figure from.
- */
-export function heldTemp(sensors: Held<{ cpuC: number | null; gpuC: number | null }> | null, nvidia: Held<number | null> | null, now: number): Held<TempReading> | null {
-  const young = <T>(part: Held<T> | null): Held<T> | null => (part && Math.max(0, now - part.at) <= SYSTEM_MAX_AGE.tempMs ? part : null)
-  const s = young(sensors)
-  const n = young(nvidia)
-  const cpuC = s?.value.cpuC ?? null
-  const sensorGpu = s?.value.gpuC ?? null
-  const nvidiaC = n?.value ?? null
-  const gpuC = sensorGpu === null ? nvidiaC : nvidiaC === null ? sensorGpu : Math.max(sensorGpu, nvidiaC)
-  if (cpuC === null && gpuC === null) return null
-  const from = [cpuC !== null || sensorGpu !== null ? s : null, nvidiaC !== null ? n : null].flatMap((p) => (p ? [p.at] : []))
-  return { value: { cpuC, gpuC }, at: Math.min(...from) }
-}
-
 /** Whether a thermal zone's `type` is the CPU's: Intel's package (`x86_pkg_temp`) or a SoC's. */
 export function isCpuZone(type: unknown): boolean {
   if (typeof type !== 'string') return false
@@ -708,7 +691,7 @@ export class LinuxSystemReader {
   private gpu: Held<number> | null = null
   private gpuTriedAt = Number.NEGATIVE_INFINITY
   /** The hwmon chips' and thermal zones' figures, from the temperature part. */
-  private sensorTemp: Held<{ cpuC: number | null; gpuC: number | null }> | null = null
+  private sensorTemp: Held<TempReading> | null = null
   private tempTriedAt = Number.NEGATIVE_INFINITY
   /** nvidia-smi's hottest GPU, from the GPU part, which asks it in the run for its utilisation. */
   private nvidiaTemp: Held<number | null> | null = null

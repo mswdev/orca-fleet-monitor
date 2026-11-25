@@ -42,7 +42,8 @@
 //          counters: often the motherboard's zone, not the CPU's own sensor, which Windows does
 //          not give without elevation. The GPU's own sensor, which Task Manager shows, is only
 //          reached through native code (D3DKMTQueryAdapterInfo), which would mean compiling C#
-//          from this PowerShell: security tools take that for an attack, so it is not read
+//          from this PowerShell: security tools take that for an attack, so it is not asked here.
+//          An NVIDIA GPU's comes from nvidia-smi instead (src/win-system.ts)
 //   proc   every process from one read of the "Process" counters: pid, parent pid, name,
 //          cumulative CPU time, private working set and start time
 //
@@ -316,14 +317,26 @@ function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   return key === undefined ? undefined : env[key]
 }
 
-/** The Windows folder: `SystemRoot`, else `windir`, when it is a plain path on a lettered drive;
- *  `C:\Windows` otherwise. */
-export function systemRoot(env: NodeJS.ProcessEnv): string {
-  for (const name of ['SystemRoot', 'windir']) {
+/** The first of the variables `names` that is a plain path on a lettered drive; `fallback`
+ *  otherwise. */
+function folderOf(env: NodeJS.ProcessEnv, names: readonly string[], fallback: string): string {
+  for (const name of names) {
     const value = readEnv(env, name)
     if (value !== undefined && /^[A-Za-z]:\\[^/:*?"<>|\u0000-\u001f]*$/.test(value) && value.length <= 200) return value
   }
-  return DEFAULT_SYSTEM_ROOT
+  return fallback
+}
+
+/** The Windows folder: `SystemRoot`, else `windir`, when it is a plain path on a lettered drive;
+ *  `C:\Windows` otherwise. */
+export function systemRoot(env: NodeJS.ProcessEnv): string {
+  return folderOf(env, ['SystemRoot', 'windir'], DEFAULT_SYSTEM_ROOT)
+}
+
+/** The 64-bit Program Files folder: `ProgramW6432`, else `ProgramFiles`, as systemRoot checks
+ *  them; `C:\Program Files` otherwise. */
+export function programFiles(env: NodeJS.ProcessEnv): string {
+  return folderOf(env, ['ProgramW6432', 'ProgramFiles'], 'C:\\Program Files')
 }
 
 /** Windows PowerShell by its full path, so that nothing on PATH can stand in for it. */

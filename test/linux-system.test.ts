@@ -4,7 +4,6 @@
 import { fileURLToPath } from 'node:url'
 import { assert, describe, test } from 'orca/testing'
 import {
-  heldTemp,
   hwmonTemps,
   isCpuZone,
   isLinuxInterfaceName,
@@ -30,7 +29,7 @@ import {
   REFRESH_DEADLINE_MS
 } from '../src/linux-system.ts'
 import type { ExecFile } from '../src/mac-memory.ts'
-import { SYSTEM_CADENCE, SYSTEM_MAX_AGE } from '../src/mac-system.ts'
+import { heldTemp, SYSTEM_CADENCE, SYSTEM_MAX_AGE } from '../src/mac-system.ts'
 import type { SystemReader } from '../src/sampler.ts'
 import { fixtureText, flush } from './helpers.ts'
 

@@ -106,8 +106,9 @@ export type GpuReading = {
 /** The CPU's and the GPU's temperature, in whole °C, each null where it could not be read (1.5).
  *  A Mac: the SMC, the hottest CPU core and the hottest GPU sensor of its chip's keys. Linux:
  *  hwmon (`coretemp`, `k10temp`, a SoC's zones; `amdgpu`, `nouveau`, `i915`, `xe`) and
- *  `nvidia-smi`. Windows: the hottest ACPI thermal zone (`cpuZone`), and no GPU. Only
- *  TEMP_MIN_C to TEMP_MAX_C (src/mac-system.ts) is kept. */
+ *  `nvidia-smi`. Windows: the hottest ACPI thermal zone (`cpuZone`), and on a computer with no
+ *  battery an NVIDIA GPU's, from `nvidia-smi`. Only TEMP_MIN_C to TEMP_MAX_C (src/mac-system.ts)
+ *  is kept. */
 export type TempReading = {
   cpuC: number | null
   gpuC: number | null
